@@ -141,6 +141,19 @@ def _apply_windows_style(hwnd: int, blur: str) -> bool:
         return False
 
 
+def _round_window(hwnd: int, width: int, height: int, radius: float) -> None:
+    """Clip the window (and the blur behind it) to a rounded rectangle, in physical pixels."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    gdi32, user32 = ctypes.WinDLL("gdi32"), ctypes.WinDLL("user32")
+    d = max(2, int(round(radius * 2)))
+    region = gdi32.CreateRoundRectRgn(0, 0, width + 1, height + 1, d, d)
+    # The system owns the region after this call; don't delete it.
+    user32.SetWindowRgn(ctypes.c_void_p(hwnd), ctypes.c_void_p(region), True)
+
+
 # -- background I/O ----------------------------------------------------------------------
 class Poller(QObject):
     status = Signal(object)
@@ -229,6 +242,17 @@ class VoiceWidget(QWidget):
         if not getattr(self, "_styled", False):
             self._styled = True
             self.glass = _apply_windows_style(int(self.winId()), self.blur_mode)
+            self._update_region()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_region()
+
+    def _update_region(self) -> None:
+        if not getattr(self, "_styled", False):
+            return
+        dpr = self.devicePixelRatioF()
+        _round_window(int(self.winId()), round(self.width() * dpr), round(self.height() * dpr), RADIUS * dpr)
 
     def _restore_position(self) -> None:
         screen = QApplication.primaryScreen().availableGeometry()

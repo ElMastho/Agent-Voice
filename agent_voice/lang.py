@@ -39,14 +39,16 @@ def _heuristic(text: str) -> str | None:
 
 def detect(text: str, fallback: str = "en") -> str:
     words = len(text.split())
-    if words < 4:
-        return _heuristic(text) or fallback
+    short = words < 4
+    if short and _heuristic(text):
+        return _heuristic(text)
     det = _detector()
     if det is None:
         return _heuristic(text) or fallback
     conf = {c.language.iso_code_639_1.name.lower(): c.value for c in det.compute_language_confidence_values(text)}
     fr, en = conf.get("fr", 0.0), conf.get("en", 0.0)
-    if abs(fr - en) < 0.2:
+    # Short phrases need a clearer margin before we trust the statistics.
+    if abs(fr - en) < (0.4 if short else 0.2):
         return _heuristic(text) or fallback
     return "fr" if fr > en else "en"
 

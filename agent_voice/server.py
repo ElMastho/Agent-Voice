@@ -282,20 +282,42 @@ def _handler(daemon: Daemon):
             self.wfile.write(body)
 
         def _body(self) -> dict:
-            length = int(self.headers.get("Content-Length") or 0)
-            if not length:
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return {}
+            if not 0 < length <= 1_000_000:  # replies are capped anyway; refuse huge bodies
                 return {}
             try:
                 return json.loads(self.rfile.read(length).decode("utf-8"))
             except (ValueError, UnicodeDecodeError):
                 return {}
 
+        def _allowed(self, post: bool) -> bool:
+            """Only local programs (hooks, CLI) may talk to the daemon, never a web page.
+
+            - Browsers always send Origin on cross-site POSTs; our client never does.
+            - The Host check defeats DNS rebinding (evil.com resolving to 127.0.0.1).
+            - Requiring application/json forces a CORS preflight, which we never answer.
+            """
+            port = self.server.server_address[1]
+            host_ok = self.headers.get("Host", "") in (f"127.0.0.1:{port}", f"localhost:{port}")
+            json_ok = not post or self.headers.get("Content-Type", "").startswith("application/json")
+            if host_ok and json_ok and "Origin" not in self.headers:
+                return True
+            self._json(403, {"error": "forbidden"})
+            return False
+
         def do_GET(self):
+            if not self._allowed(post=False):
+                return None
             if self.path == "/status":
                 return self._json(200, daemon.status())
             self._json(404, {"error": "not found"})
 
         def do_POST(self):
+            if not self._allowed(post=True):
+                return None
             data = self._body()
             if self.path == "/speak":
                 # Answer immediately so hooks never wait on text processing.

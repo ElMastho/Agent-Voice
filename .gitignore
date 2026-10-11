@@ -3,3 +3,15 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 samples/
+*.pyc
+.env
+.env.*
+*.log
+logs/
+*.wav
+*.onnx
+*.onnx.json
+dist/
+build/
+.vscode/
+.idea/

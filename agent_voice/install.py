@@ -54,7 +54,7 @@ def claude(remove: bool = False) -> str:
     settings = _read_json(path)
     _backup(path)
     hooks = settings.setdefault("hooks", {})
-    events = ("Stop", "PreToolUse", "UserPromptSubmit")
+    events = ("Stop", "PreToolUse", "UserPromptSubmit", "Notification")
     for event in events:
         hooks[event] = _strip_ours(hooks.get(event, []))
     if not remove:
@@ -64,6 +64,8 @@ def claude(remove: bool = False) -> str:
         hooks["PreToolUse"].append({"matcher": "*", "hooks": [{**entry, "async": True}]})
         # Records the prompt's window and silences the voice as you send a new message.
         hooks["UserPromptSubmit"].append({"hooks": [{**entry, "timeout": 5}]})
+        # Permission prompts: a chime in chime mode.
+        hooks["Notification"].append({"hooks": [{**entry, "timeout": 5, "async": True}]})
     for event in events:
         if not hooks[event]:
             del hooks[event]

@@ -39,6 +39,8 @@ DEFAULTS: dict = {
         # Hands-free mode: everything you say is sent automatically (Enter pressed for you).
         "hands_free": "ctrl+alt+h",
         "mute": "ctrl+alt+m",
+        # Chime mode: no voice, no mic, just a soft sound when the agent is done or needs you.
+        "chime": "ctrl+alt+c",
         "read_selection": "ctrl+alt+r",
         # Show / hide the floating widget (also from the tray icon).
         "widget": "ctrl+alt+w",
@@ -63,8 +65,11 @@ DEFAULTS: dict = {
         "window_seconds": 15,
         # A pause this long ends your reply.
         "silence_seconds": 1.5,
-        "max_seconds": 90,
+        # Safety cap only: a long reply must never be cut mid-sentence.
+        "max_seconds": 600,
     },
+    # Chime mode sounds (0.0-1.0). Kept low so they don't disturb people around you.
+    "chime": {"volume": 0.35},
 }
 
 

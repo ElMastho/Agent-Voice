@@ -34,6 +34,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
     p = sub.add_parser("handsfree", help="hands-free mode: voice replies are sent automatically (default: toggle)")
     p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
+    p = sub.add_parser("chime", help="chime mode: no voice, a soft sound when the agent is done or needs you (default: toggle)")
+    p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
 
     p = sub.add_parser("hook", help="entry point used by agent hooks")
     p.add_argument("agent", help="claude | codex | gemini | cursor | generic")
@@ -101,6 +103,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "handsfree":
         result = client.request("/handsfree", {"mode": args.mode})
         print("not running" if result is None else f"hands-free {'on' if result['hands_free'] else 'off'}")
+        return 0 if result else 1
+    if args.cmd == "chime":
+        result = client.request("/chime", {"mode": args.mode})
+        print("not running" if result is None else f"chime mode {'on' if result['chime'] else 'off (voice)'}")
         return 0 if result else 1
     if args.cmd in ("mute", "unmute"):
         mode = "off" if args.cmd == "unmute" else args.mode

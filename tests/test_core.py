@@ -110,3 +110,26 @@ def test_speech_waits_while_mic_is_held(monkeypatch):
     sp.release()
     time.sleep(0.2)
     assert len(played) == 1
+
+
+def test_chime_is_soft_and_short():
+    from agent_voice.server import chime_audio
+
+    for kind in ("done", "attention"):
+        audio, rate = chime_audio(kind, volume=0.35)
+        assert 0.3 < abs(audio).max() <= 0.35 + 1e-6
+        assert len(audio) / rate < 2.0
+
+
+def test_claude_hooks_ring_when_attention_is_needed(monkeypatch, tmp_path):
+    import json
+
+    monkeypatch.setattr(hooks, "SESSIONS_DIR", tmp_path)
+    sent = []
+    monkeypatch.setattr(hooks.client, "request", lambda path, payload=None, timeout=2.0: sent.append(path))
+    monkeypatch.setattr(hooks.client, "speak", lambda *a, **k: None)
+    hooks.hook_claude(json.dumps({"hook_event_name": "Notification", "message": "Claude needs your permission to use Bash"}))
+    hooks.hook_claude(json.dumps({"hook_event_name": "Notification", "message": "Claude is waiting for your input"}))
+    hooks.hook_claude(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "session_id": "t"}))
+    hooks.hook_claude(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "session_id": "t"}))
+    assert sent == ["/notify", "/notify"]

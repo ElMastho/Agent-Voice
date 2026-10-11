@@ -38,6 +38,9 @@ SUMMARY_INSTRUCTION = (
     "language of your reply, saying what happened and anything the user must do next>`. "
     "Do not add it to intermediate messages."
 )
+# Tools that stop and wait for the user: worth a chime even when nothing is spoken.
+ATTENTION_TOOLS = {"AskUserQuestion", "ExitPlanMode"}
+
 _SUMMARY_LINE = re.compile(r"^[\s>*_`#-]*voice summary\s*:[\s*_`]*(.+?)[\s*_`]*$", re.I | re.M)
 
 
@@ -226,6 +229,13 @@ def hook_claude(raw: str) -> None:
             out = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": SUMMARY_INSTRUCTION}}
             sys.stdout.write(json.dumps(out))
         return
+    if event == "Notification":
+        # Permission prompts and "waiting for your input"; the daemon only rings in chime mode.
+        if "permission" in str(data.get("message", "")).lower():
+            client.request("/notify", {"kind": "attention"}, timeout=1.0)
+        return
+    if event == "PreToolUse" and data.get("tool_name") in ATTENTION_TOOLS:
+        client.request("/notify", {"kind": "attention"}, timeout=1.0)
     if event == "PreToolUse" and not load_config().get("speak_progress", True):
         return
     texts: list[str] = []

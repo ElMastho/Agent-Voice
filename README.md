@@ -84,12 +84,14 @@ Then open a **new** Claude Code session and ask it anything. You'll hear the ans
 
 <img align="right" src="docs/images/panel.jpg" alt="Expanded widget with all actions" width="330">
 
-Open the chevron for **every action with its shortcut**: reply now, hold to talk, stop, auto-send, mute, read selection. The bottom line shows the last thing it heard from you, with its language, so you can trust the transcription at a glance.
+Open the chevron for **every action with its shortcut**: reply now, hold to talk, stop, auto-send, mute, read selection, plus the voice speed and the **Voice / Chimes** mode. The **Recent** list shows the last 5 things it heard from you, with their language: click one to copy it again.
 
 - **Drag** it anywhere: it snaps to screen edges and remembers its place.
 - **Discreet**: it fades when idle and lights up when something happens.
 - **Never steals focus**: clicking it keeps your agent window active.
 - **Hide / show**: `Ctrl+Alt+W`, a click on the tray icon, or right-click → *Hide widget*.
+- **Compact**: right-click → *Compact (orb only)* shrinks it to the animated orb; a click on it talks / cancels / skips.
+- **Replies go back to your agent**: dictated replies are typed into the window you last prompted from, even if it is minimized or behind another app; once sent (auto-send), you're returned to where you were. The text also stays on the clipboard.
 - **Tray menu**: every action, auto-send/mute toggles, start/stop the service, *Start with Windows*.
 
 <br clear="right">
@@ -103,6 +105,7 @@ Open the chevron for **every action with its shortcut**: reply now, hold to talk
 | `Ctrl+Alt+S` | **Stop** speaking / listening |
 | `Ctrl+Alt+H` | **Auto-send** on/off (the voice confirms) |
 | `Ctrl+Alt+M` | **Mute** on/off |
+| `Ctrl+Alt+C` | **Chime mode** on/off: no voice, a soft sound when the agent is done or needs you |
 | `Ctrl+Alt+R` | **Read** the selected text aloud |
 | `Ctrl+Alt+W` | **Show / hide** the widget |
 
@@ -175,7 +178,8 @@ sequenceDiagram
 | `speak_progress` | `true` | Also speak Claude's messages between tool calls |
 | *(runtime)* speed | `1.5×` | Voice speed 1× to 2×: widget panel, tray → *Voice speed*, or `agent-voice speed 1.75` |
 | `summary` | `enabled: true`, `max_chars: 280` | Speak a one-sentence summary of final answers (runtime toggle: tray or `agent-voice summary`) |
-| `auto_listen` | `enabled`, 15 s window, 1.5 s silence, 90 s max | Mic after the final answer |
+| `auto_listen` | `enabled`, 15 s window, 1.5 s silence, 600 s max | Mic after the final answer |
+| `chime.volume` | `0.35` | Chime mode loudness (0 to 1): a rising chime when done, a double one for questions and permissions |
 | `stt.model` | `small` | Whisper size: `base` is faster, `small` is better in French |
 | `widget` | `enabled: true`, `blur: "acrylic"` | `blur`: `acrylic` / `blur` / `none` |
 | `hotkeys.*` | see above | Any [keyboard](https://github.com/boppreh/keyboard) combination |
@@ -188,6 +192,7 @@ Restart after editing: `agent-voice shutdown && agent-voice start`.
 agent-voice start | shutdown | status          run / stop / inspect the background service
 agent-voice say "text" [--lang fr|en] [--voice NAME]
 agent-voice stop | mute [on|off|toggle] | unmute | handsfree [on|off|toggle] | summary [on|off|toggle] | speed [1-2]
+agent-voice chime [on|off|toggle]               chime mode: sounds only, for open-plan offices
 agent-voice widget                              reopen the widget + tray icon
 agent-voice install | uninstall [claude codex gemini cursor | all]
 agent-voice autostart on|off                    start with Windows

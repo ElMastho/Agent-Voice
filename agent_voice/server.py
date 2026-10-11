@@ -29,6 +29,29 @@ def _beep(freq: int, ms: int = 90) -> None:
 
 SPEEDS = (1.0, 1.25, 1.5, 1.75, 2.0)
 
+# Chime mode: (frequency Hz, start s) notes. "done" rises, "attention" asks twice.
+CHIMES = {
+    "done": ((659.25, 0.0), (987.77, 0.13)),
+    "attention": ((880.0, 0.0), (1174.66, 0.16), (880.0, 0.42), (1174.66, 0.58)),
+}
+
+
+def chime_audio(kind: str, volume: float = 0.35, rate: int = 44100):
+    """A soft bell-like jingle: sine + a quiet octave, fast attack, exponential decay."""
+    import numpy as np
+
+    notes = CHIMES.get(kind, CHIMES["done"])
+    length = notes[-1][1] + 0.9
+    t = np.arange(int(rate * length)) / rate
+    out = np.zeros_like(t, dtype=np.float32)
+    for freq, start in notes:
+        u = t - start
+        on = u >= 0
+        env = np.where(on, np.minimum(u / 0.008, 1.0) * np.exp(-np.clip(u, 0, None) * 5.5), 0.0)
+        out += (env * (np.sin(2 * np.pi * freq * u) + 0.25 * np.sin(4 * np.pi * freq * u))).astype(np.float32)
+    peak = float(np.max(np.abs(out))) or 1.0
+    return (out / peak * max(0.0, min(1.0, volume))).astype(np.float32), rate
+
 
 class Daemon:
     def __init__(self, config: dict):
@@ -48,12 +71,16 @@ class Daemon:
         self._listen_cancel = threading.Event()
         self._listening = False
         # Window the user last sent a prompt from (where replies are typed back).
-        self._target_hwnd = 0
+        # Persisted so a daemon restart doesn't send the next reply to whatever app is in front.
+        saved = int(self.state.get("target_hwnd") or 0)
+        self._target_hwnd = saved if winfocus.is_window(saved) else 0
         # What the mic is doing, for the widget: "" | waiting | recording | transcribing
         self._mic_phase = ""
         self.level = 0.0
         self.last_heard = ""
         self.last_heard_lang = ""
+        # Last few transcriptions, newest first, so a reply can be copied again from the widget.
+        self.history: list[dict] = list(self.state.get("history") or [])[:5]
         self._ptt_release = threading.Event()
         # Bumped by the show/hide hotkey; the widget toggles when it sees the number change.
         self.widget_toggles = 0
@@ -113,6 +140,37 @@ class Daemon:
         if not self.speaker.busy and not self.muted:
             self.speaker.speak(f"Speed {x:g}.", "en")
 
+    @property
+    def chime(self) -> bool:
+        return bool(self.state.get("chime"))
+
+    def set_chime(self, on: bool) -> None:
+        self.state["chime"] = on
+        save_state(self.state)
+        log.info("chime=%s", on)
+        self.stop()  # no voice and no open mic in chime mode
+        if on:
+            self.play_chime("done")
+        elif not self.muted:
+            self.speaker.speak("Voice mode.", "en")
+
+    def play_chime(self, kind: str) -> None:
+        if self.muted:
+            return
+        import sounddevice as sd
+
+        try:
+            audio, rate = chime_audio(kind, float(self.config.get("chime", {}).get("volume", 0.35)))
+            sd.play(audio, rate)
+        except Exception:
+            log.exception("chime failed")
+
+    def notify(self, kind: str) -> None:
+        """The agent needs you (a question, a permission, a plan to approve)."""
+        log.info("notify kind=%s chime=%s", kind, self.chime)
+        if self.chime:
+            self.play_chime("attention")
+
     def set_muted(self, muted: bool) -> None:
         self.state["muted"] = muted
         save_state(self.state)
@@ -133,6 +191,12 @@ class Daemon:
     ) -> int:
         """Queue text; `final` marks the end of an agent's turn and arms auto-listen."""
         if self.muted:
+            return 0
+        if self.chime:
+            # Sounds only: progress is silent, the end of a turn rings, the mic stays closed.
+            log.info("speak source=%s chime=%s final=%s", source, final, final)
+            if final:
+                self.play_chime("done")
             return 0
         if interrupt:
             self.speaker.stop()
@@ -167,11 +231,16 @@ class Daemon:
 
     def _heard(self, text: str, lang: str) -> None:
         self.last_heard, self.last_heard_lang = text, lang
+        self.history = [{"text": text, "lang": lang, "at": round(time.time())}, *self.history][:5]
+        self.state["history"] = self.history
+        save_state(self.state)
 
     def prompt_submitted(self, hwnd: int) -> None:
         """The user sent a new prompt: remember its window, and stop talking/listening."""
-        if hwnd:
+        if hwnd and hwnd != self._target_hwnd:
             self._target_hwnd = hwnd
+            self.state["target_hwnd"] = hwnd
+            save_state(self.state)
         self.stop()
 
     # -- auto-listen ------------------------------------------------------------
@@ -236,16 +305,29 @@ class Daemon:
         import pyperclip
 
         self._wait_modifiers_released()
+        # Where you were: once the reply is sent we hand the screen back to it.
+        came_from = winfocus.foreground()
+        was_minimized = winfocus.is_minimized(hwnd)
+        switched = bool(hwnd) and came_from != hwnd
         if hwnd and not winfocus.focus(hwnd):
-            log.warning("could not focus target window %s (%s)", hwnd, winfocus.title(hwnd))
+            # Don't type into whatever app is in front: leave the text on the clipboard instead.
+            log.warning("could not focus target window %s (%s); text left on clipboard", hwnd, winfocus.title(hwnd))
+            pyperclip.copy(text)
+            _beep(300, 150)
+            return
         time.sleep(0.1)
-        previous = pyperclip.paste()
+        # The text stays on the clipboard afterwards, so a reply that landed in the wrong place
+        # can always be pasted again by hand.
         pyperclip.copy(text)
         keyboard.send("ctrl+v")
         time.sleep(0.3)
         if submit:
             keyboard.send("enter")
-        pyperclip.copy(previous)
+        if submit and switched and came_from:
+            time.sleep(0.2)  # let the agent window register the Enter
+            if was_minimized:
+                winfocus.minimize(hwnd)
+            winfocus.focus(came_from)
 
     def phase(self) -> str:
         if self._mic_phase:
@@ -264,8 +346,10 @@ class Daemon:
             "widget_toggles": self.widget_toggles,
             "last_heard": self.last_heard[-160:],
             "last_heard_lang": self.last_heard_lang,
+            "history": self.history,
             "muted": self.muted,
             "hands_free": self.hands_free,
+            "chime": self.chime,
             "summary": self.summary,
             "speed_x": self.speed_x,
             "speaking": self.speaker.busy,
@@ -292,6 +376,8 @@ class Daemon:
             keyboard.add_hotkey(hk["hands_free"], lambda: self.set_hands_free(not self.hands_free))
         if hk.get("mute"):
             keyboard.add_hotkey(hk["mute"], lambda: self.set_muted(not self.muted))
+        if hk.get("chime"):
+            keyboard.add_hotkey(hk["chime"], lambda: self.set_chime(not self.chime))
         if hk.get("read_selection"):
             keyboard.add_hotkey(hk["read_selection"], lambda: threading.Thread(target=self._read_selection, daemon=True).start())
         if hk.get("push_to_talk") and self.config["stt"].get("enabled"):
@@ -367,7 +453,7 @@ class Daemon:
             self._mic_phase = "recording"
             _beep(660, 60)
             # Safety net: a lost "release" (widget closed mid-press) must not record forever.
-            self._ptt_release.wait(timeout=120)
+            self._ptt_release.wait(timeout=600)
             audio = rec.stop()
             _beep(520, 60)
             self._mic_phase = "transcribing"
@@ -481,6 +567,13 @@ def _handler(daemon: Daemon):
                 mode = data.get("mode", "toggle")
                 daemon.set_hands_free(not daemon.hands_free if mode == "toggle" else mode == "on")
                 return self._json(200, {"hands_free": daemon.hands_free})
+            if self.path == "/chime":
+                mode = data.get("mode", "toggle")
+                daemon.set_chime(not daemon.chime if mode == "toggle" else mode == "on")
+                return self._json(200, {"chime": daemon.chime})
+            if self.path == "/notify":
+                daemon.notify(str(data.get("kind", "attention")))
+                return self._json(200, {"ok": True})
             if self.path == "/mute":
                 mode = data.get("mode", "toggle")
                 daemon.set_muted(not daemon.muted if mode == "toggle" else mode == "on")

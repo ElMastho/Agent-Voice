@@ -148,7 +148,12 @@ def render_states() -> None:
 
 
 def render_panel() -> None:
-    st = status("idle", hands_free=True, last_heard="Can you add tests for the server?", last_heard_lang="en")
+    history = [
+        {"text": "Can you add tests for the server?", "lang": "en"},
+        {"text": "Rename the config loader and update the README.", "lang": "en"},
+        {"text": "Peux-tu relancer le widget ?", "lang": "fr"},
+    ]
+    st = status("idle", hands_free=True, last_heard=history[0]["text"], last_heard_lang="en", history=history)
     w = make_widget(st, expanded=True)
     settle(w)
     w.hover = "reply"

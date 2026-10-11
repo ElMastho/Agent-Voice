@@ -35,9 +35,14 @@ from agent_voice.config import HOME, load_config
 
 WIDTH = 320
 BAR_H = 64
-EXPANDED_H = 274
 SPEEDS = (1.0, 1.25, 1.5, 1.75, 2.0)
 SPEED_Y = BAR_H + 10 + 2 * 58 + 8 + 6  # top of the speed row
+MODES = (("voice", "Voice"), ("chime", "Chimes"))
+MODE_Y = SPEED_Y + 26 + 8  # top of the mode row
+HIST_Y = MODE_Y + 26 + 10  # top of the "Recent" list
+HIST_ROWS, ROW_H = 5, 22
+EXPANDED_H = HIST_Y + 16 + HIST_ROWS * ROW_H + 8
+COMPACT = 56  # compact mode: just the orb
 # Matches Windows 11's native window rounding (DWMWCP_ROUND = 8 px), the only rounding that
 # also clips the acrylic blur; any other radius leaves blurred square corners showing.
 RADIUS = 8
@@ -54,6 +59,9 @@ ICONS = {
     "mute": "",
     "read": "",
     "power": "",
+    "bell": "",
+    "copy": "",
+    "check": "",
     "down": "",
     "up": "",
 }
@@ -233,9 +241,13 @@ class VoiceWidget(QWidget):
         self.flash = 0.0  # ripple when the phase changes
         self.hover_t: dict[str, float] = {}  # eased hover amount per button
         self.speed_pos: float | None = None  # animated index of the speed indicator
+        self.mode_pos: float | None = None  # same for the voice/chime switch
         self.prev_title = ""
         self.title_t = 1.0  # title crossfade progress
         self.expanded = False
+        self.compact = False
+        self._copied: str | None = None  # history row just copied, for a brief confirmation
+        self._copied_at = 0.0
         self.hover: str | None = None
         self.pressed: str | None = None
         self._drag_from: QPointF | None = None
@@ -280,6 +292,7 @@ class VoiceWidget(QWidget):
             pos = json.loads(POS_FILE.read_text(encoding="utf-8"))
             x, y = int(pos["x"]), int(pos["y"])
             self.expanded = bool(pos.get("expanded", False))
+            self.compact = bool(pos.get("compact", False))
             self.start_hidden = bool(pos.get("hidden", False))
         except (OSError, ValueError, KeyError):
             x, y = screen.right() - WIDTH - 16, screen.top() + 64
@@ -287,12 +300,19 @@ class VoiceWidget(QWidget):
         if not any(s.availableGeometry().adjusted(-40, -40, 40, 40).contains(x, y) for s in QApplication.screens()):
             x, y = screen.right() - WIDTH - 16, screen.top() + 64
         self.move(x, y)
-        self.resize(WIDTH, EXPANDED_H if self.expanded else BAR_H)
+        self._apply_size()
+
+    def _apply_size(self) -> None:
+        if self.compact:
+            self.resize(COMPACT, COMPACT)
+        else:
+            self.resize(WIDTH, EXPANDED_H if self.expanded else BAR_H)
 
     def _save_position(self) -> None:
         try:
             HOME.mkdir(parents=True, exist_ok=True)
-            state = {"x": self.x(), "y": self.y(), "expanded": self.expanded, "hidden": not self.isVisible()}
+            state = {"x": self.x(), "y": self.y(), "expanded": self.expanded, "compact": self.compact,
+                     "hidden": not self.isVisible()}
             POS_FILE.write_text(json.dumps(state), encoding="utf-8")
         except OSError:
             pass
@@ -341,6 +361,8 @@ class VoiceWidget(QWidget):
         self.flash = max(0.0, self.flash - 0.022)
         target_idx = self._speed_index()
         self.speed_pos = target_idx if self.speed_pos is None else _ease(self.speed_pos, target_idx, 0.22)
+        mode_idx = 1.0 if self.st.get("chime") else 0.0
+        self.mode_pos = mode_idx if self.mode_pos is None else _ease(self.mode_pos, mode_idx, 0.22)
         self.title_t = min(1.0, self.title_t + 0.09)
         for key in set(self.hover_t) | ({self.hover} if self.hover else set()):
             self.hover_t[key] = _ease(self.hover_t.get(key, 0.0), 1.0 if key == self.hover else 0.0, 0.25)
@@ -382,6 +404,9 @@ class VoiceWidget(QWidget):
 
     def _rects(self) -> dict[str, QRectF]:
         r: dict[str, QRectF] = {}
+        if self.compact:
+            # The whole orb is the main button.
+            return {"primary": QRectF(0, 0, COMPACT, COMPACT)} if self._primary() else {}
         if self._primary():
             r["primary"] = QRectF(WIDTH - 82, BAR_H / 2 - 17, 34, 34)
         r["chevron"] = QRectF(WIDTH - 40, BAR_H / 2 - 13, 26, 26)
@@ -395,11 +420,28 @@ class VoiceWidget(QWidget):
             seg = track.width() / len(SPEEDS)
             for i, x in enumerate(SPEEDS):
                 r[f"speed:{x}"] = QRectF(track.x() + i * seg, track.y(), seg, track.height())
+            track = self._mode_track()
+            seg = track.width() / len(MODES)
+            for i, (key, _label) in enumerate(MODES):
+                r[f"mode:{key}"] = QRectF(track.x() + i * seg, track.y(), seg, track.height())
+            for i in range(len(self._history())):
+                r[f"hist:{i}"] = self._history_row(i)
         return r
+
+    def _history(self) -> list[dict]:
+        return list(self.st.get("history") or [])[:HIST_ROWS]
+
+    @staticmethod
+    def _history_row(i: int) -> QRectF:
+        return QRectF(10, HIST_Y + 16 + i * ROW_H, WIDTH - 20, ROW_H - 2)
 
     @staticmethod
     def _speed_track() -> QRectF:
         return QRectF(70, SPEED_Y, WIDTH - 70 - 12, 26)
+
+    @staticmethod
+    def _mode_track() -> QRectF:
+        return QRectF(70, MODE_Y, WIDTH - 70 - 12, 26)
 
     def _speed_index(self) -> float:
         x = float(self.st.get("speed_x", 1.5) or 1.5)
@@ -424,6 +466,41 @@ class VoiceWidget(QWidget):
 
         # Glass body: tinted fill (denser when there is no real blur behind it).
         p.fillPath(path, QColor(14, 16, 24, 120 if self.glass else 228))
+        if self.compact:
+            self._paint_compact(p, path)
+        else:
+            self._paint_full(p, path, h)
+
+        # Hairline border, brighter at the top like light catching glass.
+        p.setClipping(False)
+        edge = QLinearGradient(0, 0, 0, h)
+        edge.setColorAt(0, QColor(255, 255, 255, 70))
+        edge.setColorAt(0.5, QColor(255, 255, 255, 26))
+        edge.setColorAt(1, QColor(255, 255, 255, 40))
+        p.setPen(QPen(edge, 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(body, RADIUS, RADIUS)
+        p.end()
+
+    def _paint_compact(self, p: QPainter, path: QPainterPath) -> None:
+        """Compact mode: only the orb, centred, with its glow and phase animation."""
+        c = QColor(self.accent)
+        c.setAlpha(80 if self.phase not in ("idle", "offline") else 34)
+        amb = QRadialGradient(QPointF(COMPACT / 2, COMPACT / 2), COMPACT * 0.7)
+        amb.setColorAt(0, c)
+        c2 = QColor(self.accent)
+        c2.setAlpha(0)
+        amb.setColorAt(1, c2)
+        p.fillPath(path, amb)
+        ht = self.hover_t.get("primary", 0.0)
+        if ht > 0.01:
+            p.fillPath(path, QColor(255, 255, 255, int(16 * ht)))
+        p.save()
+        p.translate(COMPACT / 2 - 34, COMPACT / 2 - BAR_H / 2)  # the orb is drawn around (34, BAR_H / 2)
+        self._paint_orb(p)
+        p.restore()
+
+    def _paint_full(self, p: QPainter, path: QPainterPath, h: int) -> None:
         # Phase-coloured ambience glowing from behind the orb.
         amb = QRadialGradient(QPointF(34, BAR_H / 2), 150)
         c = QColor(self.accent)
@@ -453,17 +530,6 @@ class VoiceWidget(QWidget):
         self._paint_buttons(p)
         if h > BAR_H + 4:
             self._paint_panel(p)
-
-        # Hairline border, brighter at the top like light catching glass.
-        p.setClipping(False)
-        edge = QLinearGradient(0, 0, 0, h)
-        edge.setColorAt(0, QColor(255, 255, 255, 70))
-        edge.setColorAt(0.5, QColor(255, 255, 255, 26))
-        edge.setColorAt(1, QColor(255, 255, 255, 40))
-        p.setPen(QPen(edge, 1))
-        p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(body, RADIUS, RADIUS)
-        p.end()
 
     def _paint_aurora(self, p: QPainter, path: QPainterPath) -> None:
         """Two soft colour blobs drifting slowly behind the glass; livelier when something happens."""
@@ -605,7 +671,7 @@ class VoiceWidget(QWidget):
 
         # Glyph inside the orb.
         glyph = {"speaking": "volume", "waiting": "mic", "recording": "mic", "muted": "mute",
-                 "offline": "power", "transcribing": "chat"}.get(phase, "mic")
+                 "offline": "power", "transcribing": "chat"}.get(phase, "bell" if self.st.get("chime") else "mic")
         p.setFont(self.f_icon_small)
         p.setPen(QColor(255, 255, 255, 235))
         p.drawText(QRectF(center.x() - r, center.y() - r, 2 * r, 2 * r), Qt.AlignCenter, ICONS[glyph])
@@ -615,6 +681,8 @@ class VoiceWidget(QWidget):
         st = self.st
         if self.phase == "idle":
             sub = "Auto-send on · replies are sent" if st.get("hands_free") else f"{_hotkey_label(self.hotkeys.get('reply', ''))} to talk"
+            if st.get("chime"):
+                sub = "Chime mode · sounds only, no voice"
         if self.phase == "speaking" and st.get("hands_free"):
             sub = "Skip to answer · auto-send on"
         x = 62
@@ -727,42 +795,80 @@ class VoiceWidget(QWidget):
             p.drawText(QRectF(rect.x(), rect.y() + 41, rect.width(), 12), Qt.AlignCenter, _hotkey_label(hk))
             p.restore()
 
-        # Footer: what was last heard, so you can trust the transcription at a glance.
-        self._paint_speed(p, progress)
+        # Speed and mode switches, then what you said recently (so you can trust or reuse it).
+        speed_pos = self.speed_pos if self.speed_pos is not None else self._speed_index()
+        self._paint_segmented(p, progress, 6, self._speed_track(), "Speed",
+                              [f"speed:{x}" for x in SPEEDS], [f"{x:g}×" for x in SPEEDS], speed_pos)
+        mode_pos = self.mode_pos if self.mode_pos is not None else (1.0 if self.st.get("chime") else 0.0)
+        self._paint_segmented(p, progress, 7, self._mode_track(), "Mode",
+                              [f"mode:{k}" for k, _ in MODES], [label for _, label in MODES], mode_pos)
 
-        y = SPEED_Y + 26 + 10
-        heard = self.st.get("last_heard", "")
-        p.setFont(self.f_sub)
-        if heard:
-            text = QFontMetrics(self.f_sub).elidedText(f"“{heard}”", Qt.ElideLeft, WIDTH - 64)
-            p.setPen(QColor(226, 232, 240, 165))
-            p.drawText(QRectF(14, y, WIDTH - 64, 20), Qt.AlignLeft | Qt.AlignVCenter, text)
-            lang = self.st.get("last_heard_lang", "")
-            if lang:
-                self._chip(p, WIDTH - 44, y + 2.5, lang.upper())
-        else:
-            p.setPen(QColor(226, 232, 240, 95))
-            p.drawText(QRectF(14, y, WIDTH - 28, 20), Qt.AlignLeft | Qt.AlignVCenter,
-                       "Drag to move · right-click for options")
+        self._paint_history(p, progress)
 
-    def _paint_speed(self, p: QPainter, progress: float) -> None:
-        """Segmented 1x..2x control with a sliding indicator."""
-        appear = max(0.0, min(1.0, (progress - 6 * 0.07) / 0.5))
+    def _paint_history(self, p: QPainter, progress: float) -> None:
+        """The last few things you said, newest first; click one to copy it."""
+        appear = max(0.0, min(1.0, (progress - 8 * 0.07) / 0.5))
         if appear <= 0:
             return
         p.save()
         p.setOpacity(appear)
-        track = self._speed_track().translated(0, 10 * (1 - appear))
+        dy = 10 * (1 - appear)
         p.setFont(self.f_tile)
         p.setPen(QColor(226, 232, 240, 170))
-        p.drawText(QRectF(14, track.y(), 56, track.height()), Qt.AlignLeft | Qt.AlignVCenter, "Speed")
+        p.drawText(QRectF(14, HIST_Y + dy, WIDTH - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, "Recent")
+        p.setFont(self.f_hint)
+        p.setPen(QColor(226, 232, 240, 105))
+        p.drawText(QRectF(14, HIST_Y + dy, WIDTH - 28, 16), Qt.AlignRight | Qt.AlignVCenter, "click to copy")
+        items = self._history()
+        if not items:
+            p.setFont(self.f_sub)
+            p.setPen(QColor(226, 232, 240, 95))
+            p.drawText(self._history_row(0).adjusted(4, dy, 0, dy), Qt.AlignLeft | Qt.AlignVCenter,
+                       "What you say will show up here")
+        fm = QFontMetrics(self.f_sub)
+        for i, item in enumerate(items):
+            key = f"hist:{i}"
+            rect = self._history_row(i).translated(0, dy)
+            ht = self.hover_t.get(key, 0.0)
+            copied = self._copied == key and time.time() - self._copied_at < 1.2
+            if ht > 0.01 or copied:
+                fill = QColor("#34D399") if copied else QColor(255, 255, 255)
+                fill.setAlpha(55 if copied else int(20 * ht))
+                p.setPen(Qt.NoPen)
+                p.setBrush(fill)
+                p.drawRoundedRect(rect, 6, 6)
+            text_rect = rect.adjusted(6, 0, -52, 0)
+            p.setFont(self.f_sub)
+            p.setPen(QColor(226, 232, 240, 210 if i == 0 else 150))
+            p.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter,
+                       fm.elidedText(item.get("text", ""), Qt.ElideRight, int(text_rect.width())))
+            lang = item.get("lang", "")
+            if lang:
+                self._chip(p, rect.right() - 46, rect.y() + (rect.height() - 15) / 2, lang.upper())
+            p.setFont(self.f_icon_small)
+            p.setPen(QColor(255, 255, 255, 235 if copied else int(110 + 120 * ht)))
+            p.drawText(QRectF(rect.right() - 20, rect.y(), 16, rect.height()), Qt.AlignCenter,
+                       ICONS["check" if copied else "copy"])
+        p.restore()
+
+    def _paint_segmented(self, p: QPainter, progress: float, order: int, track: QRectF, label: str,
+                         keys: list[str], texts: list[str], pos: float) -> None:
+        """Segmented control with a sliding indicator (speed, mode)."""
+        appear = max(0.0, min(1.0, (progress - order * 0.07) / 0.5))
+        if appear <= 0:
+            return
+        p.save()
+        p.setOpacity(appear)
+        track = track.translated(0, 10 * (1 - appear))
+        p.setFont(self.f_tile)
+        p.setPen(QColor(226, 232, 240, 170))
+        p.drawText(QRectF(14, track.y(), 56, track.height()), Qt.AlignLeft | Qt.AlignVCenter, label)
 
         p.setPen(QPen(QColor(255, 255, 255, 22), 1))
         p.setBrush(QColor(255, 255, 255, 12))
         p.drawRoundedRect(track, 8, 8)
 
-        seg = track.width() / len(SPEEDS)
-        pos = self.speed_pos if self.speed_pos is not None else self._speed_index()
+        seg = track.width() / len(keys)
         ind = QRectF(track.x() + pos * seg + 2, track.y() + 2, seg - 4, track.height() - 4)
         glow = QColor(self.accent)
         glow.setAlpha(110)
@@ -771,16 +877,16 @@ class VoiceWidget(QWidget):
         p.drawRoundedRect(ind, 6, 6)
 
         active = round(pos)
-        for i, x in enumerate(SPEEDS):
+        for i, (key, text) in enumerate(zip(keys, texts)):
             rect = QRectF(track.x() + i * seg, track.y(), seg, track.height())
-            ht = self.hover_t.get(f"speed:{x}", 0.0)
+            ht = self.hover_t.get(key, 0.0)
             if i != active and ht > 0.01:
                 p.setPen(Qt.NoPen)
                 p.setBrush(QColor(255, 255, 255, int(18 * ht)))
                 p.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 6, 6)
             p.setFont(self.f_chip if i == active else self.f_hint)
             p.setPen(QColor(255, 255, 255, 245 if i == active else int(150 + 60 * ht)))
-            p.drawText(rect, Qt.AlignCenter, f"{x:g}×")
+            p.drawText(rect, Qt.AlignCenter, text)
         p.restore()
 
     # -- interaction ----------------------------------------------------------------------
@@ -821,6 +927,17 @@ class VoiceWidget(QWidget):
                 return f"{label} ({_hotkey_label(hk)})" if hk else label
         if key and key.startswith("speed:"):
             return f"Voice speed {float(key.split(':', 1)[1]):g}×"
+        if key and key.startswith("hist:"):
+            items = self._history()
+            i = int(key.split(":", 1)[1])
+            if i < len(items):
+                text = items[i].get("text", "")
+                return (text if len(text) <= 400 else text[:400] + "…") + "\n\nClick to copy"
+        if key == "mode:voice":
+            return "Voice: replies are read aloud and the mic opens"
+        if key == "mode:chime":
+            hk = _hotkey_label(self.hotkeys.get("chime", ""))
+            return f"Chimes: no voice, a soft sound when done or when you're needed ({hk})"
         return ""
 
     def mousePressEvent(self, e):
@@ -869,6 +986,16 @@ class VoiceWidget(QWidget):
             value = float(key.split(":", 1)[1])
             self.st["speed_x"] = value  # move the indicator now, don't wait for the next poll
             _post("/speed", {"value": value})
+        elif key.startswith("hist:"):
+            items = self._history()
+            i = int(key.split(":", 1)[1])
+            if i < len(items):
+                QApplication.clipboard().setText(items[i].get("text", ""))
+                self._copied, self._copied_at = key, time.time()
+        elif key.startswith("mode:"):
+            on = key == "mode:chime"
+            self.st["chime"] = on
+            _post("/chime", {"mode": "on" if on else "off"})
 
     def toggle_visible(self) -> None:
         if self.isVisible():
@@ -880,7 +1007,19 @@ class VoiceWidget(QWidget):
         if self.tray:
             self.tray.refresh(force=True)
 
+    def toggle_compact(self) -> None:
+        """Switch between the full bar and a small orb, keeping the right edge where it was."""
+        self._height_anim.stop()
+        right = self.x() + self.width()
+        self.compact = not self.compact
+        self._apply_size()
+        self.move(right - self.width(), self.y())
+        self._snap()
+        self._save_position()
+
     def toggle_expanded(self) -> None:
+        if self.compact:
+            self.toggle_compact()
         self.expanded = not self.expanded
         self._height_anim.stop()
         self._height_anim.setStartValue(self.height())
@@ -892,9 +1031,15 @@ class VoiceWidget(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(MENU_STYLE)
         geo = (self.screen() or QApplication.primaryScreen()).availableGeometry()
-        actions = [
-            ("Collapse" if self.expanded else "Show all actions", self.toggle_expanded),
-            (None, None),
+        if self.compact:
+            actions = [("Full widget", self.toggle_compact), ("Show all actions", self.toggle_expanded), (None, None)]
+        else:
+            actions = [
+                ("Collapse" if self.expanded else "Show all actions", self.toggle_expanded),
+                ("Compact (orb only)", self.toggle_compact),
+                (None, None),
+            ]
+        actions += [
             ("Move to top right", lambda: self._place(geo.right() - WIDTH - 16, geo.top() + 64)),
             ("Move to top left", lambda: self._place(geo.left() + 16, geo.top() + 64)),
             (None, None),
@@ -943,6 +1088,8 @@ class Tray(QSystemTrayIcon):
         title = PHASES.get(phase, PHASES["idle"])[1]
         lang = self.w.st.get("speaking_lang", "")
         extra = " · auto-send" if self.w.st.get("hands_free") else ""
+        if self.w.st.get("chime"):
+            extra += " · chime mode"
         self.setToolTip(f"agent-voice · {title}{f' ({lang.upper()})' if lang else ''}{extra}")
 
     def _on_activated(self, reason) -> None:
@@ -966,6 +1113,7 @@ class Tray(QSystemTrayIcon):
             m.addAction(act)
 
         add("Hide widget" if w.isVisible() else "Show widget", w.toggle_visible, key=hk.get("widget", ""))
+        add("Compact widget (orb only)", w.toggle_compact, checked=w.compact)
         m.addSeparator()
         add("Reply now", lambda: _post("/reply"), online, key=hk.get("reply", ""))
         add("Stop", lambda: _post("/stop"), online, key=hk.get("stop", ""))
@@ -974,6 +1122,8 @@ class Tray(QSystemTrayIcon):
         add("Auto-send replies", lambda: _post("/handsfree", {"mode": "toggle"}), online,
             bool(st.get("hands_free")), hk.get("hands_free", ""))
         add("Mute voice", lambda: _post("/mute", {"mode": "toggle"}), online, bool(st.get("muted")), hk.get("mute", ""))
+        add("Chime mode (sounds only)", lambda: _post("/chime", {"mode": "toggle"}), online,
+            bool(st.get("chime")), hk.get("chime", ""))
         add("Summarize answers", lambda: _post("/summary", {"mode": "toggle"}), online, bool(st.get("summary", True)))
         speed_menu = m.addMenu("Voice speed")
         speed_menu.setStyleSheet(MENU_STYLE)

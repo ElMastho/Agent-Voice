@@ -42,7 +42,10 @@ py -3.13 -m venv .venv && .venv/Scripts/pip install -e ".[dev]"
 .venv/Scripts/agent-voice serve            # daemon in the foreground with console logs
 .venv/Scripts/agent-voice shutdown && .venv/Scripts/agent-voice start   # reload after code changes
 .venv/Scripts/python scripts/render_docs.py   # after any visual widget change
+.venv/Scripts/python packaging/prepare.py && .venv/Scripts/python -m PyInstaller packaging/agent-voice.spec   # Windows exe
 ```
+
+Releases: `.github/workflows/release.yml` builds the exe on every push and publishes `agent-voice-windows-x64.zip` when a `v*` tag is pushed. The exe calls itself through `client.self_command()` (never `python -m agent_voice` directly): `agent-voice.exe` for hooks/CLI, `agent-voice-w.exe` (no console) for the daemon, widget and autostart. Keep the zip small (lingua is excluded; voices and Whisper are downloaded at first run).
 
 The daemon and widget run as `pythonw` in the background. **Code changes need a restart** (`shutdown` + `start`; kill a stray `pythonw3.13.exe` if the widget keeps old code). Hooks are re-executed per event, so `hooks.py` changes apply immediately.
 

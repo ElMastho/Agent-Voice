@@ -33,6 +33,20 @@ def is_running() -> bool:
     return request("/status", timeout=0.5) is not None
 
 
+FROZEN = bool(getattr(sys, "frozen", False))  # running from the packaged .exe
+
+
+def self_command(*args: str, windowed: bool = True) -> list[str]:
+    """How to run agent-voice itself: the bundled exe in a release build, else this Python.
+
+    `windowed` picks the console-less variant (daemon, widget, autostart) over the console one (hooks).
+    """
+    if FROZEN:
+        exe = Path(sys.executable).with_name("agent-voice-w.exe" if windowed else "agent-voice.exe")
+        return [str(exe), *args]
+    return [pythonw() if windowed else sys.executable, "-m", "agent_voice", *args]
+
+
 def pythonw() -> str:
     exe = Path(sys.executable)
     candidate = exe.with_name("pythonw.exe")
@@ -88,7 +102,7 @@ def _spawn() -> None:
         kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
     else:
         kwargs["start_new_session"] = True
-    subprocess.Popen([pythonw(), "-m", "agent_voice", "serve", "--background"], **kwargs)
+    subprocess.Popen(self_command("serve", "--background"), **kwargs)
 
 
 def speak(

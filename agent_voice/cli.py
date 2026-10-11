@@ -9,8 +9,9 @@ import sys
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent-voice", description="Local voice for AI coding agents.")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub = parser.add_subparsers(dest="cmd")
 
+    sub.add_parser("selfcheck", help=argparse.SUPPRESS)  # release build smoke test
     p = sub.add_parser("serve", help="run the daemon in this terminal")
     p.add_argument("--background", action="store_true", help=argparse.SUPPRESS)
     sub.add_parser("start", help="start the daemon in the background")
@@ -52,6 +53,10 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    if args.cmd is None:
+        return quickstart() if getattr(sys, "frozen", False) else (parser.print_help() or 0)
+    if args.cmd == "selfcheck":
+        return selfcheck()
     if args.cmd == "hook":
         from agent_voice.hooks import run
 
@@ -70,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     from agent_voice import client
 
     if args.cmd == "start":
-        ok = client.start_detached()
+        ok = client.start_detached(wait=60)  # the first start may download the voices
         print("agent-voice is running" if ok else "agent-voice did not start; see ~/.agent-voice/logs/server.log")
         return 0 if ok else 1
     if args.cmd == "shutdown":
@@ -157,3 +162,52 @@ def main(argv: list[str] | None = None) -> int:
         print("done")
         return 0
     return 1
+
+
+AGENT_DIRS = {"claude": ".claude", "codex": ".codex", "gemini": ".gemini", "cursor": ".cursor"}
+
+
+def quickstart() -> int:
+    """agent-voice.exe double-clicked: download what's needed, hook into installed agents, start."""
+    from pathlib import Path
+
+    print("agent-voice: a local voice for your coding agents\n")
+    try:
+        main(["setup"])
+        found = [name for name, folder in AGENT_DIRS.items() if (Path.home() / folder).is_dir()]
+        print()
+        if found:
+            main(["install", *found])
+        else:
+            print("No agent found (Claude Code, Codex, Gemini CLI, Cursor). Install one, then run `agent-voice install`.")
+        print()
+        ok = main(["start"]) == 0
+        if ok:
+            print("\nThe widget is at the top right of your screen; right-click it for options.")
+            print("Start with Windows: `agent-voice autostart on` (or tray icon > Start with Windows).")
+    except Exception as exc:  # show it instead of a window that closes on its own
+        print(f"\nSomething went wrong: {exc}")
+        ok = False
+    if sys.stdin and sys.stdin.isatty():
+        input("\nPress Enter to close this window...")
+    return 0 if ok else 1
+
+
+def selfcheck() -> int:
+    """Import every heavy dependency and run the offline parts once (used by the release build)."""
+    import sounddevice  # noqa: F401  (PortAudio DLL)
+    from faster_whisper.vad import get_vad_model
+    from piper import PiperVoice  # noqa: F401
+    from PySide6.QtWidgets import QApplication  # noqa: F401
+
+    from agent_voice import lang, widget  # noqa: F401
+
+    assert lang.detect("Bonjour, est-ce que tu peux relancer le serveur ?") == "fr"
+    assert lang.detect("Could you restart the server please?") == "en"
+    get_vad_model()
+    if sys.platform == "win32":
+        from agent_voice import claudeapp
+
+        claudeapp._uia()
+    print("selfcheck ok")
+    return 0

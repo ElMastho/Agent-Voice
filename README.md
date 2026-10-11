@@ -52,6 +52,16 @@ Everything runs **locally on the CPU**: no cloud, no API key, no audio leaving y
 
 ## 🚀 Quick start
 
+### Download (Windows, no Python needed)
+
+1. Get **`agent-voice-windows-x64.zip`** from the [latest release](https://github.com/ElMastho/agent-voice/releases/latest) and extract it anywhere (e.g. `C:\Toolsgent-voice`).
+2. Double-click **`agent-voice.exe`**. The first run downloads the voices and the speech-recognition model (~600 MB), hooks into the agents it finds (Claude Code, Codex, Gemini CLI, Cursor) and starts the widget.
+3. Optional: `agent-voice.exe autostart on` (or tray icon → *Start with Windows*).
+
+Hooks point at the folder you extracted to: if you move it, double-click `agent-voice.exe` again.
+
+### From source
+
 > Windows 11 · Python 3.13 recommended (some audio/ML wheels lag behind the newest Python).
 
 ```bash
@@ -233,6 +243,7 @@ Architecture notes, invariants and gotchas for contributors (human or AI) are in
 | [sounddevice](https://github.com/spatialaudio/python-sounddevice) | Audio playback & recording | MIT |
 | [keyboard](https://github.com/boppreh/keyboard) | Global hotkeys | MIT |
 | [pyperclip](https://github.com/asweigart/pyperclip) | Clipboard | BSD-3-Clause |
+| [py3langid](https://github.com/adbar/py3langid) | Language detection in the Windows release (lingua is too large to bundle) | BSD-3-Clause |
 | [comtypes](https://github.com/enthought/comtypes) | UI Automation: open the right conversation in the Claude desktop app | MIT |
 | [NumPy](https://numpy.org) | Audio buffers | BSD-3-Clause |
 | [Segoe Fluent Icons](https://learn.microsoft.com/windows/apps/design/style/segoe-fluent-icons-font) | Widget icons (system font, not redistributed) | Microsoft |

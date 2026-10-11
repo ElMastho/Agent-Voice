@@ -19,15 +19,39 @@ _EN_HINTS = re.compile(
 
 @lru_cache(maxsize=1)
 def _detector():
+    """text -> (p_fr, p_en), or None when no statistical detector is installed.
+
+    lingua is the most accurate but weighs 300 MB, so the release exe ships py3langid (2 MB) instead.
+    """
     try:
         from lingua import Language, LanguageDetectorBuilder
+
+        det = (
+            LanguageDetectorBuilder.from_languages(Language.ENGLISH, Language.FRENCH)
+            .with_preloaded_language_models()
+            .build()
+        )
+
+        def lingua_scores(text: str) -> tuple[float, float]:
+            conf = {c.language.iso_code_639_1.name.lower(): c.value for c in det.compute_language_confidence_values(text)}
+            return conf.get("fr", 0.0), conf.get("en", 0.0)
+
+        return lingua_scores
+    except ImportError:
+        pass
+    try:
+        from py3langid.langid import MODEL_FILE, LanguageIdentifier
+
+        ident = LanguageIdentifier.from_model_file(MODEL_FILE, norm_probs=True)
+        ident.set_languages(["fr", "en"])
+
+        def langid_scores(text: str) -> tuple[float, float]:
+            ranked = dict(ident.rank(text))
+            return ranked.get("fr", 0.0), ranked.get("en", 0.0)
+
+        return langid_scores
     except ImportError:
         return None
-    return (
-        LanguageDetectorBuilder.from_languages(Language.ENGLISH, Language.FRENCH)
-        .with_preloaded_language_models()
-        .build()
-    )
 
 
 def _heuristic(text: str) -> str | None:
@@ -45,8 +69,7 @@ def detect(text: str, fallback: str = "en") -> str:
     det = _detector()
     if det is None:
         return _heuristic(text) or fallback
-    conf = {c.language.iso_code_639_1.name.lower(): c.value for c in det.compute_language_confidence_values(text)}
-    fr, en = conf.get("fr", 0.0), conf.get("en", 0.0)
+    fr, en = det(text)
     # Short phrases need a clearer margin before we trust the statistics.
     if abs(fr - en) < (0.4 if short else 0.2):
         return _heuristic(text) or fallback

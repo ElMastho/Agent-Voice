@@ -16,6 +16,7 @@ dependencies = [
     "sounddevice",
     "numpy",
     "lingua-language-detector",
+    "py3langid",
     "faster-whisper",
     "keyboard",
     "pyperclip",

@@ -1,0 +1,67 @@
+# Windows build: a ready-to-run agent-voice folder (zip) with agent-voice.exe.
+# - Every push to main / pull request: build + smoke test, zip kept as a workflow artifact.
+# - Tag v* (e.g. `git tag v0.2.0 && git push --tags`): same, then published as a GitHub Release.
+# Voices and the Whisper model are not bundled: they are downloaded on first run.
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write  # create the release on tags
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . pyinstaller pytest
+
+      - name: Tests
+        run: python -m pytest -q
+
+      - name: Build
+        run: |
+          python packaging/prepare.py
+          python -m PyInstaller packaging/agent-voice.spec --noconfirm
+
+      - name: Smoke test
+        run: |
+          dist/agent-voice/agent-voice.exe selfcheck
+          dist/agent-voice/agent-voice.exe --help
+
+      - name: Zip
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE dist/agent-voice/
+          Compress-Archive -Path dist/agent-voice -DestinationPath agent-voice-windows-x64.zip
+          "{0:N0} MB" -f ((Get-Item agent-voice-windows-x64.zip).Length / 1MB)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-voice-windows-x64
+          path: agent-voice-windows-x64.zip
+          retention-days: 14
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: agent-voice-windows-x64.zip
+          generate_release_notes: true
+          body: |
+            **Windows:** download `agent-voice-windows-x64.zip`, extract it anywhere, and double-click `agent-voice.exe`.
+            The first run downloads the voices and the speech-recognition model (about 600 MB), hooks into the agents it finds, and starts the widget.

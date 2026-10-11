@@ -6,19 +6,27 @@ import json
 import os
 import re
 import shutil
-import sys
 from pathlib import Path
 
-MARKER = "agent_voice hook"
+from agent_voice.client import self_command
+
+# How our hook commands look, from source (python -m agent_voice hook) or from the release exe.
+MARKERS = ("agent_voice hook", 'agent_voice", "hook', 'agent-voice.exe" hook', 'agent-voice.exe", "hook')
 AGENTS = ("claude", "codex", "gemini", "cursor", "antigravity")
 
 
-def _python() -> str:
-    return Path(sys.executable).as_posix()
+def _ours(command: str) -> bool:
+    return any(m in command for m in MARKERS)
+
+
+def _hook_argv(agent: str) -> list[str]:
+    exe, *rest = self_command("hook", agent, windowed=False)
+    return [Path(exe).as_posix(), *rest]
 
 
 def hook_command(agent: str) -> str:
-    return f'"{_python()}" -m agent_voice hook {agent}'
+    exe, *rest = _hook_argv(agent)
+    return " ".join([f'"{exe}"', *rest])
 
 
 def _backup(path: Path) -> None:
@@ -42,7 +50,7 @@ def _strip_ours(groups: list) -> list:
     """Remove our entries from a Claude/Gemini-style [{matcher, hooks: [...]}] list."""
     out = []
     for group in groups:
-        hooks = [h for h in group.get("hooks", []) if MARKER not in str(h.get("command", ""))]
+        hooks = [h for h in group.get("hooks", []) if not _ours(str(h.get("command", "")))]
         if hooks:
             out.append({**group, "hooks": hooks})
     return out
@@ -101,7 +109,7 @@ def cursor(remove: bool = False) -> str:
     _backup(path)
     data.setdefault("version", 1)
     hooks = data.setdefault("hooks", {})
-    entries = [h for h in hooks.get("afterAgentResponse", []) if MARKER not in str(h.get("command", ""))]
+    entries = [h for h in hooks.get("afterAgentResponse", []) if not _ours(str(h.get("command", "")))]
     if not remove:
         entries.append({"command": hook_command("cursor")})
     hooks["afterAgentResponse"] = entries
@@ -119,12 +127,12 @@ def codex(remove: bool = False) -> str:
     path = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     existing = _NOTIFY.search(text)
-    if existing and MARKER.replace(" ", '", "') not in existing.group(0) and not remove:
+    if existing and not _ours(existing.group(0)) and not remove:
         return f"skipped: {path} already has its own `notify` ({existing.group(0)}); add agent-voice there by hand"
     _backup(path)
     text = _NOTIFY.sub("", text).lstrip("\n")
     if not remove:
-        line = "notify = " + json.dumps([_python(), "-m", "agent_voice", "hook", "codex"])
+        line = "notify = " + json.dumps(_hook_argv("codex"))
         # Must be top-level, i.e. before the first [table].
         text = f"{line}\n{text}"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,12 +155,11 @@ def _startup_file() -> Path:
 def autostart(enable: bool = True) -> str:
     if os.name != "nt":
         return "autostart is only automated on Windows; run `agent-voice start` from your login scripts"
-    from agent_voice.client import pythonw
-
     path = _startup_file()
     if not enable:
         path.unlink(missing_ok=True)
         return f"removed {path}"
-    cmd = f'""{pythonw()}"" -m agent_voice serve --background'
+    exe, *rest = self_command("serve", "--background")
+    cmd = " ".join([f'""{exe}""', *rest])
     path.write_text(f'CreateObject("WScript.Shell").Run "{cmd}", 0, False\n', encoding="utf-8")
     return f"created {path}"

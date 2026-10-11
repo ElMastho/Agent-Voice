@@ -693,13 +693,13 @@ def _launch_widget() -> None:
     import os
     import subprocess
 
-    from agent_voice.client import pythonw
+    from agent_voice.client import self_command
 
     kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
     try:
-        subprocess.Popen([pythonw(), "-m", "agent_voice", "widget"], **kwargs)
+        subprocess.Popen(self_command("widget"), **kwargs)
     except OSError:
         log.exception("could not start the widget")
 

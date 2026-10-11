@@ -1,0 +1,134 @@
+"""Command-line entry point: `agent-voice <command>` or `python -m agent_voice <command>`."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="agent-voice", description="Local voice for AI coding agents.")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("serve", help="run the daemon in this terminal")
+    p.add_argument("--background", action="store_true", help=argparse.SUPPRESS)
+    sub.add_parser("start", help="start the daemon in the background")
+    sub.add_parser("shutdown", help="stop the daemon")
+    sub.add_parser("status", help="show daemon status")
+
+    p = sub.add_parser("say", help="speak text (argument or stdin)")
+    p.add_argument("text", nargs="*")
+    p.add_argument("--lang", choices=["en", "fr"])
+    p.add_argument("--voice", help='Piper voice for this text only, e.g. "fr_FR-upmc-medium:pierre"')
+    sub.add_parser("stop", help="stop the current speech")
+
+    p = sub.add_parser("mute", help="mute / unmute (default: toggle)")
+    p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
+    sub.add_parser("unmute", help="unmute")
+    p = sub.add_parser("handsfree", help="hands-free mode: voice replies are sent automatically (default: toggle)")
+    p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
+
+    p = sub.add_parser("hook", help="entry point used by agent hooks")
+    p.add_argument("agent", help="claude | codex | gemini | cursor | generic")
+    p.add_argument("rest", nargs=argparse.REMAINDER)
+
+    p = sub.add_parser("install", help="register hooks for agents")
+    p.add_argument("agents", nargs="*", default=["all"])
+    p = sub.add_parser("uninstall", help="remove hooks for agents")
+    p.add_argument("agents", nargs="*", default=["all"])
+
+    p = sub.add_parser("autostart", help="start the daemon at Windows login")
+    p.add_argument("mode", nargs="?", default="on", choices=["on", "off"])
+    sub.add_parser("setup", help="write default config, download voices and the speech-recognition model")
+
+    args = parser.parse_args(argv)
+
+    if args.cmd == "hook":
+        from agent_voice.hooks import run
+
+        return run(args.agent, args.rest)
+
+    if args.cmd == "serve":
+        from agent_voice.server import serve
+
+        return serve(foreground=not args.background)
+
+    from agent_voice import client
+
+    if args.cmd == "start":
+        ok = client.start_detached()
+        print("agent-voice is running" if ok else "agent-voice did not start; see ~/.agent-voice/logs/server.log")
+        return 0 if ok else 1
+    if args.cmd == "shutdown":
+        print("stopped" if client.request("/shutdown", {}) is not None else "not running")
+        return 0
+    if args.cmd == "status":
+        status = client.request("/status")
+        print(json.dumps(status, indent=2) if status else "not running")
+        return 0 if status else 1
+    if args.cmd == "say":
+        text = " ".join(args.text) or sys.stdin.read()
+        result = client.speak(text, source="cli", lang=args.lang, voice=args.voice)
+        if result is None:
+            print("agent-voice is not running", file=sys.stderr)
+            return 1
+        if result.get("muted"):
+            print("muted (run `agent-voice unmute`)")
+        return 0
+    if args.cmd == "stop":
+        client.request("/stop", {})
+        return 0
+    if args.cmd == "handsfree":
+        result = client.request("/handsfree", {"mode": args.mode})
+        print("not running" if result is None else f"hands-free {'on' if result['hands_free'] else 'off'}")
+        return 0 if result else 1
+    if args.cmd in ("mute", "unmute"):
+        mode = "off" if args.cmd == "unmute" else args.mode
+        result = client.request("/mute", {"mode": mode})
+        if result is None:
+            # Daemon down: flip the persisted flag directly.
+            from agent_voice.config import load_state, save_state
+
+            state = load_state()
+            state["muted"] = (not state.get("muted")) if mode == "toggle" else mode == "on"
+            save_state(state)
+            result = {"muted": state["muted"]}
+        print("muted" if result["muted"] else "unmuted")
+        return 0
+
+    if args.cmd in ("install", "uninstall"):
+        from agent_voice.install import AGENTS, INSTALLERS
+
+        names = AGENTS if "all" in args.agents else args.agents
+        for name in names:
+            if name not in INSTALLERS:
+                print(f"{name}: unknown agent (choose from {', '.join(AGENTS)})")
+                continue
+            try:
+                print(f"{name}: {INSTALLERS[name](remove=args.cmd == 'uninstall')}")
+            except Exception as exc:
+                print(f"{name}: failed: {exc}")
+        return 0
+    if args.cmd == "autostart":
+        from agent_voice.install import autostart
+
+        print(autostart(args.mode == "on"))
+        return 0
+    if args.cmd == "setup":
+        from agent_voice.config import load_config, write_default_config
+        from agent_voice.tts import download_voice
+
+        print(f"config: {write_default_config()}")
+        cfg = load_config()
+        for name in cfg["voices"].values():
+            print(f"voice: {name}")
+            download_voice(name.partition(":")[0])
+        if cfg["stt"].get("enabled"):
+            print(f"speech recognition model: whisper {cfg['stt']['model']} (first download takes a minute)")
+            from agent_voice.stt import Transcriber
+
+            Transcriber(cfg).warm_up()
+        print("done")
+        return 0
+    return 1

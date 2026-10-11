@@ -338,7 +338,7 @@ class VoiceWidget(QWidget):
         want_energy = {"speaking": 1.0, "recording": 0.35 + 0.65 * self.level, "waiting": 0.45,
                        "transcribing": 0.6}.get(self.phase, 0.12)
         self.energy = _ease(self.energy, want_energy, 0.08)
-        self.flash = max(0.0, self.flash - 0.035)
+        self.flash = max(0.0, self.flash - 0.022)
         target_idx = self._speed_index()
         self.speed_pos = target_idx if self.speed_pos is None else _ease(self.speed_pos, target_idx, 0.22)
         self.title_t = min(1.0, self.title_t + 0.09)
@@ -468,7 +468,7 @@ class VoiceWidget(QWidget):
     def _paint_aurora(self, p: QPainter, path: QPainterPath) -> None:
         """Two soft colour blobs drifting slowly behind the glass; livelier when something happens."""
         t = time.time() - self.t0
-        speed = 0.25 + 0.9 * self.energy
+        speed = 0.2 + 0.45 * self.energy
         blobs = [
             (self.accent, 90 + 70 * math.sin(t * speed * 0.9), 30 + 22 * math.cos(t * speed * 1.3), 120),
             (self.second, 230 + 60 * math.cos(t * speed * 0.7), 40 + 26 * math.sin(t * speed * 1.1), 110),
@@ -499,11 +499,11 @@ class VoiceWidget(QWidget):
             env = math.sin(math.pi * u) ** 1.5  # fade at both ends
             if self.phase == "transcribing":
                 # A pulse travelling left to right.
-                c = (t * 0.9) % 1.3 - 0.15
+                c = (t * 0.55) % 1.3 - 0.15
                 y = math.exp(-((u - c) ** 2) / 0.006) * amp * 0.9
             else:
-                y = (math.sin(u * 18 + t * 6.0) * 0.55 + math.sin(u * 31 - t * 9.0) * 0.3
-                     + math.sin(u * 7 + t * 2.2) * 0.35) * amp * env * 0.5
+                y = (math.sin(u * 18 + t * 2.8) * 0.55 + math.sin(u * 31 - t * 4.2) * 0.3
+                     + math.sin(u * 7 + t * 1.1) * 0.35) * amp * env * 0.5
             pt = QPointF(x, base - y)
             wave.moveTo(pt) if i == 0 else wave.lineTo(pt)
         grad = QLinearGradient(x0, 0, x1, 0)
@@ -534,9 +534,9 @@ class VoiceWidget(QWidget):
         if phase == "idle":
             scale = 1.0 + 0.03 * math.sin(t * 1.4)
         elif phase == "speaking":
-            scale = 1.0 + 0.07 * math.sin(t * 7.0) * (0.6 + 0.4 * math.sin(t * 2.3))
+            scale = 1.0 + 0.05 * math.sin(t * 3.2) * (0.6 + 0.4 * math.sin(t * 1.1))
         elif phase == "waiting":
-            scale = 1.0 + 0.06 * math.sin(t * 2.6)
+            scale = 1.0 + 0.05 * math.sin(t * 1.8)
         elif phase == "recording":
             scale = 1.0 + 0.32 * self.level
         r = base_r * scale
@@ -556,14 +556,14 @@ class VoiceWidget(QWidget):
         # Phase-specific motion.
         if phase == "speaking":
             for i in range(2):
-                k = ((t * 0.75) + i * 0.5) % 1.0
+                k = ((t * 0.4) + i * 0.5) % 1.0
                 ring = QColor(acc)
                 ring.setAlpha(int(150 * (1 - k)))
                 p.setPen(QPen(ring, 1.4))
                 p.setBrush(Qt.NoBrush)
                 p.drawEllipse(center, r + 3 + k * 11, r + 3 + k * 11)
         elif phase == "waiting":
-            k = (t * 0.5) % 1.0
+            k = (t * 0.35) % 1.0
             ring = QColor(acc)
             ring.setAlpha(int(120 * (1 - k)))
             p.setPen(QPen(ring, 1.2))
@@ -576,7 +576,7 @@ class VoiceWidget(QWidget):
             p.setBrush(Qt.NoBrush)
             p.drawEllipse(center, r + 4, r + 4)
         elif phase == "transcribing":
-            arc = QConicalGradient(center, -t * 360 * 1.1)
+            arc = QConicalGradient(center, -t * 360 * 0.6)
             a0 = QColor(acc)
             a0.setAlpha(255)
             a1 = QColor(acc)
@@ -659,7 +659,7 @@ class VoiceWidget(QWidget):
             rect = rects["primary"]
             hot = self.hover == "primary"
             ht = self.hover_t.get("primary", 0.0)
-            grow = 1.5 * ht + (1.2 * math.sin((time.time() - self.t0) * 4) if self.phase == "speaking" else 0)
+            grow = 1.5 * ht + (1.2 * math.sin((time.time() - self.t0) * 2) if self.phase == "speaking" else 0)
             rect = rect.adjusted(-grow, -grow, grow, grow)
             fill = QColor(self.accent)
             fill.setAlpha(150 if hot else 95)

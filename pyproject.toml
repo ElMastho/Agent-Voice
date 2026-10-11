@@ -19,6 +19,7 @@ dependencies = [
     "faster-whisper",
     "keyboard",
     "pyperclip",
+    "comtypes; sys_platform == 'win32'",
     "PySide6-Essentials",
 ]
 

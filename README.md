@@ -91,7 +91,7 @@ Open the chevron for **every action with its shortcut**: reply now, hold to talk
 - **Never steals focus**: clicking it keeps your agent window active.
 - **Hide / show**: `Ctrl+Alt+W`, a click on the tray icon, or right-click → *Hide widget*.
 - **Compact**: right-click → *Compact (orb only)* shrinks it to the animated orb; a click on it talks / cancels / skips.
-- **Replies go back to your agent**: dictated replies are typed into the window you last prompted from, even if it is minimized or behind another app; once sent (auto-send), you're returned to where you were. The text also stays on the clipboard.
+- **Replies go back to your agent**: dictated replies are typed into the window you last prompted from, even if it is minimized or behind another app; once sent (auto-send), you're returned to where you were. In the Claude desktop app it also opens the right conversation in the sidebar first, so a reply never lands in another thread. The text also stays on the clipboard.
 - **Tray menu**: every action, auto-send/mute toggles, start/stop the service, *Start with Windows*.
 
 <br clear="right">
@@ -233,6 +233,7 @@ Architecture notes, invariants and gotchas for contributors (human or AI) are in
 | [sounddevice](https://github.com/spatialaudio/python-sounddevice) | Audio playback & recording | MIT |
 | [keyboard](https://github.com/boppreh/keyboard) | Global hotkeys | MIT |
 | [pyperclip](https://github.com/asweigart/pyperclip) | Clipboard | BSD-3-Clause |
+| [comtypes](https://github.com/enthought/comtypes) | UI Automation: open the right conversation in the Claude desktop app | MIT |
 | [NumPy](https://numpy.org) | Audio buffers | BSD-3-Clause |
 | [Segoe Fluent Icons](https://learn.microsoft.com/windows/apps/design/style/segoe-fluent-icons-font) | Widget icons (system font, not redistributed) | Microsoft |
 

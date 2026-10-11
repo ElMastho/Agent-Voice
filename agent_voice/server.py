@@ -15,7 +15,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from agent_voice import __version__, winfocus
+from agent_voice import __version__, claudeapp, winfocus
 from agent_voice.config import HOME, LOG_DIR, load_config, load_state, save_state
 from agent_voice.tts import Speaker
 
@@ -140,6 +140,10 @@ class Daemon:
         # Persisted so a daemon restart doesn't send the next reply to whatever app is in front.
         saved = int(self.state.get("target_hwnd") or 0)
         self._target_hwnd = saved if winfocus.is_window(saved) else 0
+        # Agent session whose turn just ended: the conversation a spoken reply belongs to.
+        self._reply_session = ""
+        # Desktop app: CLI session id -> conversation title, learned when you send a prompt.
+        self._titles: dict[str, str] = dict(self.state.get("desktop_titles") or {})
         # What the mic is doing, for the widget: "" | waiting | recording | transcribing
         self._mic_phase = ""
         self.level = 0.0
@@ -254,6 +258,7 @@ class Daemon:
         interrupt: bool = False,
         final: bool = False,
         voice: str | None = None,
+        session: str = "",
     ) -> int:
         """Queue text; `final` marks the end of an agent's turn and arms auto-listen."""
         if self.muted:
@@ -269,6 +274,7 @@ class Daemon:
         n = self.speaker.speak(text, lang, voice) if text.strip() else 0
         log.info("speak source=%s sentences=%d final=%s", source, n, final)
         if final and self.config["auto_listen"].get("enabled") and self.transcriber is not None:
+            self._reply_session = session
             self._listen_armed = True
         return n
 
@@ -301,13 +307,31 @@ class Daemon:
         self.state["history"] = self.history
         save_state(self.state)
 
-    def prompt_submitted(self, hwnd: int) -> None:
-        """The user sent a new prompt: remember its window, and stop talking/listening."""
+    def prompt_submitted(self, hwnd: int, session: str = "") -> None:
+        """The user sent a new prompt: remember its window (and conversation), and stop talking/listening."""
         if hwnd and hwnd != self._target_hwnd:
             self._target_hwnd = hwnd
             self.state["target_hwnd"] = hwnd
             save_state(self.state)
+        if hwnd and session and claudeapp.is_desktop_app(hwnd):
+            threading.Thread(target=self._learn_title, args=(hwnd, session), daemon=True).start()
         self.stop()
+
+    def _learn_title(self, hwnd: int, session: str) -> None:
+        """You type in the conversation on screen, so its title belongs to this session.
+
+        Not when another session already owns that title: a prompt sent by Claude to a side
+        session it started also fires this hook, while you are still looking at your own.
+        """
+        title = claudeapp.current_title(hwnd)
+        if not title or any(t == title for s, t in self._titles.items() if s != session):
+            return
+        if self._titles.get(session) != title:
+            self._titles[session] = title
+            self._titles = dict(list(self._titles.items())[-50:])
+            self.state["desktop_titles"] = self._titles
+            save_state(self.state)
+            log.info("conversation %r is session %s", title, session[:8])
 
     # -- auto-listen ------------------------------------------------------------
     def _listen_monitor(self) -> None:
@@ -331,6 +355,7 @@ class Daemon:
 
         cfg = self.config["auto_listen"]
         target = self._target_hwnd or winfocus.foreground()
+        session = self._reply_session
         self._listen_cancel.clear()
         self._listening = True
         self._mic_phase = "waiting"
@@ -357,7 +382,7 @@ class Daemon:
             if self._listen_cancel.is_set() or is_hallucination(text):
                 return
             self._heard(text, lang)
-            self._paste(text, target, submit=self.hands_free)
+            self._paste(text, target, submit=self.hands_free, session=session)
         except Exception:
             log.exception("auto-listen failed")
         finally:
@@ -366,7 +391,7 @@ class Daemon:
             self._mic_phase = ""
             self.level = 0.0
 
-    def _paste(self, text: str, hwnd: int = 0, submit: bool = False) -> None:
+    def _paste(self, text: str, hwnd: int = 0, submit: bool = False, session: str = "") -> None:
         import keyboard
         import pyperclip
 
@@ -378,6 +403,15 @@ class Daemon:
         if hwnd and not winfocus.focus(hwnd):
             # Don't type into whatever app is in front: leave the text on the clipboard instead.
             log.warning("could not focus target window %s (%s); text left on clipboard", hwnd, winfocus.title(hwnd))
+            pyperclip.copy(text)
+            _beep(300, 150)
+            return
+        # Desktop app: several conversations share one window; open the one this reply answers.
+        title = ""
+        if session and claudeapp.is_desktop_app(hwnd):
+            title = claudeapp.session_title(session) or self._titles.get(session, "")
+        if title and not claudeapp.select_session(hwnd, title):
+            log.warning("could not open conversation %r; text left on clipboard", title)
             pyperclip.copy(text)
             _beep(300, 150)
             return
@@ -598,6 +632,7 @@ def _handler(daemon: Daemon):
                     bool(data.get("interrupt")),
                     bool(data.get("final")),
                     data.get("voice"),
+                    str(data.get("session") or ""),
                 )
                 daemon.jobs.put(args)
                 return self._json(200, {"queued": True, "muted": daemon.muted})
@@ -614,7 +649,7 @@ def _handler(daemon: Daemon):
                 threading.Thread(target=daemon._read_selection, daemon=True).start()
                 return self._json(200, {"ok": True})
             if self.path == "/prompt":
-                daemon.prompt_submitted(int(data.get("hwnd") or 0))
+                daemon.prompt_submitted(int(data.get("hwnd") or 0), str(data.get("session") or ""))
                 return self._json(200, {"ok": True})
             if self.path == "/stop":
                 daemon.stop()

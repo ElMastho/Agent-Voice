@@ -181,3 +181,23 @@ def test_parallel_autostarts_spawn_once(tmp_path, monkeypatch):
         t.join()
     assert spawned == [1] and results == [True] * 5
     assert not (tmp_path / "starting").exists()
+
+
+def test_desktop_session_title_and_sidebar_entry(tmp_path):
+    import json
+
+    from agent_voice import claudeapp
+
+    d = tmp_path / "acct" / "org"
+    d.mkdir(parents=True)
+    (d / "local_1.json").write_text(json.dumps({"cliSessionId": "abc", "title": "Fix the build"}), encoding="utf-8")
+    (d / "local_2.json").write_text(json.dumps({"cliSessionId": "zzz", "title": "Other"}), encoding="utf-8")
+    assert claudeapp.session_title("abc", tmp_path) == "Fix the build"
+    assert claudeapp.session_title("nope", tmp_path) == ""
+
+    names = ["Fix the build, rename session", "Idle Fix the build (fork)", "Running Fix the build"]
+    assert claudeapp.pick_entry(names, "Fix the build") == 2
+    assert claudeapp.pick_entry(["Idle Fix the build Started by Claude from Main."], "Fix the build") == 0
+    assert claudeapp.pick_entry(["Fix the build, rename session"], "Fix the build") == -1
+    assert claudeapp.is_current("Fix the build - Claude Code", "Fix the build")
+    assert not claudeapp.is_current("Fix the build (fork) - Claude Code", "Fix the build")

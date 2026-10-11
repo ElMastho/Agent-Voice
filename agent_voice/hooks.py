@@ -223,7 +223,8 @@ def hook_claude(raw: str) -> None:
         # The window you just typed in is where spoken replies get pasted back.
         from agent_voice import winfocus
 
-        client.request("/prompt", {"hwnd": winfocus.foreground()}, timeout=1.0)
+        client.request("/prompt", {"hwnd": winfocus.foreground(), "session": str(data.get("session_id", ""))},
+                       timeout=1.0)
         if summary_enabled():
             # Claude Code adds this to the model's context for the turn.
             out = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": SUMMARY_INSTRUCTION}}
@@ -256,7 +257,8 @@ def hook_claude(raw: str) -> None:
         text = strip_summary(text)
     # On Stop, call even with nothing new to say: it marks the end of the turn (arms auto-listen).
     if text.strip() or final:
-        client.speak(text, source="claude", final=final)
+        # The session id lets the daemon type your spoken reply into this conversation (desktop app).
+        client.speak(text, source="claude", final=final, session=str(data.get("session_id", "")))
 
 
 # -- Generic JSON payloads (Codex, Gemini CLI, Cursor, anything else) -----------------

@@ -949,7 +949,7 @@ def run(demo: str | None = None) -> int:
     if demo:  # design preview: fake a status instead of polling the daemon
         w.poller.status.disconnect()
         fake = {"phase": demo, "level": 0.03, "speaking_lang": "fr", "hands_free": demo == "waiting",
-                "last_heard": "Peux-tu ajouter des tests pour le serveur ?", "last_heard_lang": "fr"}
+                "last_heard": "Can you add tests for the server?", "last_heard_lang": "en"}
         QTimer.singleShot(0, lambda: w._on_status(fake))
     app.setWindowIcon(orb_icon(QColor(PHASES["speaking"][0]), ICONS["volume"]))
     if not getattr(w, "start_hidden", False):

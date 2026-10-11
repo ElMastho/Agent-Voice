@@ -30,7 +30,7 @@ Everything runs **locally on the CPU**: no cloud, no API key, no audio leaving y
 
 <p align="center">
   <img src="docs/images/demo.gif" alt="The widget going through a full turn: speaking, listening, hearing you, transcribing" width="560">
-  <br><sub>One full turn: the agent speaks (FR) → the mic opens → you answer → transcription → typed into the agent.</sub>
+  <br><sub>One full turn: the agent speaks → the mic opens → you answer → transcription → typed into the agent.</sub>
 </p>
 
 ## ✨ Features
@@ -153,12 +153,12 @@ sequenceDiagram
     participant AV as agent-voice
     You->>Agent: prompt (window remembered)
     Agent-->>AV: progress text (PreToolUse)
-    AV-->>You: 🔊 "Je regarde le serveur…"
+    AV-->>You: 🔊 "Let me check the server…"
     Agent-->>AV: final answer (Stop)
     AV-->>You: 🔊 answer, FR/EN voices
     AV-->>You: 🔔 beep, mic open
-    You->>AV: 🎙️ "Oui, vas-y, déploie."
-    AV->>AV: Whisper → "Oui, vas-y, déploie." (fr)
+    You->>AV: 🎙️ "Yes, go ahead and deploy."
+    AV->>AV: Whisper → "Yes, go ahead and deploy." (en)
     AV->>Agent: typed into the prompt (+ Enter with auto-send)
 ```
 

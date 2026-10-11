@@ -39,7 +39,7 @@ Connect your agent(s) and start everything:
 
 You should hear nothing yet, but you'll see the **glass widget** near the top-right corner and a small **orb icon** in the notification area (bottom right, next to the clock. Windows may tuck new icons behind the `^` arrow; drag it onto the taskbar to keep it visible).
 
-> **Tip:** `agent-voice say "Bonjour, ça marche ? And in English too."` is the quickest sound check.
+> **Tip:** `agent-voice say "Hello, this is a sound check."` is the quickest test. Mixed French and English text is read with both voices.
 
 ## 2. Your first conversation
 
@@ -102,7 +102,7 @@ The widget **never takes keyboard focus**: clicking it keeps your agent window a
 `name:speaker` picks a speaker inside multi-speaker models. Missing voices download automatically. Try one before switching:
 
 ```bash
-agent-voice say --voice fr_FR-tom-medium "Bonjour, je suis Tom."
+agent-voice say --voice en_US-ryan-high "Hello, I am Ryan."
 ```
 
 **Speed:** `"speed": 0.67` (about 1.5× faster than normal). `1.0` is the natural pace; lower is faster.

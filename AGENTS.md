@@ -71,7 +71,7 @@ The daemon and widget run as `pythonw` in the background. **Code changes need a 
 - **Acrylic only clips to DWM's native rounding.** `SetWindowRgn` does not clip the acrylic accent, so `RADIUS` must stay equal to Windows 11's `DWMWCP_ROUND` (8 px), with the system border hidden (`DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE`).
 - **`sounddevice` can hang on a broken audio driver**: playback polls with a deadline instead of `sd.wait()`. Closing the mic stream can take ~1 s, so `cancel_listen()` updates the phase immediately.
 - **Claude `async` hooks may be killed on `Stop`**: only `PreToolUse` is async; `Stop` stays synchronous.
-- **Whisper hallucinates on silence** ("Merci.", "Thank you."): filtered by `stt.is_hallucination`.
+- **Whisper hallucinates on silence** ("Thank you." and its French equivalent): filtered by `stt.is_hallucination`.
 - **Python 3.14 lacks some wheels** (onnxruntime/ctranslate2 at the time of writing): use 3.13.
 - **Global hotkeys (`keyboard`) can't see apps running as administrator** unless the daemon is elevated too.
 - **`render_docs.py` replaces `widget.time`** with a fake clock; keep animation code reading time through the module-level `time` import.

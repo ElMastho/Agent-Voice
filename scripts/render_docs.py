@@ -148,7 +148,7 @@ def render_states() -> None:
 
 
 def render_panel() -> None:
-    st = status("idle", hands_free=True, last_heard="Peux-tu ajouter des tests pour le serveur ?", last_heard_lang="fr")
+    st = status("idle", hands_free=True, last_heard="Can you add tests for the server?", last_heard_lang="en")
     w = make_widget(st, expanded=True)
     settle(w)
     w.hover = "reply"
@@ -185,11 +185,11 @@ def render_gif() -> None:
     """A short loop of a full conversation turn."""
     script = [
         ("idle", 1.0, {}),
-        ("speaking", 3.2, {"speaking_lang": "fr"}),
+        ("speaking", 3.2, {"speaking_lang": "en"}),
         ("waiting", 1.4, {}),
         ("recording", 2.6, {}),
         ("transcribing", 1.3, {}),
-        ("idle", 1.4, {"last_heard": "Oui, vas-y, déploie.", "last_heard_lang": "fr"}),
+        ("idle", 1.4, {"last_heard": "Yes, go ahead and deploy.", "last_heard_lang": "en"}),
     ]
     w = make_widget(status("idle"))
     settle(w)

@@ -59,3 +59,18 @@ def test_unspoken_dedupes(tmp_path, monkeypatch):
     monkeypatch.setattr(hooks, "SESSIONS_DIR", tmp_path)
     assert hooks._unspoken("s", ["a", "b"]) == ["a", "b"]
     assert hooks._unspoken("s", ["a", "b", "c"]) == ["c"]
+
+
+def test_stop_message_not_spoken_twice_when_formatting_differs():
+    texts = ["Done. All tests pass.", "Next step:\n\n- push"]
+    assert hooks._covered("Done.  All tests pass.\nNext step:\n- push", texts)
+    assert not hooks._covered("Something new.", texts)
+
+
+def test_parallel_hooks_speak_once(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(hooks, "SESSIONS_DIR", tmp_path)
+    with ThreadPoolExecutor(8) as pool:
+        results = list(pool.map(lambda _: hooks._unspoken("p", ["same text"]), range(8)))
+    assert sum(len(r) for r in results) == 1

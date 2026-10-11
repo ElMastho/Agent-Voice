@@ -5,9 +5,12 @@ Every adapter must exit quickly and never fail loudly: a broken voice must not b
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 from agent_voice import client
@@ -101,11 +104,54 @@ def _digest(text: str) -> str:
     return hashlib.sha1(text.strip().encode("utf-8")).hexdigest()[:16]
 
 
+def _norm(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _covered(text: str, texts: list[str]) -> bool:
+    """True if `text` is already (part of) `texts`, ignoring whitespace differences."""
+    target = _norm(text)
+    joined = _norm("\n".join(texts))
+    return target in joined or any(_norm(t) and _norm(t) in target for t in texts)
+
+
+@contextlib.contextmanager
+def _session_lock(path: Path, timeout: float = 5.0):
+    """Cross-process lock: parallel tool calls fire several hooks at once."""
+    lock = path.with_suffix(".lock")
+    end = time.time() + timeout
+    fd = None
+    while fd is None:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                if time.time() - lock.stat().st_mtime > 10:  # left behind by a killed hook
+                    lock.unlink(missing_ok=True)
+                    continue
+            except OSError:
+                pass
+            if time.time() > end:
+                break
+            time.sleep(0.02)
+    try:
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+            lock.unlink(missing_ok=True)
+
+
 def _unspoken(session_id: str, texts: list[str]) -> list[str]:
     """Filter out texts already spoken in this session, and remember the new ones."""
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_") or "default"
     path = SESSIONS_DIR / f"{safe_id}.json"
+    with _session_lock(path):
+        return _unspoken_locked(path, texts)
+
+
+def _unspoken_locked(path: Path, texts: list[str]) -> list[str]:
     try:
         spoken = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -143,8 +189,11 @@ def hook_claude(raw: str) -> None:
     transcript = data.get("transcript_path")
     if transcript and Path(transcript).exists():
         texts = claude_turn_texts(Path(transcript))
-    if event == "Stop" and data.get("last_assistant_message"):
-        texts.append(data["last_assistant_message"])
+    last = data.get("last_assistant_message") or ""
+    if event == "Stop" and last.strip() and not _covered(last, texts):
+        # Only a fallback for when the transcript isn't flushed yet: its formatting can differ
+        # slightly from the transcript blocks, so an exact-match dedupe would speak it twice.
+        texts.append(last)
     fresh = _unspoken(str(data.get("session_id", "")), texts)
     final = event == "Stop"
     # On Stop, call even with nothing new to say: it marks the end of the turn (arms auto-listen).

@@ -34,7 +34,9 @@ from agent_voice.config import HOME, load_config
 WIDTH = 320
 BAR_H = 64
 EXPANDED_H = 238
-RADIUS = 16
+# Matches Windows 11's native window rounding (DWMWCP_ROUND = 8 px), the only rounding that
+# also clips the acrylic blur; any other radius leaves blurred square corners showing.
+RADIUS = 8
 POS_FILE = HOME / "widget.json"
 
 ICON_FONT = "Segoe Fluent Icons"
@@ -117,9 +119,12 @@ def _apply_windows_style(hwnd: int, blur: str) -> bool:
     style = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
     user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST)
 
-    # Windows 11 rounded corners (also clips the blur to the rounded shape).
+    # Native Windows 11 rounding: it clips the acrylic too (a window region does not). RADIUS matches it.
     corner = ctypes.c_int(2)  # DWMWCP_ROUND
     dwm.DwmSetWindowAttribute(wintypes.HWND(hwnd), 33, ctypes.byref(corner), ctypes.sizeof(corner))
+    # Hide the grey system border; we draw our own hairline.
+    no_border = ctypes.c_uint(0xFFFFFFFE)  # DWMWA_COLOR_NONE
+    dwm.DwmSetWindowAttribute(wintypes.HWND(hwnd), 34, ctypes.byref(no_border), ctypes.sizeof(no_border))
 
     if blur == "none":
         return False
@@ -139,19 +144,6 @@ def _apply_windows_style(hwnd: int, blur: str) -> bool:
         return bool(user32.SetWindowCompositionAttribute(wintypes.HWND(hwnd), ctypes.byref(data)))
     except AttributeError:
         return False
-
-
-def _round_window(hwnd: int, width: int, height: int, radius: float) -> None:
-    """Clip the window (and the blur behind it) to a rounded rectangle, in physical pixels."""
-    if sys.platform != "win32":
-        return
-    import ctypes
-
-    gdi32, user32 = ctypes.WinDLL("gdi32"), ctypes.WinDLL("user32")
-    d = max(2, int(round(radius * 2)))
-    region = gdi32.CreateRoundRectRgn(0, 0, width + 1, height + 1, d, d)
-    # The system owns the region after this call; don't delete it.
-    user32.SetWindowRgn(ctypes.c_void_p(hwnd), ctypes.c_void_p(region), True)
 
 
 # -- background I/O ----------------------------------------------------------------------
@@ -242,17 +234,6 @@ class VoiceWidget(QWidget):
         if not getattr(self, "_styled", False):
             self._styled = True
             self.glass = _apply_windows_style(int(self.winId()), self.blur_mode)
-            self._update_region()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_region()
-
-    def _update_region(self) -> None:
-        if not getattr(self, "_styled", False):
-            return
-        dpr = self.devicePixelRatioF()
-        _round_window(int(self.winId()), round(self.width() * dpr), round(self.height() * dpr), RADIUS * dpr)
 
     def _restore_position(self) -> None:
         screen = QApplication.primaryScreen().availableGeometry()
@@ -670,7 +651,7 @@ class VoiceWidget(QWidget):
                 fill.setAlpha(min(255, fill.alpha() + 40))
             p.setPen(QPen(border, 1))
             p.setBrush(fill)
-            p.drawRoundedRect(rect, 11, 11)
+            p.drawRoundedRect(rect, 8, 8)
 
             p.setFont(self.f_icon)
             p.setPen(QColor(255, 255, 255, 235))

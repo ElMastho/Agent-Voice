@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,10 @@ name = "agent-voice"
 version = "0.1.0"
 description = "Local, CPU-only voice for AI coding agents (Claude Code, Codex, Gemini CLI, Cursor, Antigravity): speaks replies in French or English, push-to-talk dictation."
 requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "ElMastho" }]
+readme = "README.md"
 dependencies = [
     "piper-tts>=1.3",
     "sounddevice",
@@ -17,6 +21,9 @@ dependencies = [
     "pyperclip",
     "PySide6-Essentials",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest", "pillow"]
 
 [project.scripts]
 agent-voice = "agent_voice.cli:main"

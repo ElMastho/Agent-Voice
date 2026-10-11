@@ -1,88 +1,235 @@
-# agent-voice
+<p align="center">
+  <img src="docs/images/hero.jpg" alt="agent-voice: your AI coding agents, out loud" width="100%">
+</p>
 
-Local, CPU-only voice for AI coding agents. It reads the agent's replies aloud in **French or English** (detected sentence by sentence) and lets you **answer by voice** with a push-to-talk key. Nothing leaves your machine.
+<p align="center">
+  <b>Hear your AI coding agent. Answer it by voice. In French or English. 100% on your machine.</b>
+</p>
 
-- **Text-to-speech:** [Piper](https://github.com/OHF-Voice/piper1-gpl), about 10× faster than real time on CPU, ~60 MB per voice
-- **Speech-to-text:** [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (`small`, int8), French/English auto-detected
-- **Language detection:** [lingua](https://github.com/pemistahl/lingua-py), restricted to FR/EN
+<p align="center">
+  <img alt="License: GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-8B7CFF">
+  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-22D3EE">
+  <img alt="Windows 11" src="https://img.shields.io/badge/platform-Windows%2011-34D399">
+  <img alt="Offline" src="https://img.shields.io/badge/runs-offline%20%C2%B7%20CPU%20only-FBBF24">
+  <img alt="Agents" src="https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Gemini%20%C2%B7%20Cursor-F472B6">
+</p>
 
-## Hotkeys (global)
+<p align="center">
+  <a href="#-quick-start">Quick start</a> ·
+  <a href="docs/guide.md">User guide</a> ·
+  <a href="#-the-widget">The widget</a> ·
+  <a href="#-how-it-works">How it works</a> ·
+  <a href="AGENTS.md">AGENTS.md</a>
+</p>
 
-| Keys | Action |
+---
+
+**agent-voice** gives your coding agents a voice and ears. When Claude Code (or Codex, Gemini CLI, Cursor…) answers, you **hear** it, in a natural French or English voice picked sentence by sentence. When it's done, the mic opens: **just talk**, and your reply is transcribed and typed back into the agent's window, and sent too if you want. A small **glass widget** shows what's happening at a glance and puts every action one click away.
+
+Everything runs **locally on the CPU**: no cloud, no API key, no audio leaving your laptop.
+
+<p align="center">
+  <img src="docs/images/demo.gif" alt="The widget going through a full turn: speaking, listening, hearing you, transcribing" width="560">
+  <br><sub>One full turn: the agent speaks (FR) → the mic opens → you answer → transcription → typed into the agent.</sub>
+</p>
+
+## ✨ Features
+
+| | |
 |---|---|
-| `Ctrl+Alt+A` | Reply now: cut the voice off and start listening for your answer immediately |
-| `Ctrl+Alt+Space` (hold) | Push-to-talk: speak, release, and the text is pasted into the focused window |
-| `Ctrl+Alt+S` | Stop the current speech (and cancel listening) |
-| `Ctrl+Alt+H` | Hands-free mode on/off: everything you say is sent automatically. Off by default; the voice confirms the switch |
-| `Ctrl+Alt+M` | Mute / unmute (high beep = on, low beep = muted) |
-| `Ctrl+Alt+R` | Read the selected text aloud (or the clipboard). Works in any app, e.g. Antigravity |
+| 🗣️ **Speaks every reply** | Final answers *and* the short progress updates between tool calls, never twice. Markdown, code blocks, links and file paths are cleaned out so it sounds natural. |
+| 🇫🇷 🇬🇧 **Bilingual, automatically** | Each sentence is language-detected and read by the matching voice. A reply mixing French and English switches voices mid-paragraph. |
+| 🎙️ **Answer by voice** | After the reply, a beep and the mic opens for 15 s. Talk, pause, done: Whisper transcribes (FR/EN auto-detected) and types it into the window you prompted from. |
+| ⏭️ **Skip to answer** | Don't wait for the end: `Ctrl+Alt+A` cuts the voice and listens immediately. |
+| 📨 **Auto-send (hands-free)** | One toggle and your spoken replies are submitted for you. True hands-free pair programming. |
+| ✋ **Push-to-talk anywhere** | Hold `Ctrl+Alt+Space` in any app to dictate. |
+| 📖 **Read anything aloud** | Select text in any app (e.g. Antigravity) and press `Ctrl+Alt+R`. |
+| 🪟 **Glass status widget** | Acrylic, always on top, draggable, never steals focus. Animated orb, aurora and live waveform for every state. |
+| 🔔 **Tray icon** | Lives next to the clock, changes colour with the state; show/hide the widget and reach every action. |
+| ⚡ **Light & instant** | Piper synthesizes ~11× faster than real time on CPU; models stay loaded in a small background service. |
+| 🔒 **Private & safe** | 100% offline; the local API rejects web pages, DNS rebinding and oversized requests. |
 
-Speech stops automatically when you start push-to-talk.
+## 🚀 Quick start
 
-**Auto-listen:** after an agent's final answer has been spoken, a beep plays and the mic stays open for 15 s. Talk and your reply (French or English, detected from your voice) is typed into the window you last prompted from. A pause of 1.5 s ends it. In hands-free mode it is also sent; otherwise you review it and press Enter. A low beep means nothing was heard.
-
-## Status widget
-
-A small glass panel (Windows acrylic blur), always on top. It starts with the service, sits at the top right by default, and can be dragged anywhere (it snaps to screen edges and remembers its position).
-
-- **Live state:** an animated orb, an aurora and a waveform show what's happening: *Ready*, *Speaking* (with an FR/EN badge), *Listening*, *Hearing you* (follows your mic level), *Transcribing*, *Muted*, *Offline*
-- **Main button:** changes with the state: skip and answer while it speaks, cancel while it listens, talk when idle, start the service when offline
-- **Chevron:** opens every action with its shortcut: reply now, hold to talk, stop, auto-send, mute, read selection. The last transcription is shown at the bottom
-- **Never steals focus:** clicking it keeps your agent window active, so dictated text still lands there
-- **Discreet:** it fades when idle; right-click it to move or hide it, or to stop the service
-
-Run `agent-voice widget` to reopen it. Set `"widget": {"enabled": false}` to stop it from launching, or `"blur": "blur"`/`"none"` if acrylic misbehaves on your machine.
-
-## Supported agents
-
-| Agent | How | Install |
-|---|---|---|
-| Claude Code (CLI, desktop, IDE) | `Stop` + `PreToolUse` hooks. Speaks progress messages between tool calls and the final answer, never twice | `agent-voice install claude` |
-| Codex CLI | top-level `notify` in `~/.codex/config.toml` | `agent-voice install codex` |
-| Gemini CLI | `AfterAgent` hook in `~/.gemini/settings.json` | `agent-voice install gemini` |
-| Cursor | `afterAgentResponse` in `~/.cursor/hooks.json` | `agent-voice install cursor` |
-| Antigravity / anything else | select the reply and press `Ctrl+Alt+R`, or pipe text: `echo hi \| agent-voice say` | none needed |
-
-Each installer backs up the file it changes (`*.bak-agent-voice`) and is idempotent; `agent-voice uninstall <agent>` reverts it.
-The payload the Codex, Gemini and Cursor hooks last received is saved to `~/.agent-voice/logs/payload-<agent>.json`, which helps if one of them changes its format.
-
-## Setup
+> Windows 11 · Python 3.13 recommended (some audio/ML wheels lag behind the newest Python).
 
 ```bash
+git clone https://github.com/ElMastho/agent-voice.git
+cd agent-voice
 py -3.13 -m venv .venv
 .venv/Scripts/pip install -e .
-.venv/Scripts/agent-voice setup              # config, voices, whisper model
-.venv/Scripts/agent-voice install claude     # or: codex gemini cursor / all
-.venv/Scripts/agent-voice autostart on       # start hidden at Windows login
+.venv/Scripts/agent-voice setup              # config + voices + speech-recognition model (~600 MB)
+.venv/Scripts/agent-voice install claude     # or: codex gemini cursor | all
+.venv/Scripts/agent-voice autostart on       # start with Windows (service + widget + tray icon)
 .venv/Scripts/agent-voice start
 ```
 
-Python 3.13 is used because some audio/ML wheels lag behind the newest Python.
+Then open a **new** Claude Code session and ask it anything. You'll hear the answer, then a beep: reply out loud. The full walkthrough is in the **[user guide](docs/guide.md)**.
 
-## Commands
+## 🪟 The widget
 
-`start`, `shutdown`, `status`, `widget`, `say [text] [--lang fr|en]`, `stop`, `mute [on|off|toggle]`, `unmute`, `handsfree [on|off|toggle]`, `install`, `uninstall`, `autostart on|off`, `setup`, `serve` (foreground, for debugging).
+<p align="center">
+  <img src="docs/images/states.jpg" alt="Widget states: Ready, Speaking, Listening, Hearing you, Transcribing, Muted" width="100%">
+</p>
 
-## Configuration: `~/.agent-voice/config.json`
+| State | What you see | Main button |
+|---|---|---|
+| **Ready** | Slate orb, slow breathing | 🎙️ talk now |
+| **Speaking** | Violet orb with ripples, FR/EN badge, waveform follows the voice | ⏭️ skip & answer |
+| **Listening** | Green pulse; `AUTO` badge when auto-send is on | ⏹️ cancel |
+| **Hearing you** | Ring and waveform follow your voice level | ⏹️ cancel |
+| **Transcribing** | Amber orb with a spinning arc, pulse sweeping the waveform | — |
+| **Muted** / **Offline** | Red / grey orb | 🎙️ talk / ⏻ start the service |
 
-- `voices`: Piper voice per language ([catalog](https://huggingface.co/rhasspy/piper-voices)); missing voices are downloaded automatically
-- `speed`: `1.0` is normal; lower is faster
-- `max_chars`: long replies are cut at a sentence boundary
-- `speak_progress`: also speak Claude's messages between tool calls
-- `hotkeys`: any [keyboard](https://github.com/boppreh/keyboard) combo
-- `stt.model`: `base` is faster, `small` is better in French
-- `auto_listen`: `enabled`, `window_seconds`, `silence_seconds`, `max_seconds`
+<img align="right" src="docs/images/panel.jpg" alt="Expanded widget with all actions" width="330">
 
-Restart the daemon after editing (`agent-voice shutdown && agent-voice start`). Logs: `~/.agent-voice/logs/server.log`.
+Open the chevron for **every action with its shortcut**: reply now, hold to talk, stop, auto-send, mute, read selection. The bottom line shows the last thing it heard from you, with its language, so you can trust the transcription at a glance.
 
-## How it works
+- **Drag** it anywhere: it snaps to screen edges and remembers its place.
+- **Discreet**: it fades when idle and lights up when something happens.
+- **Never steals focus**: clicking it keeps your agent window active.
+- **Hide / show**: `Ctrl+Alt+W`, a click on the tray icon, or right-click → *Hide widget*.
+- **Tray menu**: every action, auto-send/mute toggles, start/stop the service, *Start with Windows*.
 
+<br clear="right">
+
+## ⌨️ Shortcuts
+
+| Keys | Action |
+|---|---|
+| `Ctrl+Alt+A` | **Reply now**: stop the voice and listen for your answer |
+| `Ctrl+Alt+Space` *(hold)* | **Push-to-talk** in any window |
+| `Ctrl+Alt+S` | **Stop** speaking / listening |
+| `Ctrl+Alt+H` | **Auto-send** on/off (the voice confirms) |
+| `Ctrl+Alt+M` | **Mute** on/off |
+| `Ctrl+Alt+R` | **Read** the selected text aloud |
+| `Ctrl+Alt+W` | **Show / hide** the widget |
+
+All of them can be changed in `~/.agent-voice/config.json`.
+
+## 🤖 Supported agents
+
+| Agent | Integration | Install |
+|---|---|---|
+| **Claude Code** (CLI, desktop, IDE) | `Stop`, `PreToolUse` and `UserPromptSubmit` hooks: progress + final answer, reply window tracking | `agent-voice install claude` |
+| **Codex CLI** | top-level `notify` in `~/.codex/config.toml` | `agent-voice install codex` |
+| **Gemini CLI** | `AfterAgent` hook in `~/.gemini/settings.json` | `agent-voice install gemini` |
+| **Cursor** | `afterAgentResponse` in `~/.cursor/hooks.json` | `agent-voice install cursor` |
+| **Antigravity** / anything else | select + `Ctrl+Alt+R`, or `echo text \| agent-voice say` | none needed |
+
+Installers back up the file they touch (`*.bak-agent-voice`), are idempotent, and `agent-voice uninstall <agent>` reverts them.
+
+## 🧠 How it works
+
+```mermaid
+flowchart LR
+    subgraph Agents
+        CC[Claude Code]:::a
+        CX[Codex CLI]:::a
+        GM[Gemini CLI]:::a
+        CU[Cursor]:::a
+    end
+    CC & CX & GM & CU -- hook --> H["agent-voice hook<br/><sub>stdlib only · never fails</sub>"]
+    H -- "POST /speak · /prompt" --> D
+
+    subgraph D["Background service · 127.0.0.1:59125"]
+        direction TB
+        Q[Ordered job queue] --> C[Clean markdown] --> L[FR/EN per sentence<br/><sub>lingua</sub>]
+        L --> T[Piper TTS<br/><sub>synth thread</sub>] --> P[Playback thread]
+        P -- "speech ends" --> M[Mic: voice-activity detection]
+        K[Global hotkeys] --> M
+        M --> W[faster-whisper<br/><sub>FR/EN auto</sub>] --> V[Paste into agent window<br/><sub>+ Enter if auto-send</sub>]
+    end
+
+    UI["Glass widget + tray<br/><sub>PySide6 · polls /status</sub>"] <-- "/status · /reply · /ptt · /stop…" --> D
+    classDef a fill:#8B7CFF22,stroke:#8B7CFF;
 ```
-agent hook ──POST /speak──▶ daemon (127.0.0.1:59125)
-                             ├─ clean markdown (code blocks, links, paths, tables)
-                             ├─ split into sentences, detect FR/EN
-                             ├─ Piper synth thread ─▶ playback thread (next sentence synthesized while one plays)
-                             └─ global hotkeys, push-to-talk ─▶ Whisper ─▶ paste
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor You
+    participant Agent as Claude Code
+    participant AV as agent-voice
+    You->>Agent: prompt (window remembered)
+    Agent-->>AV: progress text (PreToolUse)
+    AV-->>You: 🔊 "Je regarde le serveur…"
+    Agent-->>AV: final answer (Stop)
+    AV-->>You: 🔊 answer, FR/EN voices
+    AV-->>You: 🔔 beep, mic open
+    You->>AV: 🎙️ "Oui, vas-y, déploie."
+    AV->>AV: Whisper → "Oui, vas-y, déploie." (fr)
+    AV->>Agent: typed into the prompt (+ Enter with auto-send)
 ```
 
-Hooks are stdlib-only, fail silently, and start the daemon if it isn't running.
+## ⚙️ Configuration
+
+`~/.agent-voice/config.json` (created by `agent-voice setup`, merged over defaults):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `voices.en` / `voices.fr` | `en_US-hfc_male-medium` / `fr_FR-siwis-medium` | Any [Piper voice](https://huggingface.co/rhasspy/piper-voices); `name:speaker` for multi-speaker models. Downloaded on first use |
+| `speed` | `0.67` | Piper length scale: `1.0` normal, lower is faster |
+| `max_chars` | `1500` | Long replies are cut at a sentence boundary |
+| `speak_progress` | `true` | Also speak Claude's messages between tool calls |
+| `auto_listen` | `enabled`, 15 s window, 1.5 s silence, 90 s max | Mic after the final answer |
+| `stt.model` | `small` | Whisper size: `base` is faster, `small` is better in French |
+| `widget` | `enabled: true`, `blur: "acrylic"` | `blur`: `acrylic` / `blur` / `none` |
+| `hotkeys.*` | see above | Any [keyboard](https://github.com/boppreh/keyboard) combination |
+
+Restart after editing: `agent-voice shutdown && agent-voice start`.
+
+## 🧰 Commands
+
+```text
+agent-voice start | shutdown | status          run / stop / inspect the background service
+agent-voice say "text" [--lang fr|en] [--voice NAME]
+agent-voice stop | mute [on|off|toggle] | unmute | handsfree [on|off|toggle]
+agent-voice widget                              reopen the widget + tray icon
+agent-voice install | uninstall [claude codex gemini cursor | all]
+agent-voice autostart on|off                    start with Windows
+agent-voice setup                               config, voices, Whisper model
+agent-voice serve                               run in the foreground (debugging)
+```
+
+## 🔒 Privacy & security
+
+- **Offline by design**: text-to-speech, transcription and language detection all run locally. Audio never leaves the machine.
+- **Local API only**: the service listens on `127.0.0.1` and rejects any request carrying an `Origin` header, a foreign `Host` (DNS rebinding) or a non-JSON body. Web pages can't drive it.
+- **Clipboard-safe**: dictation pastes via the clipboard and restores what you had copied.
+- **Agent-safe**: hooks are stdlib-only, time-boxed and swallow their own errors. A voice problem never breaks your agent.
+
+## 🧪 Development
+
+```bash
+.venv/Scripts/pip install -e ".[dev]"
+.venv/Scripts/python -m pytest -q             # unit tests
+.venv/Scripts/agent-voice serve               # service in the foreground, logs in the console
+.venv/Scripts/python scripts/render_docs.py   # regenerate the README images from the widget code
+```
+
+Architecture notes, invariants and gotchas for contributors (human or AI) are in **[AGENTS.md](AGENTS.md)**.
+
+## 🙏 Built with
+
+| Project | Role | License |
+|---|---|---|
+| [Piper](https://github.com/OHF-Voice/piper1-gpl) (`piper-tts`) | Neural text-to-speech | GPL-3.0-or-later |
+| [Piper voices](https://huggingface.co/rhasspy/piper-voices) | Voice models (`hfc_male`, `siwis`…) | Per voice: see each model card |
+| [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | Speech-to-text | MIT |
+| [CTranslate2](https://github.com/OpenNMT/CTranslate2) | Whisper inference engine | MIT |
+| [OpenAI Whisper](https://github.com/openai/whisper) | Speech recognition model weights | MIT |
+| [ONNX Runtime](https://github.com/microsoft/onnxruntime) | Runs the Piper models | MIT |
+| [Lingua](https://github.com/pemistahl/lingua-py) | French/English detection | Apache-2.0 |
+| [PySide6 / Qt](https://doc.qt.io/qtforpython-6/) | Widget and tray icon | LGPL-3.0 |
+| [sounddevice](https://github.com/spatialaudio/python-sounddevice) | Audio playback & recording | MIT |
+| [keyboard](https://github.com/boppreh/keyboard) | Global hotkeys | MIT |
+| [pyperclip](https://github.com/asweigart/pyperclip) | Clipboard | BSD-3-Clause |
+| [NumPy](https://numpy.org) | Audio buffers | BSD-3-Clause |
+| [Segoe Fluent Icons](https://learn.microsoft.com/windows/apps/design/style/segoe-fluent-icons-font) | Widget icons (system font, not redistributed) | Microsoft |
+
+## 📄 License
+
+Copyright © 2026 ElMastho.
+
+agent-voice is free software: you can redistribute it and/or modify it under the terms of the **GNU General Public License v3.0 or later**. See [LICENSE](LICENSE). It is distributed in the hope that it will be useful, but **without any warranty**. GPL-3.0 is used because agent-voice builds on Piper, which is itself GPL-3.0. Voice models keep their own licenses.

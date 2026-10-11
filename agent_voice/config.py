@@ -36,6 +36,8 @@ DEFAULTS: dict = {
         "hands_free": "ctrl+alt+h",
         "mute": "ctrl+alt+m",
         "read_selection": "ctrl+alt+r",
+        # Show / hide the floating widget (also from the tray icon).
+        "widget": "ctrl+alt+w",
         "push_to_talk": "ctrl+alt+space",
     },
     "stt": {

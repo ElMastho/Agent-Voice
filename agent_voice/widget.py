@@ -16,6 +16,8 @@ import time
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import (
     QAction,
+    QIcon,
+    QPixmap,
     QColor,
     QConicalGradient,
     QFont,
@@ -26,7 +28,7 @@ from PySide6.QtGui import (
     QPen,
     QRadialGradient,
 )
-from PySide6.QtWidgets import QApplication, QMenu, QToolTip, QWidget
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QToolTip, QWidget
 
 from agent_voice import client
 from agent_voice.config import HOME, load_config
@@ -146,6 +148,38 @@ def _apply_windows_style(hwnd: int, blur: str) -> bool:
         return False
 
 
+MENU_STYLE = (
+    "QMenu{background:#161925;color:#E5E7EB;border:1px solid #2A2F3E;border-radius:10px;padding:6px;}"
+    "QMenu::item{padding:6px 22px 6px 14px;border-radius:6px;}"
+    "QMenu::item:selected{background:#2A2F45;}"
+    "QMenu::item:disabled{color:#7C8496;}"
+    "QMenu::separator{height:1px;background:#2A2F3E;margin:4px 8px;}"
+    "QMenu::indicator{width:14px;height:14px;margin-left:4px;}"
+)
+
+
+def orb_icon(color: QColor, glyph: str, size: int = 64) -> QIcon:
+    """The widget's orb as an app/tray icon, tinted with the current phase colour."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    c = QPointF(size / 2, size / 2)
+    r = size * 0.44
+    core = QRadialGradient(QPointF(c.x() - r * 0.35, c.y() - r * 0.45), r * 1.6)
+    core.setColorAt(0, color.lighter(165))
+    core.setColorAt(0.55, color)
+    core.setColorAt(1, color.darker(170))
+    p.setPen(Qt.NoPen)
+    p.setBrush(core)
+    p.drawEllipse(c, r, r)
+    p.setFont(QFont(ICON_FONT, int(size * 0.3)))
+    p.setPen(QColor(255, 255, 255, 240))
+    p.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, glyph)
+    p.end()
+    return QIcon(pm)
+
+
 # -- background I/O ----------------------------------------------------------------------
 class Poller(QObject):
     status = Signal(object)
@@ -225,6 +259,8 @@ class VoiceWidget(QWidget):
 
         self.poller = Poller()
         self.poller.status.connect(self._on_status)
+        self._toggles_seen: int | None = None
+        self.tray: Tray | None = None
         self.frame = QTimer(self, interval=33, timeout=self._tick)
         self.frame.start()
 
@@ -241,6 +277,7 @@ class VoiceWidget(QWidget):
             pos = json.loads(POS_FILE.read_text(encoding="utf-8"))
             x, y = int(pos["x"]), int(pos["y"])
             self.expanded = bool(pos.get("expanded", False))
+            self.start_hidden = bool(pos.get("hidden", False))
         except (OSError, ValueError, KeyError):
             x, y = screen.right() - WIDTH - 16, screen.top() + 64
         # Keep it on a visible screen (monitors may have changed since last time).
@@ -252,7 +289,8 @@ class VoiceWidget(QWidget):
     def _save_position(self) -> None:
         try:
             HOME.mkdir(parents=True, exist_ok=True)
-            POS_FILE.write_text(json.dumps({"x": self.x(), "y": self.y(), "expanded": self.expanded}), encoding="utf-8")
+            state = {"x": self.x(), "y": self.y(), "expanded": self.expanded, "hidden": not self.isVisible()}
+            POS_FILE.write_text(json.dumps(state), encoding="utf-8")
         except OSError:
             pass
 
@@ -278,6 +316,14 @@ class VoiceWidget(QWidget):
             self.flash = 1.0
         self.phase = phase
         self._accent_target = QColor(PHASES.get(phase, PHASES["idle"])[0])
+        # Show/hide hotkey (handled by the daemon, which owns the global hotkeys).
+        toggles = self.st.get("widget_toggles")
+        if toggles is not None:
+            if self._toggles_seen is not None and toggles != self._toggles_seen:
+                self.toggle_visible()
+            self._toggles_seen = toggles
+        if self.tray:
+            self.tray.refresh()
         self._second_target = QColor(SECONDARY.get(phase, SECONDARY["idle"]))
 
     def _tick(self) -> None:
@@ -761,6 +807,16 @@ class VoiceWidget(QWidget):
         elif key == "read":
             _post("/read")
 
+    def toggle_visible(self) -> None:
+        if self.isVisible():
+            self.hide()
+        else:
+            self.show()
+            self.raise_()
+        self._save_position()
+        if self.tray:
+            self.tray.refresh(force=True)
+
     def toggle_expanded(self) -> None:
         self.expanded = not self.expanded
         self._height_anim.stop()
@@ -771,12 +827,7 @@ class VoiceWidget(QWidget):
 
     def contextMenuEvent(self, e):
         menu = QMenu(self)
-        menu.setStyleSheet(
-            "QMenu{background:#161925;color:#E5E7EB;border:1px solid #2A2F3E;border-radius:10px;padding:6px;}"
-            "QMenu::item{padding:6px 18px;border-radius:6px;}"
-            "QMenu::item:selected{background:#2A2F45;}"
-            "QMenu::separator{height:1px;background:#2A2F3E;margin:4px 8px;}"
-        )
+        menu.setStyleSheet(MENU_STYLE)
         geo = (self.screen() or QApplication.primaryScreen()).availableGeometry()
         actions = [
             ("Collapse" if self.expanded else "Show all actions", self.toggle_expanded),
@@ -784,7 +835,7 @@ class VoiceWidget(QWidget):
             ("Move to top right", lambda: self._place(geo.right() - WIDTH - 16, geo.top() + 64)),
             ("Move to top left", lambda: self._place(geo.left() + 16, geo.top() + 64)),
             (None, None),
-            ("Hide widget", QApplication.quit),
+            (f"Hide widget ({_hotkey_label(self.hotkeys.get('widget', ''))})", self.toggle_visible),
             ("Stop voice service", lambda: (_post("/shutdown"))),
         ]
         for label, fn in actions:
@@ -801,11 +852,95 @@ class VoiceWidget(QWidget):
         self._save_position()
 
 
+class Tray(QSystemTrayIcon):
+    """Notification-area icon: live state colour, left-click shows/hides the widget, right-click for actions."""
+
+    GLYPHS = {"speaking": "volume", "waiting": "mic", "recording": "mic", "muted": "mute",
+              "offline": "power", "transcribing": "chat"}
+
+    def __init__(self, widget: VoiceWidget):
+        super().__init__(widget)
+        self.w = widget
+        self._shown_phase = None
+        self.menu = QMenu()
+        self.menu.setStyleSheet(MENU_STYLE)
+        self.menu.aboutToShow.connect(self._build_menu)
+        self.setContextMenu(self.menu)
+        self.activated.connect(self._on_activated)
+        self.refresh(force=True)
+        self.show()
+
+    def refresh(self, force: bool = False) -> None:
+        phase = self.w.phase
+        if phase == self._shown_phase and not force:
+            return
+        self._shown_phase = phase
+        color = QColor(PHASES.get(phase, PHASES["idle"])[0])
+        self.setIcon(orb_icon(color, ICONS[self.GLYPHS.get(phase, "mic")]))
+        title = PHASES.get(phase, PHASES["idle"])[1]
+        lang = self.w.st.get("speaking_lang", "")
+        extra = " · auto-send" if self.w.st.get("hands_free") else ""
+        self.setToolTip(f"agent-voice · {title}{f' ({lang.upper()})' if lang else ''}{extra}")
+
+    def _on_activated(self, reason) -> None:
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self.w.toggle_visible()
+
+    def _build_menu(self) -> None:
+        m, w, st = self.menu, self.w, self.w.st
+        hk = w.hotkeys
+        m.clear()
+        online = w.phase != "offline"
+
+        def add(label, fn, enabled=True, checked=None, key=""):
+            text = f"{label}\t{_hotkey_label(key)}" if key else label
+            act = QAction(text, m)
+            act.setEnabled(enabled)
+            if checked is not None:
+                act.setCheckable(True)
+                act.setChecked(checked)
+            act.triggered.connect(fn)
+            m.addAction(act)
+
+        add("Hide widget" if w.isVisible() else "Show widget", w.toggle_visible, key=hk.get("widget", ""))
+        m.addSeparator()
+        add("Reply now", lambda: _post("/reply"), online, key=hk.get("reply", ""))
+        add("Stop", lambda: _post("/stop"), online, key=hk.get("stop", ""))
+        add("Read selection", lambda: _post("/read"), online, key=hk.get("read_selection", ""))
+        m.addSeparator()
+        add("Auto-send replies", lambda: _post("/handsfree", {"mode": "toggle"}), online,
+            bool(st.get("hands_free")), hk.get("hands_free", ""))
+        add("Mute voice", lambda: _post("/mute", {"mode": "toggle"}), online, bool(st.get("muted")), hk.get("mute", ""))
+        m.addSeparator()
+        if online:
+            add("Stop voice service", lambda: _post("/shutdown"))
+        else:
+            add("Start voice service", lambda: threading.Thread(target=client.start_detached, daemon=True).start())
+        add("Start with Windows", self._toggle_autostart, checked=_autostart_enabled())
+        m.addSeparator()
+        add("Quit widget", QApplication.quit)
+
+    @staticmethod
+    def _toggle_autostart() -> None:
+        from agent_voice.install import autostart
+
+        autostart(not _autostart_enabled())
+
+
+def _autostart_enabled() -> bool:
+    if sys.platform != "win32":
+        return False
+    from agent_voice.install import _startup_file
+
+    return _startup_file().exists()
+
+
 def run(demo: str | None = None) -> int:
     from PySide6.QtCore import QLockFile
 
     app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(True)
+    # Hiding the widget must not quit: the tray icon keeps running.
+    app.setQuitOnLastWindowClosed(False)
     HOME.mkdir(parents=True, exist_ok=True)
     lock = QLockFile(str(HOME / "widget.lock"))
     if not demo and not lock.tryLock(100):
@@ -816,5 +951,9 @@ def run(demo: str | None = None) -> int:
         fake = {"phase": demo, "level": 0.03, "speaking_lang": "fr", "hands_free": demo == "waiting",
                 "last_heard": "Peux-tu ajouter des tests pour le serveur ?", "last_heard_lang": "fr"}
         QTimer.singleShot(0, lambda: w._on_status(fake))
-    w.show()
+    app.setWindowIcon(orb_icon(QColor(PHASES["speaking"][0]), ICONS["volume"]))
+    if not getattr(w, "start_hidden", False):
+        w.show()
+    if not demo and QSystemTrayIcon.isSystemTrayAvailable():
+        w.tray = Tray(w)
     return app.exec()

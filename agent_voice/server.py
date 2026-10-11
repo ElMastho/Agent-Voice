@@ -49,6 +49,8 @@ class Daemon:
         self.last_heard = ""
         self.last_heard_lang = ""
         self._ptt_release = threading.Event()
+        # Bumped by the show/hide hotkey; the widget toggles when it sees the number change.
+        self.widget_toggles = 0
         threading.Thread(target=self._listen_monitor, name="listen", daemon=True).start()
 
     def _job_loop(self) -> None:
@@ -222,6 +224,7 @@ class Daemon:
             "level": round(self.level, 4),
             "speaking_lang": self.speaker.current_spec[:2] if self.speaker.busy else "",
             "awaiting_reply": self._listen_armed,
+            "widget_toggles": self.widget_toggles,
             "last_heard": self.last_heard[-160:],
             "last_heard_lang": self.last_heard_lang,
             "muted": self.muted,
@@ -244,6 +247,8 @@ class Daemon:
             keyboard.add_hotkey(hk["stop"], self.stop)
         if hk.get("reply"):
             keyboard.add_hotkey(hk["reply"], self.reply_now)
+        if hk.get("widget"):
+            keyboard.add_hotkey(hk["widget"], lambda: setattr(self, "widget_toggles", self.widget_toggles + 1))
         if hk.get("hands_free"):
             keyboard.add_hotkey(hk["hands_free"], lambda: self.set_hands_free(not self.hands_free))
         if hk.get("mute"):

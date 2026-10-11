@@ -35,7 +35,9 @@ from agent_voice.config import HOME, load_config
 
 WIDTH = 320
 BAR_H = 64
-EXPANDED_H = 238
+EXPANDED_H = 274
+SPEEDS = (1.0, 1.25, 1.5, 1.75, 2.0)
+SPEED_Y = BAR_H + 10 + 2 * 58 + 8 + 6  # top of the speed row
 # Matches Windows 11's native window rounding (DWMWCP_ROUND = 8 px), the only rounding that
 # also clips the acrylic blur; any other radius leaves blurred square corners showing.
 RADIUS = 8
@@ -230,6 +232,7 @@ class VoiceWidget(QWidget):
         self.energy = 0.0  # how lively the waveform/aurora are, eased per phase
         self.flash = 0.0  # ripple when the phase changes
         self.hover_t: dict[str, float] = {}  # eased hover amount per button
+        self.speed_pos: float | None = None  # animated index of the speed indicator
         self.prev_title = ""
         self.title_t = 1.0  # title crossfade progress
         self.expanded = False
@@ -336,6 +339,8 @@ class VoiceWidget(QWidget):
                        "transcribing": 0.6}.get(self.phase, 0.12)
         self.energy = _ease(self.energy, want_energy, 0.08)
         self.flash = max(0.0, self.flash - 0.035)
+        target_idx = self._speed_index()
+        self.speed_pos = target_idx if self.speed_pos is None else _ease(self.speed_pos, target_idx, 0.22)
         self.title_t = min(1.0, self.title_t + 0.09)
         for key in set(self.hover_t) | ({self.hover} if self.hover else set()):
             self.hover_t[key] = _ease(self.hover_t.get(key, 0.0), 1.0 if key == self.hover else 0.0, 0.25)
@@ -386,7 +391,19 @@ class VoiceWidget(QWidget):
             for i, tile in enumerate(self._tiles()):
                 row, col = divmod(i, 3)
                 r[tile[0]] = QRectF(pad + col * (tw + gap), BAR_H + 10 + row * (th + gap), tw, th)
+            track = self._speed_track()
+            seg = track.width() / len(SPEEDS)
+            for i, x in enumerate(SPEEDS):
+                r[f"speed:{x}"] = QRectF(track.x() + i * seg, track.y(), seg, track.height())
         return r
+
+    @staticmethod
+    def _speed_track() -> QRectF:
+        return QRectF(70, SPEED_Y, WIDTH - 70 - 12, 26)
+
+    def _speed_index(self) -> float:
+        x = float(self.st.get("speed_x", 1.5) or 1.5)
+        return float(min(range(len(SPEEDS)), key=lambda i: abs(SPEEDS[i] - x)))
 
     def _hit(self, pos: QPointF) -> str | None:
         for key, rect in self._rects().items():
@@ -711,7 +728,9 @@ class VoiceWidget(QWidget):
             p.restore()
 
         # Footer: what was last heard, so you can trust the transcription at a glance.
-        y = BAR_H + 10 + 2 * 58 + 8 + 8
+        self._paint_speed(p, progress)
+
+        y = SPEED_Y + 26 + 10
         heard = self.st.get("last_heard", "")
         p.setFont(self.f_sub)
         if heard:
@@ -725,6 +744,44 @@ class VoiceWidget(QWidget):
             p.setPen(QColor(226, 232, 240, 95))
             p.drawText(QRectF(14, y, WIDTH - 28, 20), Qt.AlignLeft | Qt.AlignVCenter,
                        "Drag to move · right-click for options")
+
+    def _paint_speed(self, p: QPainter, progress: float) -> None:
+        """Segmented 1x..2x control with a sliding indicator."""
+        appear = max(0.0, min(1.0, (progress - 6 * 0.07) / 0.5))
+        if appear <= 0:
+            return
+        p.save()
+        p.setOpacity(appear)
+        track = self._speed_track().translated(0, 10 * (1 - appear))
+        p.setFont(self.f_tile)
+        p.setPen(QColor(226, 232, 240, 170))
+        p.drawText(QRectF(14, track.y(), 56, track.height()), Qt.AlignLeft | Qt.AlignVCenter, "Speed")
+
+        p.setPen(QPen(QColor(255, 255, 255, 22), 1))
+        p.setBrush(QColor(255, 255, 255, 12))
+        p.drawRoundedRect(track, 8, 8)
+
+        seg = track.width() / len(SPEEDS)
+        pos = self.speed_pos if self.speed_pos is not None else self._speed_index()
+        ind = QRectF(track.x() + pos * seg + 2, track.y() + 2, seg - 4, track.height() - 4)
+        glow = QColor(self.accent)
+        glow.setAlpha(110)
+        p.setPen(QPen(QColor(255, 255, 255, 60), 1))
+        p.setBrush(glow)
+        p.drawRoundedRect(ind, 6, 6)
+
+        active = round(pos)
+        for i, x in enumerate(SPEEDS):
+            rect = QRectF(track.x() + i * seg, track.y(), seg, track.height())
+            ht = self.hover_t.get(f"speed:{x}", 0.0)
+            if i != active and ht > 0.01:
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(255, 255, 255, int(18 * ht)))
+                p.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 6, 6)
+            p.setFont(self.f_chip if i == active else self.f_hint)
+            p.setPen(QColor(255, 255, 255, 245 if i == active else int(150 + 60 * ht)))
+            p.drawText(rect, Qt.AlignCenter, f"{x:g}×")
+        p.restore()
 
     # -- interaction ----------------------------------------------------------------------
     def enterEvent(self, _e):
@@ -762,6 +819,8 @@ class VoiceWidget(QWidget):
         for tid, _icon, label, hk, _active in self._tiles():
             if tid == key:
                 return f"{label} ({_hotkey_label(hk)})" if hk else label
+        if key and key.startswith("speed:"):
+            return f"Voice speed {float(key.split(':', 1)[1]):g}×"
         return ""
 
     def mousePressEvent(self, e):
@@ -806,6 +865,10 @@ class VoiceWidget(QWidget):
             _post("/mute", {"mode": "toggle"})
         elif key == "read":
             _post("/read")
+        elif key.startswith("speed:"):
+            value = float(key.split(":", 1)[1])
+            self.st["speed_x"] = value  # move the indicator now, don't wait for the next poll
+            _post("/speed", {"value": value})
 
     def toggle_visible(self) -> None:
         if self.isVisible():
@@ -912,6 +975,16 @@ class Tray(QSystemTrayIcon):
             bool(st.get("hands_free")), hk.get("hands_free", ""))
         add("Mute voice", lambda: _post("/mute", {"mode": "toggle"}), online, bool(st.get("muted")), hk.get("mute", ""))
         add("Summarize answers", lambda: _post("/summary", {"mode": "toggle"}), online, bool(st.get("summary", True)))
+        speed_menu = m.addMenu("Voice speed")
+        speed_menu.setStyleSheet(MENU_STYLE)
+        speed_menu.setEnabled(online)
+        current = float(st.get("speed_x", 1.5) or 1.5)
+        for x in SPEEDS:
+            act = QAction(f"{x:g}×", speed_menu)
+            act.setCheckable(True)
+            act.setChecked(abs(x - current) < 0.01)
+            act.triggered.connect(lambda _=False, v=x: _post("/speed", {"value": v}))
+            speed_menu.addAction(act)
         m.addSeparator()
         if online:
             add("Stop voice service", lambda: _post("/shutdown"))

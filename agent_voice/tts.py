@@ -33,6 +33,11 @@ class Speaker:
         self._text_q: queue.Queue = queue.Queue()
         self._audio_q: queue.Queue = queue.Queue(maxsize=4)
         self._playing = threading.Event()
+        # Cleared while the user is talking: the mic has priority, nothing plays until released.
+        self._allowed = threading.Event()
+        self._allowed.set()
+        self._holds = 0  # several mic sessions can overlap (auto-listen + push-to-talk)
+        self._hold_lock = threading.Lock()
         self._synthesizing = threading.Event()
         self.current_spec = ""
         threading.Thread(target=self._synth_loop, name="synth", daemon=True).start()
@@ -77,6 +82,19 @@ class Speaker:
             self._text_q.put((gen, voice or self._spec(seg_lang), sentence))
         return len(segments)
 
+    def hold(self) -> None:
+        """Silence now and keep anything that arrives queued until release()."""
+        with self._hold_lock:
+            self._holds += 1
+            self._allowed.clear()
+        sd.stop()
+
+    def release(self) -> None:
+        with self._hold_lock:
+            self._holds = max(0, self._holds - 1)
+            if self._holds == 0:
+                self._allowed.set()
+
     def stop(self) -> None:
         self._gen += 1
         for q in (self._text_q, self._audio_q):
@@ -120,7 +138,8 @@ class Speaker:
     def _play_loop(self) -> None:
         while True:
             gen, audio, rate, spec = self._audio_q.get()
-            if gen != self._gen:
+            self._allowed.wait()
+            if gen != self._gen:  # stopped (e.g. a new prompt was sent) while on hold
                 continue
             self.current_spec = spec
             self._playing.set()

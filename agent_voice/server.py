@@ -27,11 +27,17 @@ def _beep(freq: int, ms: int = 90) -> None:
         threading.Thread(target=winsound.Beep, args=(freq, ms), daemon=True).start()
 
 
+SPEEDS = (1.0, 1.25, 1.5, 1.75, 2.0)
+
+
 class Daemon:
     def __init__(self, config: dict):
         self.config = config
-        self.speaker = Speaker(config)
         self.state = load_state()
+        if self.state.get("speed_x"):
+            # The speaker reads config["speed"] (Piper length_scale) for every sentence.
+            config["speed"] = 1.0 / float(self.state["speed_x"])
+        self.speaker = Speaker(config)
         self.transcriber = None
         self._ptt_active = False
         # Requests are processed in order by one worker so replies are never spoken out of order.
@@ -91,6 +97,21 @@ class Daemon:
         log.info("summary=%s", on)
         self.speaker.stop()
         self.speaker.speak("Summaries on." if on else "Full answers.", "en")
+
+    @property
+    def speed_x(self) -> float:
+        """Playback rate as a multiplier (1.5 = 1.5x faster than natural)."""
+        return round(1.0 / float(self.config["speed"]), 2)
+
+    def set_speed(self, x: float) -> None:
+        x = min(3.0, max(0.5, float(x)))
+        self.config["speed"] = 1.0 / x
+        self.state["speed_x"] = x
+        save_state(self.state)
+        log.info("speed=%sx", x)
+        # Applies from the next sentence; give a sample when idle so the change can be heard.
+        if not self.speaker.busy and not self.muted:
+            self.speaker.speak(f"Speed {x:g}.", "en")
 
     def set_muted(self, muted: bool) -> None:
         self.state["muted"] = muted
@@ -178,6 +199,7 @@ class Daemon:
         self._listen_cancel.clear()
         self._listening = True
         self._mic_phase = "waiting"
+        self.speaker.hold()
         try:
             _beep(700, 70)
             time.sleep(0.15)  # don't record our own beep
@@ -205,6 +227,7 @@ class Daemon:
             log.exception("auto-listen failed")
         finally:
             self._listening = False
+            self.speaker.release()
             self._mic_phase = ""
             self.level = 0.0
 
@@ -244,6 +267,7 @@ class Daemon:
             "muted": self.muted,
             "hands_free": self.hands_free,
             "summary": self.summary,
+            "speed_x": self.speed_x,
             "speaking": self.speaker.busy,
             "listening": self._listening,
             "voices": self.config["voices"],
@@ -336,6 +360,7 @@ class Daemon:
 
         try:
             self.speaker.stop()  # you talk, the agent shuts up
+            self.speaker.hold()  # ...and stays quiet until you're done
             self.cancel_listen()
             rec = Recorder(on_level=self._set_level)
             rec.start()
@@ -356,6 +381,7 @@ class Daemon:
             log.exception("push-to-talk failed")
         finally:
             self._ptt_active = False
+            self.speaker.release()
             self._mic_phase = ""
             self.level = 0.0
 
@@ -441,6 +467,12 @@ def _handler(daemon: Daemon):
             if self.path == "/stop":
                 daemon.stop()
                 return self._json(200, {"ok": True})
+            if self.path == "/speed":
+                try:
+                    daemon.set_speed(float(data.get("value")))
+                except (TypeError, ValueError):
+                    return self._json(400, {"error": "value must be a number"})
+                return self._json(200, {"speed_x": daemon.speed_x})
             if self.path == "/summary":
                 mode = data.get("mode", "toggle")
                 daemon.set_summary(not daemon.summary if mode == "toggle" else mode == "on")

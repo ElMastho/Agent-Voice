@@ -88,3 +88,25 @@ def test_summary_falls_back_to_opening_sentences():
 
 def test_full_mode_drops_summary_line():
     assert "Voice summary" not in hooks.strip_summary("Answer.\nVoice summary: short.")
+
+
+def test_speech_waits_while_mic_is_held(monkeypatch):
+    import time
+
+    from agent_voice import tts
+
+    played = []
+    monkeypatch.setattr(tts.sd, "play", lambda audio, rate: played.append(time.time()))
+    monkeypatch.setattr(tts.sd, "stop", lambda: None)
+    monkeypatch.setattr(tts.sd, "get_stream", lambda: type("S", (), {"active": False})())
+    sp = tts.Speaker({"voices": {"en": "x"}, "default_lang": "en", "speed": 1.0, "volume": 1.0, "max_chars": 0})
+    sp.hold()  # auto-listen
+    sp.hold()  # push-to-talk on top
+    sp._audio_q.put((sp._gen, tts.np.zeros(10, dtype="float32"), 16000, "x"))
+    time.sleep(0.2)
+    sp.release()  # auto-listen ends, push-to-talk still recording
+    time.sleep(0.2)
+    assert played == []
+    sp.release()
+    time.sleep(0.2)
+    assert len(played) == 1

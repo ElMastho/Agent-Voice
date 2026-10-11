@@ -173,6 +173,7 @@ sequenceDiagram
 | `speed` | `0.67` | Piper length scale: `1.0` normal, lower is faster |
 | `max_chars` | `1500` | Long replies are cut at a sentence boundary |
 | `speak_progress` | `true` | Also speak Claude's messages between tool calls |
+| *(runtime)* speed | `1.5×` | Voice speed 1× to 2×: widget panel, tray → *Voice speed*, or `agent-voice speed 1.75` |
 | `summary` | `enabled: true`, `max_chars: 280` | Speak a one-sentence summary of final answers (runtime toggle: tray or `agent-voice summary`) |
 | `auto_listen` | `enabled`, 15 s window, 1.5 s silence, 90 s max | Mic after the final answer |
 | `stt.model` | `small` | Whisper size: `base` is faster, `small` is better in French |
@@ -186,7 +187,7 @@ Restart after editing: `agent-voice shutdown && agent-voice start`.
 ```text
 agent-voice start | shutdown | status          run / stop / inspect the background service
 agent-voice say "text" [--lang fr|en] [--voice NAME]
-agent-voice stop | mute [on|off|toggle] | unmute | handsfree [on|off|toggle] | summary [on|off|toggle]
+agent-voice stop | mute [on|off|toggle] | unmute | handsfree [on|off|toggle] | summary [on|off|toggle] | speed [1-2]
 agent-voice widget                              reopen the widget + tray icon
 agent-voice install | uninstall [claude codex gemini cursor | all]
 agent-voice autostart on|off                    start with Windows

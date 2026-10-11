@@ -28,6 +28,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("mute", help="mute / unmute (default: toggle)")
     p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
     sub.add_parser("unmute", help="unmute")
+    p = sub.add_parser("summary", help="final answers as a one-sentence summary, or in full (default: toggle)")
+    p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
     p = sub.add_parser("handsfree", help="hands-free mode: voice replies are sent automatically (default: toggle)")
     p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
 
@@ -86,6 +88,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "stop":
         client.request("/stop", {})
         return 0
+    if args.cmd == "summary":
+        result = client.request("/summary", {"mode": args.mode})
+        print("not running" if result is None else f"summary {'on' if result['summary'] else 'off (full answers)'}")
+        return 0 if result else 1
     if args.cmd == "handsfree":
         result = client.request("/handsfree", {"mode": args.mode})
         print("not running" if result is None else f"hands-free {'on' if result['hands_free'] else 'off'}")

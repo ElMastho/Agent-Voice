@@ -48,13 +48,14 @@ The daemon and widget run as `pythonw` in the background. **Code changes need a 
 
 ## Invariants: do not break these
 
-1. **Hooks never break the agent.** `hooks.py` and `client.py` stay stdlib-only and fast, catch every exception (logged to `~/.agent-voice/logs/hook-errors.log`) and exit 0. Gemini and Cursor parse stdout as JSON, so print exactly `{}` for them and nothing else.
+1. **Hooks never break the agent.** `hooks.py`, `client.py` and `textclean.py` stay stdlib-only and fast, catch every exception (logged to `~/.agent-voice/logs/hook-errors.log`) and exit 0. Gemini and Cursor parse stdout as JSON, so print exactly `{}` for them and nothing else; Claude's `UserPromptSubmit` prints only its JSON `hookSpecificOutput`.
 2. **Spoken once, in order.** One daemon worker (`Daemon.jobs`) processes `/speak` in arrival order. Dedupe of Claude texts happens in `hooks._unspoken` under a cross-process lock file (parallel tool calls fire concurrent hooks). The `Stop` payload's `last_assistant_message` is only a fallback (`_covered`, whitespace-insensitive).
-3. **`final=True` arms auto-listen.** Only end-of-turn events (Claude `Stop`, Codex/Gemini/Cursor payloads) set it. Progress (`PreToolUse`) must not open the mic.
-4. **Local API stays locked down.** `_allowed()` in `server.py` rejects any `Origin` header, a `Host` other than `127.0.0.1:<port>`/`localhost:<port>`, non-JSON POSTs, and bodies over 1 MB. Every new endpoint goes through it; never bind to anything but `127.0.0.1`.
-5. **The widget never steals focus.** It uses `WS_EX_NOACTIVATE` + `Qt.WindowDoesNotAcceptFocus`; dictation pastes into the user's agent window and depends on this.
-6. **The widget is a view.** State lives in the daemon (`/status`). The widget only keeps its own position/visibility (`~/.agent-voice/widget.json`; not `state.json`, which the daemon rewrites wholesale).
-7. **Nothing leaves the machine.** No network calls except model downloads (Piper voices, Whisper weights) on first use.
+3. **Summaries are decided in the hook.** `hooks.summary_enabled()` reads `state.json` (runtime toggle) then config. Claude's `UserPromptSubmit` hook prints `additionalContext` asking for a `Voice summary:` line; `hooks.summarize()` prefers that line and falls back to the opening sentences. Full-text mode strips the line (`strip_summary`) so it is not read twice.
+4. **`final=True` arms auto-listen.** Only end-of-turn events (Claude `Stop`, Codex/Gemini/Cursor payloads) set it. Progress (`PreToolUse`) must not open the mic.
+5. **Local API stays locked down.** `_allowed()` in `server.py` rejects any `Origin` header, a `Host` other than `127.0.0.1:<port>`/`localhost:<port>`, non-JSON POSTs, and bodies over 1 MB. Every new endpoint goes through it; never bind to anything but `127.0.0.1`.
+6. **The widget never steals focus.** It uses `WS_EX_NOACTIVATE` + `Qt.WindowDoesNotAcceptFocus`; dictation pastes into the user's agent window and depends on this.
+7. **The widget is a view.** State lives in the daemon (`/status`). The widget only keeps its own position/visibility (`~/.agent-voice/widget.json`; not `state.json`, which the daemon rewrites wholesale).
+8. **Nothing leaves the machine.** No network calls except model downloads (Piper voices, Whisper weights) on first use.
 
 ## Adding an agent integration
 

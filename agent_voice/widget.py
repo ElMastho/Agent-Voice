@@ -911,6 +911,7 @@ class Tray(QSystemTrayIcon):
         add("Auto-send replies", lambda: _post("/handsfree", {"mode": "toggle"}), online,
             bool(st.get("hands_free")), hk.get("hands_free", ""))
         add("Mute voice", lambda: _post("/mute", {"mode": "toggle"}), online, bool(st.get("muted")), hk.get("mute", ""))
+        add("Summarize answers", lambda: _post("/summary", {"mode": "toggle"}), online, bool(st.get("summary", True)))
         m.addSeparator()
         if online:
             add("Stop voice service", lambda: _post("/shutdown"))

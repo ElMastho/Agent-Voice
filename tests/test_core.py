@@ -74,3 +74,17 @@ def test_parallel_hooks_speak_once(tmp_path, monkeypatch):
     with ThreadPoolExecutor(8) as pool:
         results = list(pool.map(lambda _: hooks._unspoken("p", ["same text"]), range(8)))
     assert sum(len(r) for r in results) == 1
+
+
+def test_summary_prefers_agent_line():
+    reply = "## Done\nLots of details here.\n\n- item\n\n**Voice summary:** Deployed to staging, all 12 tests pass."
+    assert hooks.summarize(reply) == "Deployed to staging, all 12 tests pass."
+
+
+def test_summary_falls_back_to_opening_sentences():
+    reply = "Fixed the login bug. The token was not refreshed. More detail.\n\nSecond paragraph with lots more."
+    assert hooks.summarize(reply, max_chars=60) == "Fixed the login bug. The token was not refreshed."
+
+
+def test_full_mode_drops_summary_line():
+    assert "Voice summary" not in hooks.strip_summary("Answer.\nVoice summary: short.")

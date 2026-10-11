@@ -9,12 +9,13 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
 
-from agent_voice import client
-from agent_voice.config import HOME, LOG_DIR, load_config
+from agent_voice import client, textclean
+from agent_voice.config import HOME, LOG_DIR, load_config, load_state
 
 # Field names agents use for "the assistant's reply", most specific first.
 TEXT_KEYS = (
@@ -29,6 +30,44 @@ TEXT_KEYS = (
 )
 
 SESSIONS_DIR = HOME / "sessions"
+
+SUMMARY_MARKER = "Voice summary:"
+SUMMARY_INSTRUCTION = (
+    "[agent-voice] The user hears your replies through text-to-speech. End the final reply of this turn "
+    "with one last line formatted exactly as `Voice summary: <one short sentence, at most 25 words, in the "
+    "language of your reply, saying what happened and anything the user must do next>`. "
+    "Do not add it to intermediate messages."
+)
+_SUMMARY_LINE = re.compile(r"^[\s>*_`#-]*voice summary\s*:[\s*_`]*(.+?)[\s*_`]*$", re.I | re.M)
+
+
+def summary_enabled() -> bool:
+    """Runtime toggle (state.json, written by the daemon) wins over the config default."""
+    state = load_state()
+    if "summary" in state:
+        return bool(state["summary"])
+    return bool(load_config().get("summary", {}).get("enabled", True))
+
+
+def summarize(text: str, max_chars: int = 280) -> str:
+    """The agent's own `Voice summary:` line if present, else the opening sentences of the reply."""
+    found = _SUMMARY_LINE.findall(text)
+    if found:
+        return found[-1].strip()
+    out = ""
+    for para in textclean.paragraphs(textclean.clean(text)):
+        for sentence in textclean.sentences(para):
+            if out and len(out) + len(sentence) + 1 > max_chars:
+                return out
+            out = f"{out} {sentence}".strip()
+        if out:  # the first paragraph is where agents state the outcome
+            return out
+    return out
+
+
+def strip_summary(text: str) -> str:
+    """Full-text mode: don't read the summary line on top of the answer it summarizes."""
+    return _SUMMARY_LINE.sub("", text)
 
 
 def _log_payload(agent: str, raw: str) -> None:
@@ -182,6 +221,10 @@ def hook_claude(raw: str) -> None:
         from agent_voice import winfocus
 
         client.request("/prompt", {"hwnd": winfocus.foreground()}, timeout=1.0)
+        if summary_enabled():
+            # Claude Code adds this to the model's context for the turn.
+            out = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": SUMMARY_INSTRUCTION}}
+            sys.stdout.write(json.dumps(out))
         return
     if event == "PreToolUse" and not load_config().get("speak_progress", True):
         return
@@ -196,9 +239,14 @@ def hook_claude(raw: str) -> None:
         texts.append(last)
     fresh = _unspoken(str(data.get("session_id", "")), texts)
     final = event == "Stop"
+    text = "\n\n".join(fresh)
+    if final and text.strip() and summary_enabled():
+        text = summarize(text, int(load_config().get("summary", {}).get("max_chars", 280)))
+    else:
+        text = strip_summary(text)
     # On Stop, call even with nothing new to say: it marks the end of the turn (arms auto-listen).
-    if fresh or final:
-        client.speak("\n\n".join(fresh), source="claude", final=final)
+    if text.strip() or final:
+        client.speak(text, source="claude", final=final)
 
 
 # -- Generic JSON payloads (Codex, Gemini CLI, Cursor, anything else) -----------------
@@ -214,6 +262,10 @@ def hook_payload(agent: str, raw: str) -> None:
             return
     text = extract_text(payload)
     if text.strip():
+        if summary_enabled():
+            text = summarize(text, int(load_config().get("summary", {}).get("max_chars", 280)))
+        else:
+            text = strip_summary(text)
         client.speak(text, source=agent, final=True)
 
 

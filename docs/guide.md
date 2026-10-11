@@ -70,6 +70,15 @@ Hold **`Ctrl+Alt+Space`**, talk, release. The text is pasted into whatever windo
 - **`Ctrl+Alt+M`**: mute. Nothing is spoken and the mic doesn't open after answers. A high beep means on, a low beep means muted.
 - In Claude Code, sending a new prompt yourself also stops the voice instantly.
 
+### Summaries instead of long answers
+By default, final answers are spoken as **one short sentence**, so a long recap doesn't keep talking for minutes:
+
+- **Claude Code** is asked (via the `UserPromptSubmit` hook) to end each final reply with a line `Voice summary: …`. That's the sentence you hear; the full answer stays on screen.
+- **Other agents**, or a reply without that line: the opening sentences of the answer are spoken (up to `summary.max_chars`). To get real summaries from Codex, Gemini CLI or Cursor too, add the same instruction to their project rules (`AGENTS.md`, `GEMINI.md`, `.cursor/rules`): *"End your final reply with a line `Voice summary: <one short sentence>`."*
+- Progress messages during the work are not affected.
+
+Toggle it from the tray (*Summarize answers*) or with `agent-voice summary on|off`. The voice confirms "Summaries on" or "Full answers".
+
 ### Read anything aloud
 Select text in any application and press **`Ctrl+Alt+R`**: it is read in the right language. With nothing selected, the clipboard is read. This is the way to use agent-voice with **Antigravity** or any tool without hooks.
 
@@ -134,6 +143,8 @@ File: `~/.agent-voice/config.json`. Only put the keys you want to change; they'r
 | `volume` | `1.0` | |
 | `max_chars` | `1500` | Longer replies are cut at a sentence |
 | `speak_progress` | `true` | Claude's in-between messages |
+| `summary.enabled` | `true` | Speak a one-sentence summary of final answers (runtime toggle overrides) |
+| `summary.max_chars` | `280` | Length of the fallback summary |
 | `hotkeys` | `stop`, `reply`, `hands_free`, `mute`, `read_selection`, `widget`, `push_to_talk` | Empty string disables one |
 | `stt.model` | `"small"` | `tiny` / `base` / `small` / `medium` |
 | `stt.languages` | `["fr", "en"]` | Languages Whisper may pick |
@@ -145,7 +156,7 @@ File: `~/.agent-voice/config.json`. Only put the keys you want to change; they'r
 | `widget.enabled` | `true` | Launch the widget with the service |
 | `widget.blur` | `"acrylic"` | `"blur"` or `"none"` if acrylic misbehaves |
 
-Runtime state (mute, auto-send) lives in `~/.agent-voice/state.json`, and the widget position in `~/.agent-voice/widget.json`.
+Runtime state (mute, auto-send, summary) lives in `~/.agent-voice/state.json`, and the widget position in `~/.agent-voice/widget.json`.
 
 ## 8. Troubleshooting
 

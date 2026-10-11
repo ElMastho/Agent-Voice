@@ -38,6 +38,7 @@ Everything runs **locally on the CPU**: no cloud, no API key, no audio leaving y
 | | |
 |---|---|
 | 🗣️ **Speaks every reply** | Final answers *and* the short progress updates between tool calls, never twice. Markdown, code blocks, links and file paths are cleaned out so it sounds natural. |
+| 📝 **Summaries, not essays** | Long final answers are spoken as one sentence. Claude Code is asked to end each reply with a `Voice summary:` line; other agents get the reply's opening sentences. Toggle for full answers anytime. |
 | 🇫🇷 🇬🇧 **Bilingual, automatically** | Each sentence is language-detected and read by the matching voice. A reply mixing French and English switches voices mid-paragraph. |
 | 🎙️ **Answer by voice** | After the reply, a beep and the mic opens for 15 s. Talk, pause, done: Whisper transcribes (FR/EN auto-detected) and types it into the window you prompted from. |
 | ⏭️ **Skip to answer** | Don't wait for the end: `Ctrl+Alt+A` cuts the voice and listens immediately. |
@@ -154,8 +155,8 @@ sequenceDiagram
     You->>Agent: prompt (window remembered)
     Agent-->>AV: progress text (PreToolUse)
     AV-->>You: 🔊 "Let me check the server…"
-    Agent-->>AV: final answer (Stop)
-    AV-->>You: 🔊 answer, FR/EN voices
+    Agent-->>AV: final answer + "Voice summary: …" (Stop)
+    AV-->>You: 🔊 one-sentence summary, FR/EN voice
     AV-->>You: 🔔 beep, mic open
     You->>AV: 🎙️ "Yes, go ahead and deploy."
     AV->>AV: Whisper → "Yes, go ahead and deploy." (en)
@@ -172,6 +173,7 @@ sequenceDiagram
 | `speed` | `0.67` | Piper length scale: `1.0` normal, lower is faster |
 | `max_chars` | `1500` | Long replies are cut at a sentence boundary |
 | `speak_progress` | `true` | Also speak Claude's messages between tool calls |
+| `summary` | `enabled: true`, `max_chars: 280` | Speak a one-sentence summary of final answers (runtime toggle: tray or `agent-voice summary`) |
 | `auto_listen` | `enabled`, 15 s window, 1.5 s silence, 90 s max | Mic after the final answer |
 | `stt.model` | `small` | Whisper size: `base` is faster, `small` is better in French |
 | `widget` | `enabled: true`, `blur: "acrylic"` | `blur`: `acrylic` / `blur` / `none` |
@@ -184,7 +186,7 @@ Restart after editing: `agent-voice shutdown && agent-voice start`.
 ```text
 agent-voice start | shutdown | status          run / stop / inspect the background service
 agent-voice say "text" [--lang fr|en] [--voice NAME]
-agent-voice stop | mute [on|off|toggle] | unmute | handsfree [on|off|toggle]
+agent-voice stop | mute [on|off|toggle] | unmute | handsfree [on|off|toggle] | summary [on|off|toggle]
 agent-voice widget                              reopen the widget + tray icon
 agent-voice install | uninstall [claude codex gemini cursor | all]
 agent-voice autostart on|off                    start with Windows

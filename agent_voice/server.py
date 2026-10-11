@@ -78,6 +78,20 @@ class Daemon:
         self.speaker.stop()
         self.speaker.speak("Hands-free on. Your replies will be sent automatically." if on else "Hands-free off.", "en")
 
+    @property
+    def summary(self) -> bool:
+        if "summary" in self.state:
+            return bool(self.state["summary"])
+        return bool(self.config.get("summary", {}).get("enabled", True))
+
+    def set_summary(self, on: bool) -> None:
+        # Hooks read this from state.json on every event.
+        self.state["summary"] = on
+        save_state(self.state)
+        log.info("summary=%s", on)
+        self.speaker.stop()
+        self.speaker.speak("Summaries on." if on else "Full answers.", "en")
+
     def set_muted(self, muted: bool) -> None:
         self.state["muted"] = muted
         save_state(self.state)
@@ -229,6 +243,7 @@ class Daemon:
             "last_heard_lang": self.last_heard_lang,
             "muted": self.muted,
             "hands_free": self.hands_free,
+            "summary": self.summary,
             "speaking": self.speaker.busy,
             "listening": self._listening,
             "voices": self.config["voices"],
@@ -426,6 +441,10 @@ def _handler(daemon: Daemon):
             if self.path == "/stop":
                 daemon.stop()
                 return self._json(200, {"ok": True})
+            if self.path == "/summary":
+                mode = data.get("mode", "toggle")
+                daemon.set_summary(not daemon.summary if mode == "toggle" else mode == "on")
+                return self._json(200, {"summary": daemon.summary})
             if self.path == "/handsfree":
                 mode = data.get("mode", "toggle")
                 daemon.set_hands_free(not daemon.hands_free if mode == "toggle" else mode == "on")

@@ -28,6 +28,10 @@ DEFAULTS: dict = {
     "max_chars": 1500,
     # Also speak the text an agent writes between tool calls (Claude Code), not only the final answer.
     "speak_progress": True,
+    # Final answers: speak a one-sentence summary instead of the whole text.
+    # Claude Code is asked to end its reply with "Voice summary: ..."; otherwise the opening sentences are used.
+    # Toggle at runtime with `agent-voice summary` or the tray menu.
+    "summary": {"enabled": True, "max_chars": 280},
     "hotkeys": {
         "stop": "ctrl+alt+s",
         # Skip the rest of the speech and start listening for your answer right away.

@@ -7,17 +7,83 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
+import socket
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from agent_voice import __version__, winfocus
-from agent_voice.config import LOG_DIR, load_config, load_state, save_state
+from agent_voice.config import HOME, LOG_DIR, load_config, load_state, save_state
 from agent_voice.tts import Speaker
 
 log = logging.getLogger("agent_voice.server")
+
+LOCK_PATH = HOME / "daemon.lock"
+
+
+class _Server(ThreadingHTTPServer):
+    # HTTPServer sets SO_REUSEADDR, which on Windows lets a second daemon bind the same port and stay resident.
+    allow_reuse_address = sys.platform != "win32"
+
+    def server_bind(self) -> None:
+        if sys.platform == "win32":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+class InstanceLock:
+    """Exclusive lock on a file, released by the OS when the process dies, so a crash never leaves it stale."""
+
+    def __init__(self, path=LOCK_PATH):
+        self.path = path
+        self._fd: int | None = None
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return False
+        self._fd = fd
+        return True
+
+    def release(self) -> None:
+        if self._fd is None:
+            return
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                os.lseek(self._fd, 0, os.SEEK_SET)
+                msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        os.close(self._fd)
+        self._fd = None
+
+
+def _acquire_instance(lock: InstanceLock, wait: float = 10.0) -> bool:
+    """Wait briefly for a daemon that is shutting down; give up at once if one is already serving."""
+    from agent_voice.client import is_running
+
+    end = time.time() + wait
+    while not lock.acquire():
+        if time.time() > end or is_running():
+            return False
+        time.sleep(0.25)
+    return True
 
 
 def _beep(freq: int, ms: int = 90) -> None:
@@ -610,11 +676,18 @@ def serve(foreground: bool = True) -> int:
         handlers.append(logging.StreamHandler())
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s", handlers=handlers)
 
+    # Taken before anything heavy: hooks racing to auto-start the daemon must not leave extra copies
+    # holding Whisper and global hotkeys.
+    lock = InstanceLock()
+    if not _acquire_instance(lock):
+        log.info("another agent-voice daemon is running (pid %s): exiting", os.getpid())
+        return 1
     config = load_config()
     try:
-        httpd = ThreadingHTTPServer((config["host"], int(config["port"])), None)
+        httpd = _Server((config["host"], int(config["port"])), None)
     except OSError:
         log.error("port %s busy: agent-voice is probably already running", config["port"])
+        lock.release()
         return 1
     daemon = Daemon(config)
     httpd.RequestHandlerClass = _handler(daemon)
@@ -622,11 +695,19 @@ def serve(foreground: bool = True) -> int:
     daemon.start_hotkeys()
     if config.get("widget", {}).get("enabled", True):
         _launch_widget()
-    log.info("agent-voice %s listening on %s:%s", __version__, config["host"], config["port"])
+    log.info("agent-voice %s listening on %s:%s (pid %s)", __version__, config["host"], config["port"], os.getpid())
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         httpd.server_close()
+        try:
+            import keyboard
+
+            keyboard.unhook_all()
+        except Exception:
+            pass
+        lock.release()
+        log.info("agent-voice stopped (pid %s)", os.getpid())
     return 0

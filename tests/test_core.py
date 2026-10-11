@@ -133,3 +133,51 @@ def test_claude_hooks_ring_when_attention_is_needed(monkeypatch, tmp_path):
     hooks.hook_claude(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "session_id": "t"}))
     hooks.hook_claude(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "session_id": "t"}))
     assert sent == ["/notify", "/notify"]
+
+
+def test_only_one_daemon_can_hold_the_instance_lock(tmp_path):
+    from agent_voice.server import InstanceLock
+
+    first, second = InstanceLock(tmp_path / "daemon.lock"), InstanceLock(tmp_path / "daemon.lock")
+    assert first.acquire()
+    assert not second.acquire()
+    first.release()
+    assert second.acquire()
+    second.release()
+
+
+def test_daemon_port_cannot_be_bound_twice():
+    import pytest
+
+    from agent_voice.server import _Server
+
+    first = _Server(("127.0.0.1", 0), None)
+    try:
+        with pytest.raises(OSError):
+            _Server(first.server_address, None)
+    finally:
+        first.server_close()
+
+
+def test_parallel_autostarts_spawn_once(tmp_path, monkeypatch):
+    import threading
+
+    from agent_voice import client
+
+    monkeypatch.setattr(client, "STARTING_PATH", tmp_path / "starting")
+    spawned, up = [], threading.Event()
+    monkeypatch.setattr(client, "is_running", up.is_set)
+
+    def fake_spawn():
+        spawned.append(1)
+        threading.Timer(0.5, up.set).start()
+
+    monkeypatch.setattr(client, "_spawn", fake_spawn)
+    results: list[bool] = []
+    threads = [threading.Thread(target=lambda: results.append(client.start_detached(wait=5))) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert spawned == [1] and results == [True] * 5
+    assert not (tmp_path / "starting").exists()

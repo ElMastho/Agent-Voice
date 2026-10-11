@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from agent_voice.config import load_config
+from agent_voice.config import HOME, load_config
 
 
 def _url(path: str) -> str:
@@ -39,22 +39,56 @@ def pythonw() -> str:
     return str(candidate if candidate.exists() else exe)
 
 
+STARTING_PATH = HOME / "starting"
+
+
+def _claim_start(fresh: float = 20.0) -> bool:
+    """True for the one caller allowed to spawn; parallel hooks seeing the marker just wait for the daemon."""
+    STARTING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if time.time() - STARTING_PATH.stat().st_mtime > fresh:
+            STARTING_PATH.unlink()
+    except OSError:
+        pass
+    try:
+        os.close(os.open(STARTING_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        return True
+    except OSError:
+        return False
+
+
 def start_detached(wait: float = 15.0) -> bool:
     """Start the daemon in the background (no console window) and wait until it answers."""
     if is_running():
         return True
-    kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "close_fds": True}
-    if os.name == "nt":
-        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-    else:
-        kwargs["start_new_session"] = True
-    subprocess.Popen([pythonw(), "-m", "agent_voice", "serve", "--background"], **kwargs)
+    if not _claim_start():
+        return _wait_running(wait)
+    try:
+        _spawn()
+        return _wait_running(wait)
+    finally:
+        try:
+            STARTING_PATH.unlink()
+        except OSError:
+            pass
+
+
+def _wait_running(wait: float) -> bool:
     end = time.time() + wait
     while time.time() < end:
         if is_running():
             return True
         time.sleep(0.25)
     return False
+
+
+def _spawn() -> None:
+    kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "close_fds": True}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen([pythonw(), "-m", "agent_voice", "serve", "--background"], **kwargs)
 
 
 def speak(

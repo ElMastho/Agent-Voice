@@ -10,6 +10,7 @@ Local, CPU-only voice for AI coding agents. It reads the agent's replies aloud i
 
 | Keys | Action |
 |---|---|
+| `Ctrl+Alt+A` | Reply now: cut the voice off and start listening for your answer immediately |
 | `Ctrl+Alt+Space` (hold) | Push-to-talk: speak, release, and the text is pasted into the focused window |
 | `Ctrl+Alt+S` | Stop the current speech (and cancel listening) |
 | `Ctrl+Alt+H` | Hands-free mode on/off: everything you say is sent automatically. Off by default; the voice confirms the switch |
@@ -19,6 +20,18 @@ Local, CPU-only voice for AI coding agents. It reads the agent's replies aloud i
 Speech stops automatically when you start push-to-talk.
 
 **Auto-listen:** after an agent's final answer has been spoken, a beep plays and the mic stays open for 15 s. Talk and your reply (French or English, detected from your voice) is typed into the window you last prompted from. A pause of 1.5 s ends it. In hands-free mode it is also sent; otherwise you review it and press Enter. A low beep means nothing was heard.
+
+## Status widget
+
+A small glass panel (Windows acrylic blur), always on top. It starts with the service, sits at the top right by default, and can be dragged anywhere (it snaps to screen edges and remembers its position).
+
+- **Live state:** an animated orb, an aurora and a waveform show what's happening: *Ready*, *Speaking* (with an FR/EN badge), *Listening*, *Hearing you* (follows your mic level), *Transcribing*, *Muted*, *Offline*
+- **Main button:** changes with the state: skip and answer while it speaks, cancel while it listens, talk when idle, start the service when offline
+- **Chevron:** opens every action with its shortcut: reply now, hold to talk, stop, auto-send, mute, read selection. The last transcription is shown at the bottom
+- **Never steals focus:** clicking it keeps your agent window active, so dictated text still lands there
+- **Discreet:** it fades when idle; right-click it to move or hide it, or to stop the service
+
+Run `agent-voice widget` to reopen it. Set `"widget": {"enabled": false}` to stop it from launching, or `"blur": "blur"`/`"none"` if acrylic misbehaves on your machine.
 
 ## Supported agents
 
@@ -48,7 +61,7 @@ Python 3.13 is used because some audio/ML wheels lag behind the newest Python.
 
 ## Commands
 
-`start`, `shutdown`, `status`, `say [text] [--lang fr|en]`, `stop`, `mute [on|off|toggle]`, `unmute`, `handsfree [on|off|toggle]`, `install`, `uninstall`, `autostart on|off`, `setup`, `serve` (foreground, for debugging).
+`start`, `shutdown`, `status`, `widget`, `say [text] [--lang fr|en]`, `stop`, `mute [on|off|toggle]`, `unmute`, `handsfree [on|off|toggle]`, `install`, `uninstall`, `autostart on|off`, `setup`, `serve` (foreground, for debugging).
 
 ## Configuration: `~/.agent-voice/config.json`
 

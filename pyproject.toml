@@ -15,6 +15,7 @@ dependencies = [
     "faster-whisper",
     "keyboard",
     "pyperclip",
+    "PySide6-Essentials",
 ]
 
 [project.scripts]

@@ -34,6 +34,7 @@ class Speaker:
         self._audio_q: queue.Queue = queue.Queue(maxsize=4)
         self._playing = threading.Event()
         self._synthesizing = threading.Event()
+        self.current_spec = ""
         threading.Thread(target=self._synth_loop, name="synth", daemon=True).start()
         threading.Thread(target=self._play_loop, name="play", daemon=True).start()
 
@@ -110,7 +111,7 @@ class Speaker:
                 audio = np.concatenate([c.audio_float_array for c in chunks]).astype(np.float32)
                 # A short pause between sentences sounds more natural.
                 audio = np.concatenate([audio, np.zeros(int(chunks[0].sample_rate * 0.12), dtype=np.float32)])
-                self._audio_q.put((gen, audio, chunks[0].sample_rate))
+                self._audio_q.put((gen, audio, chunks[0].sample_rate, spec))
             except Exception:  # never let one bad sentence kill the worker
                 log.exception("synthesis failed for %r", sentence)
             finally:
@@ -118,9 +119,10 @@ class Speaker:
 
     def _play_loop(self) -> None:
         while True:
-            gen, audio, rate = self._audio_q.get()
+            gen, audio, rate, spec = self._audio_q.get()
             if gen != self._gen:
                 continue
+            self.current_spec = spec
             self._playing.set()
             try:
                 sd.play(audio, rate)

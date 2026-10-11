@@ -14,10 +14,15 @@ log = logging.getLogger("agent_voice.stt")
 RATE = 16000
 
 
+def rms(block: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(block**2))) if block.size else 0.0
+
+
 class Recorder:
-    def __init__(self):
+    def __init__(self, on_level=None):
         self._frames: list[np.ndarray] = []
         self._stream: sd.InputStream | None = None
+        self._on_level = on_level
 
     def start(self) -> None:
         self._frames = []
@@ -26,6 +31,8 @@ class Recorder:
 
     def _cb(self, indata, frames, time, status):  # noqa: ARG002 - sounddevice signature
         self._frames.append(indata.copy())
+        if self._on_level:
+            self._on_level(rms(indata))
 
     def stop(self) -> np.ndarray:
         if self._stream is not None:
@@ -85,7 +92,7 @@ def is_hallucination(text: str) -> bool:
 
 
 def listen_for_speech(
-    window: float, silence: float, max_seconds: float, cancel: threading.Event
+    window: float, silence: float, max_seconds: float, cancel: threading.Event, on_level=None, on_start=None
 ) -> np.ndarray | None:
     """Open the mic for up to `window` seconds; if speech starts, record until `silence` seconds of quiet.
 
@@ -115,12 +122,17 @@ def listen_for_speech(
             except queue.Empty:
                 return None
             elapsed += 0.03
-            loud = float(np.sqrt(np.mean(b**2))) > threshold
+            level = rms(b)
+            if on_level:
+                on_level(level)
+            loud = level > threshold
             if not started:
                 preroll = (preroll + [b])[-10:]
                 loud_run = loud_run + 1 if loud else 0
                 if loud_run >= 4:  # ~120 ms of sound: someone is talking
                     started, recorded, elapsed = True, list(preroll), 0.0
+                    if on_start:
+                        on_start()
                 elif elapsed >= window:
                     return None
                 continue

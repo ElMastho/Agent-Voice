@@ -16,6 +16,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("start", help="start the daemon in the background")
     sub.add_parser("shutdown", help="stop the daemon")
     sub.add_parser("status", help="show daemon status")
+    p = sub.add_parser("widget", help="show the floating status widget")
+    p.add_argument("--demo", help=argparse.SUPPRESS)
 
     p = sub.add_parser("say", help="speak text (argument or stdin)")
     p.add_argument("text", nargs="*")
@@ -48,6 +50,11 @@ def main(argv: list[str] | None = None) -> int:
         from agent_voice.hooks import run
 
         return run(args.agent, args.rest)
+
+    if args.cmd == "widget":
+        from agent_voice.widget import run
+
+        return run(args.demo)
 
     if args.cmd == "serve":
         from agent_voice.server import serve

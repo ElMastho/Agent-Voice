@@ -43,6 +43,12 @@ class Daemon:
         self._listening = False
         # Window the user last sent a prompt from (where replies are typed back).
         self._target_hwnd = 0
+        # What the mic is doing, for the widget: "" | waiting | recording | transcribing
+        self._mic_phase = ""
+        self.level = 0.0
+        self.last_heard = ""
+        self.last_heard_lang = ""
+        self._ptt_release = threading.Event()
         threading.Thread(target=self._listen_monitor, name="listen", daemon=True).start()
 
     def _job_loop(self) -> None:
@@ -106,6 +112,24 @@ class Daemon:
     def cancel_listen(self) -> None:
         self._listen_armed = False
         self._listen_cancel.set()
+        # Closing the mic can take ~1 s on some drivers; show "idle" right away.
+        if self._listening and not self._ptt_active:
+            self._mic_phase = ""
+            self.level = 0.0
+
+    def reply_now(self) -> None:
+        """Skip the rest of the speech and listen for your answer right away."""
+        self.speaker.stop()
+        self._listen_armed = False
+        if self._listening or self._ptt_active or self.transcriber is None:
+            return
+        threading.Thread(target=self._auto_listen, daemon=True).start()
+
+    def _set_level(self, value: float) -> None:
+        self.level = value
+
+    def _heard(self, text: str, lang: str) -> None:
+        self.last_heard, self.last_heard_lang = text, lang
 
     def prompt_submitted(self, hwnd: int) -> None:
         """The user sent a new prompt: remember its window, and stop talking/listening."""
@@ -137,26 +161,36 @@ class Daemon:
         target = self._target_hwnd or winfocus.foreground()
         self._listen_cancel.clear()
         self._listening = True
+        self._mic_phase = "waiting"
         try:
             _beep(700, 70)
             time.sleep(0.15)  # don't record our own beep
             audio = listen_for_speech(
-                float(cfg["window_seconds"]), float(cfg["silence_seconds"]), float(cfg["max_seconds"]), self._listen_cancel
+                float(cfg["window_seconds"]),
+                float(cfg["silence_seconds"]),
+                float(cfg["max_seconds"]),
+                self._listen_cancel,
+                on_level=self._set_level,
+                on_start=lambda: setattr(self, "_mic_phase", "recording"),
             )
             if audio is None or self._listen_cancel.is_set():
                 log.info("auto-listen: nothing heard")
                 _beep(400, 60)
                 return
             _beep(520, 60)
+            self._mic_phase = "transcribing"
             text, lang = self.transcriber.transcribe(audio)
             log.info("auto-listen lang=%s chars=%d", lang, len(text))
             if self._listen_cancel.is_set() or is_hallucination(text):
                 return
+            self._heard(text, lang)
             self._paste(text, target, submit=self.hands_free)
         except Exception:
             log.exception("auto-listen failed")
         finally:
             self._listening = False
+            self._mic_phase = ""
+            self.level = 0.0
 
     def _paste(self, text: str, hwnd: int = 0, submit: bool = False) -> None:
         import keyboard
@@ -174,9 +208,22 @@ class Daemon:
             keyboard.send("enter")
         pyperclip.copy(previous)
 
+    def phase(self) -> str:
+        if self._mic_phase:
+            return self._mic_phase
+        if self.speaker.busy:
+            return "speaking"
+        return "muted" if self.muted else "idle"
+
     def status(self) -> dict:
         return {
             "version": __version__,
+            "phase": self.phase(),
+            "level": round(self.level, 4),
+            "speaking_lang": self.speaker.current_spec[:2] if self.speaker.busy else "",
+            "awaiting_reply": self._listen_armed,
+            "last_heard": self.last_heard[-160:],
+            "last_heard_lang": self.last_heard_lang,
             "muted": self.muted,
             "hands_free": self.hands_free,
             "speaking": self.speaker.busy,
@@ -195,6 +242,8 @@ class Daemon:
         hk = self.config["hotkeys"]
         if hk.get("stop"):
             keyboard.add_hotkey(hk["stop"], self.stop)
+        if hk.get("reply"):
+            keyboard.add_hotkey(hk["reply"], self.reply_now)
         if hk.get("hands_free"):
             keyboard.add_hotkey(hk["hands_free"], lambda: self.set_hands_free(not self.hands_free))
         if hk.get("mute"):
@@ -236,36 +285,59 @@ class Daemon:
             self.speaker.speak(text)
 
     def _ptt_pressed(self) -> None:
-        if self._ptt_active:  # key auto-repeat
+        """Hotkey: record while the key is held."""
+        if not self.ptt_start():  # key auto-repeat
             return
-        self._ptt_active = True
-        threading.Thread(target=self._ptt_session, daemon=True).start()
-
-    def _ptt_session(self) -> None:
         import keyboard
 
+        trigger = self.config["hotkeys"]["push_to_talk"].split("+")[-1].strip()
+
+        def watch_release():
+            while keyboard.is_pressed(trigger):
+                time.sleep(0.02)
+            self.ptt_stop()
+
+        threading.Thread(target=watch_release, daemon=True).start()
+
+    def ptt_start(self) -> bool:
+        """Start a push-to-talk recording (hotkey or widget). False if one is already running."""
+        if self._ptt_active or self.transcriber is None:
+            return False
+        self._ptt_active = True
+        self._ptt_release.clear()
+        threading.Thread(target=self._ptt_session, daemon=True).start()
+        return True
+
+    def ptt_stop(self) -> None:
+        self._ptt_release.set()
+
+    def _ptt_session(self) -> None:
         from agent_voice.stt import Recorder
 
-        trigger = self.config["hotkeys"]["push_to_talk"].split("+")[-1].strip()
         try:
             self.speaker.stop()  # you talk, the agent shuts up
             self.cancel_listen()
-            rec = Recorder()
+            rec = Recorder(on_level=self._set_level)
             rec.start()
+            self._mic_phase = "recording"
             _beep(660, 60)
-            while keyboard.is_pressed(trigger):
-                time.sleep(0.02)
+            # Safety net: a lost "release" (widget closed mid-press) must not record forever.
+            self._ptt_release.wait(timeout=120)
             audio = rec.stop()
             _beep(520, 60)
+            self._mic_phase = "transcribing"
             text, lang = self.transcriber.transcribe(audio)
             log.info("dictation lang=%s chars=%d", lang, len(text))
             if not text:
                 return
+            self._heard(text, lang)
             self._paste(text, submit=self.hands_free or bool(self.config["stt"].get("auto_submit")))
         except Exception:
             log.exception("push-to-talk failed")
         finally:
             self._ptt_active = False
+            self._mic_phase = ""
+            self.level = 0.0
 
 
 def _handler(daemon: Daemon):
@@ -331,6 +403,18 @@ def _handler(daemon: Daemon):
                 )
                 daemon.jobs.put(args)
                 return self._json(200, {"queued": True, "muted": daemon.muted})
+            if self.path == "/reply":
+                daemon.reply_now()
+                return self._json(200, {"ok": True})
+            if self.path == "/ptt":
+                if data.get("action") == "stop":
+                    daemon.ptt_stop()
+                else:
+                    daemon.ptt_start()
+                return self._json(200, {"ok": True})
+            if self.path == "/read":
+                threading.Thread(target=daemon._read_selection, daemon=True).start()
+                return self._json(200, {"ok": True})
             if self.path == "/prompt":
                 daemon.prompt_submitted(int(data.get("hwnd") or 0))
                 return self._json(200, {"ok": True})
@@ -354,6 +438,22 @@ def _handler(daemon: Daemon):
     return Handler
 
 
+def _launch_widget() -> None:
+    """Start the status widget as its own process (it exits on its own if one is already open)."""
+    import os
+    import subprocess
+
+    from agent_voice.client import pythonw
+
+    kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
+    try:
+        subprocess.Popen([pythonw(), "-m", "agent_voice", "widget"], **kwargs)
+    except OSError:
+        log.exception("could not start the widget")
+
+
 def serve(foreground: bool = True) -> int:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     handlers: list[logging.Handler] = [logging.FileHandler(LOG_DIR / "server.log", encoding="utf-8")]
@@ -371,6 +471,8 @@ def serve(foreground: bool = True) -> int:
     httpd.RequestHandlerClass = _handler(daemon)
     daemon.speaker.warm_up()
     daemon.start_hotkeys()
+    if config.get("widget", {}).get("enabled", True):
+        _launch_widget()
     log.info("agent-voice %s listening on %s:%s", __version__, config["host"], config["port"])
     try:
         httpd.serve_forever()

@@ -30,6 +30,8 @@ DEFAULTS: dict = {
     "speak_progress": True,
     "hotkeys": {
         "stop": "ctrl+alt+s",
+        # Skip the rest of the speech and start listening for your answer right away.
+        "reply": "ctrl+alt+a",
         # Hands-free mode: everything you say is sent automatically (Enter pressed for you).
         "hands_free": "ctrl+alt+h",
         "mute": "ctrl+alt+m",
@@ -46,6 +48,8 @@ DEFAULTS: dict = {
         # Press Enter after pasting the transcription.
         "auto_submit": False,
     },
+    # Floating status widget (glass panel, draggable, always on top).
+    "widget": {"enabled": True},
     # After an agent finishes speaking its final answer, open the mic so you can just reply.
     "auto_listen": {
         "enabled": True,

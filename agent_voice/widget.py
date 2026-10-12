@@ -132,6 +132,26 @@ def _hotkey_label(combo: str) -> str:
 
 
 # -- Windows glass ---------------------------------------------------------------------
+def _keep_on_top(hwnd: int) -> None:
+    """Put the window back at the top of the always-on-top band, without activating it.
+
+    Other apps that come to the front (the Claude desktop app, a browser going full screen) can push
+    a topmost tool window down; re-asserting it once a second keeps the notch reachable.
+    """
+    if sys.platform != "win32" or not hwnd:
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32")
+    user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                    ctypes.c_int, ctypes.c_uint]
+    HWND_TOPMOST = wintypes.HWND(-1)
+    SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE, SWP_NOOWNERZORDER = 0x1, 0x2, 0x10, 0x200
+    user32.SetWindowPos(wintypes.HWND(hwnd), HWND_TOPMOST, 0, 0, 0, 0,
+                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER)
+
+
 def _apply_windows_style(hwnd: int, blur: str, notch: bool = False) -> bool:
     """Acrylic blur behind the window, rounded corners, no focus stealing, no taskbar entry.
 
@@ -272,6 +292,7 @@ class VoiceWidget(QWidget):
         self._reveal_until = 0.0
         self._h = float(BAR_H)  # eased window height
         self._painted_still = False  # battery: the still frame has been drawn, skip redraws until a change
+        self._topmost_at = 0.0
         self._shown_digest = ""
         self._copied: str | None = None  # history row just copied, for a brief confirmation
         self._copied_at = 0.0
@@ -490,6 +511,9 @@ class VoiceWidget(QWidget):
         self._follow_size()
         if self.notch:
             self._place_notch()
+        if time.time() - self._topmost_at > 1.0:
+            self._topmost_at = time.time()
+            _keep_on_top(int(self.winId()))
         # Discreet when nothing happens, fully visible when active or hovered (the notch is always solid).
         active = (self.phase not in ("idle", "offline", "muted") or self._hovering or self.expanded
                   or self.notch or self._question())

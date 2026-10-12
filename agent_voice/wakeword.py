@@ -35,11 +35,22 @@ MODEL_URL = f"https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models
 KWS_DIR = HOME / "kws"
 SUFFIX = "epoch-12-avg-2-chunk-16-left-64.int8.onnx"
 FILES = ("tokens.txt", f"encoder-{SUFFIX}", f"decoder-{SUFFIX}", f"joiner-{SUFFIX}")
-# The model's BPE spelling of each phrase (English pronunciation of "Claude").
+# The model's BPE spelling of each phrase, including how "Claude" comes out with a French accent
+# ("Klod"). Generous on purpose: Whisper confirms every hit before anything is sent, so a false
+# alarm only costs one short transcription.
 KEYWORDS = (
     "▁HE Y ▁C LA U DE @HEY_CLAUDE\n"
     "▁O K ▁C LA U DE @OK_CLAUDE\n"
     "▁OKAY ▁C LA U DE @OKAY_CLAUDE\n"
+    "▁HA Y ▁C LA U DE @HAY_CLAUDE\n"
+    "▁HI ▁C LA U DE @HI_CLAUDE\n"
+    "▁E H ▁C LA U DE @EH_CLAUDE\n"
+    "▁HE Y ▁C LO U D @HEY_CLOUD\n"
+    "▁HE Y ▁C LO D @HEY_CLOD\n"
+    "▁HE Y ▁C LO DE @HEY_CLODE\n"
+    "▁HA Y ▁C LO D @HAY_CLOD\n"
+    "▁HE Y ▁C LA W ED @HEY_CLAWED\n"
+    "▁HE Y ▁C LA W @HEY_CLAW\n"
 )
 
 
@@ -75,11 +86,16 @@ class WakeListener:
         self.spotter = sherpa_onnx.KeywordSpotter(
             tokens=str(d / FILES[0]), encoder=str(d / FILES[1]), decoder=str(d / FILES[2]), joiner=str(d / FILES[3]),
             keywords_file=str(d / "keywords.txt"), num_threads=1, provider="cpu",
-            keywords_score=1.5, keywords_threshold=0.2,
+            keywords_score=2.0, keywords_threshold=0.1,
         )
 
-    def listen(self, cancel: threading.Event, max_seconds: float = 8.0, end_silence: float = 0.7) -> np.ndarray | None:
-        """Block until a phrase containing the wake word has been said; return it, or None once `cancel` is set.
+    def listen(self, cancel: threading.Event, max_seconds: float = 8.0, end_silence: float = 0.7,
+               short_fallback: float = 3.0) -> tuple[np.ndarray, bool] | None:
+        """Block until a candidate phrase has been said; return (audio, spotted), or None once `cancel` is set.
+
+        `spotted`: the keyword spotter heard the phrase. A short utterance it missed (up to
+        `short_fallback` seconds, e.g. "Hey Claude" said with an accent the English model doesn't
+        know) is returned too, unspotted, for a quick check with a small Whisper model.
 
         The volume gate records each utterance (with a little run-up); the spotter checks it once it ends.
         Fed whole utterances it costs ~2% of a core per second of speech; fed continuously, ONNX Runtime
@@ -102,7 +118,7 @@ class WakeListener:
                     continue
                 level = _rms(b)
                 floor = level if floor is None else floor
-                loud = level > max(floor * 3.0, 0.006)
+                loud = level > max(floor * 2.5, 0.004)  # sensitive: a laptop mic, you may be a metre away
                 if utterance is None:
                     if not loud:
                         floor = 0.98 * floor + 0.02 * level  # follow the room's noise while nobody talks
@@ -116,8 +132,11 @@ class WakeListener:
                     audio = np.concatenate(utterance)
                     utterance = None
                     ring.clear()
-                    if len(audio) > RATE * 0.5 and self.heard_keyword(audio):
-                        return audio
+                    if len(audio) > RATE * 0.5:
+                        hit = self.heard_keyword(audio)
+                        log.info("wake check: %.1f s of speech, keyword %s", len(audio) / RATE, "yes" if hit else "no")
+                        if hit or len(audio) <= RATE * short_fallback:
+                            return audio, hit
         return None
 
     def heard_keyword(self, audio: np.ndarray) -> bool:

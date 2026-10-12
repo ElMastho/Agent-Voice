@@ -153,14 +153,26 @@ def match_yes_no(text: str) -> bool | None:
     return None if yes == no else yes
 
 
+# "Claude" as Whisper writes it across accents: Claude, Clod, Klöte, Clot, Cloud, Clawed...
+_WAKE_FUZZY = re.compile(
+    r"^\W*(?:\w+\W+){0,2}?(?:hey|hé|he|hi|ok|okay|eh|et|ey|hay|ay)\W+[ck]l(?:au|eau|aw|ou|oa|o|ö)"
+    r"(?:de|d|te|tte|t|th|ed)?\b\W*",
+    re.I,
+)
+
+
 def strip_wake(text: str, phrases: list[str]) -> str | None:
-    """The command after a wake phrase at the start ("Hey Claude, run the tests" -> "run the tests")."""
+    """The command after a wake phrase near the start ("Hey Claude, run the tests" -> "run the tests").
+
+    Up to two words may come first ("Uh, hey Claude..."), not more: "I told Claude" is no wake-up call.
+    """
     for phrase in phrases:
         words = [re.escape(w) for w in phrase.split()]
-        m = re.match(r"^\W*" + r"\W+".join(words) + r"\b\W*", text, re.I)
+        m = re.match(r"^\W*(?:\w+\W+){0,2}?" + r"\W+".join(words) + r"\b\W*", text, re.I)
         if m:
             return text[m.end():].strip()
-    return None
+    m = _WAKE_FUZZY.match(text)
+    return text[m.end():].strip() if m else None
 
 
 def _version(v: str) -> tuple:
@@ -228,6 +240,7 @@ class Daemon:
         self.update: dict | None = None
         # Wake word: always listening for "Hey Claude" while idle (off unless you turn it on).
         self._wake_cancel = threading.Event()
+        self._wake_transcriber = None  # Whisper tiny: checks short phrases the keyword spotter missed
         self._force_submit = False
         # Desktop app: CLI session id -> conversation title, learned when you send a prompt.
         self._titles: dict[str, str] = dict(self.state.get("desktop_titles") or {})
@@ -588,6 +601,13 @@ class Daemon:
                     self.answer_permission(permission["id"], allow)
             elif question is not None and question is self.question:
                 self.answer(text=text)
+            elif self.wake and strip_wake(text, list(self.config.get("wake_word", {}).get("phrases") or [])) is not None:
+                # "Hey Claude, ..." while the reply mic was open: the rest is the reply; the phrase alone is nothing.
+                rest = strip_wake(text, list(self.config.get("wake_word", {}).get("phrases") or []))
+                if rest.strip(" .!?,"):
+                    self._paste(rest, target, submit=self.hands_free or force_submit, session=session)
+                else:
+                    log.info("reply was only the wake phrase: nothing sent")
             else:
                 self._paste(text, target, submit=self.hands_free or force_submit, session=session)
         except Exception:
@@ -811,21 +831,39 @@ class Daemon:
                 continue
             try:
                 if listener is None:
+                    from agent_voice.stt import Transcriber
                     from agent_voice.wakeword import WakeListener
 
                     listener = WakeListener()
+                    # Load (first time: download) the fallback model now, not on the first "Hey Claude".
+                    self._wake_transcriber = Transcriber({"stt": {**self.config["stt"], "model": "tiny"}})
+                    threading.Thread(target=self._wake_transcriber.warm_up, daemon=True).start()
                 self._wake_cancel.clear()
-                audio = listener.listen(self._wake_cancel)
+                heard = listener.listen(self._wake_cancel)
             except Exception:
                 log.exception("wake word unavailable")
                 time.sleep(30)
                 continue
-            if audio is None or self._wake_cancel.is_set():
+            if heard is None or self._wake_cancel.is_set():
                 continue
+            audio, spotted = heard
+            if not spotted:
+                # A short phrase the spotter missed (an accent it doesn't know): the smallest Whisper
+                # decides, ~0.2 s of CPU. Only a confirmed wake word goes on to the accurate model.
+                if self._wake_transcriber is None:
+                    from agent_voice.stt import Transcriber
+
+                    self._wake_transcriber = Transcriber({"stt": {**self.config["stt"], "model": "tiny"}})
+                # The wake phrase is English: say so, a 1-second clip is easily taken for another language.
+                quick, _ = self._wake_transcriber.transcribe(audio, language="en")
+                woke = strip_wake(quick, phrases) is not None
+                log.info("wake fallback heard %r: %s", quick[:60], "wake" if woke else "no")
+                if not woke:
+                    continue
             text, lang = self.transcriber.transcribe(audio)
             command = strip_wake(text, phrases)
             if command is None or is_hallucination(text):
-                log.info("wake word: false alarm")
+                log.info("wake word: not confirmed (heard %r)", text[:60])
                 continue
             log.info("wake word heard (%d chars follow)", len(command))
             session = self._voice_session or self._reply_session

@@ -250,6 +250,11 @@ def test_permission_answers_and_wake_phrases():
     assert strip_wake("Hey Claude, run the tests please.", phrases) == "run the tests please."
     assert strip_wake("hey claude", phrases) == ""
     assert strip_wake("I told him hey claude", phrases) is None
+    # Accents, as Whisper spells them
+    assert strip_wake("Hey Klöte!", phrases) == "!" or strip_wake("Hey Klöte!", phrases) == ""
+    assert strip_wake("Hé Clod, lance les tests.", phrases) == "lance les tests."
+    assert strip_wake("Hey Chloe, pass the salt.", phrases) is None
+    assert strip_wake("Hey, close the door.", phrases) is None
 
 
 def test_permission_hook_waits_for_the_daemon(monkeypatch):

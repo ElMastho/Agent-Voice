@@ -62,11 +62,14 @@ class Transcriber:
     def warm_up(self) -> None:
         self._load()
 
-    def transcribe(self, audio: np.ndarray) -> tuple[str, str]:
-        """Return (text, language)."""
+    def transcribe(self, audio: np.ndarray, language: str | None = None) -> tuple[str, str]:
+        """Return (text, language). `language` skips detection (short clips are often misdetected)."""
         if audio.size < RATE * 0.3:
             return "", ""
         model = self._load()
+        if language:
+            segments, _ = model.transcribe(audio, beam_size=1, vad_filter=True, language=language)
+            return " ".join(s.text.strip() for s in segments).strip(), language
         allowed = self.cfg.get("languages") or None
         segments, info = model.transcribe(audio, beam_size=1, vad_filter=True)
         lang = info.language

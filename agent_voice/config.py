@@ -76,7 +76,8 @@ DEFAULTS: dict = {
     "permissions": {"enabled": True, "wait_seconds": 60},
     # "Hey Claude, ..." while idle sends a new prompt (turn on from the widget or `agent-voice wake on`).
     # A small keyword spotter listens (only while someone speaks); these phrases confirm it in the transcript.
-    "wake_word": {"phrases": ["hey claude", "ok claude", "okay claude", "hé claude", "hey cloud", "hey clod"]},
+    "wake_word": {"phrases": ["hey claude", "ok claude", "okay claude", "hé claude", "hey cloud", "hey clod",
+                              "hey clode", "eh claude", "et claude", "hi claude", "hay claude", "hey clawed"]},
     # Tell you when a newer version is on GitHub.
     "update_check": True,
     # Chime mode sounds (0.0-1.0). Kept low so they don't disturb people around you.

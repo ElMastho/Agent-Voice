@@ -97,9 +97,11 @@ def make_widget(st: dict | None, expanded: bool = False) -> W.VoiceWidget:
     w = W.VoiceWidget()
     w.poller.status.disconnect()
     w.glass = True
+    # Always the floating bar, whatever mode the widget on this machine was left in.
+    w.notch = w.compact = False
     w.expanded = expanded
-    w.resize(W.WIDTH, W.EXPANDED_H if expanded else W.BAR_H)
     w._on_status(st)
+    w._apply_size()
     return w
 
 

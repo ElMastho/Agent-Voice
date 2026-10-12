@@ -164,7 +164,8 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
-AGENT_DIRS = {"claude": ".claude", "codex": ".codex", "gemini": ".gemini", "cursor": ".cursor"}
+AGENT_DIRS = {"claude": ".claude", "codex": ".codex", "gemini": ".gemini", "cursor": ".cursor",
+              "cline": "Documents/Cline"}
 
 
 def quickstart() -> int:
@@ -179,7 +180,8 @@ def quickstart() -> int:
         if found:
             main(["install", *found])
         else:
-            print("No agent found (Claude Code, Codex, Gemini CLI, Cursor). Install one, then run `agent-voice install`.")
+            print("No agent found (Claude Code, Codex, Gemini CLI, Cursor, Cline). "
+                  "Install one, then run `agent-voice install`.")
         print()
         ok = main(["start"]) == 0
         if ok:

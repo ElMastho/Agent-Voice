@@ -12,7 +12,7 @@ from agent_voice.client import self_command
 
 # How our hook commands look, from source (python -m agent_voice hook) or from the release exe.
 MARKERS = ("agent_voice hook", 'agent_voice", "hook', 'agent-voice.exe" hook', 'agent-voice.exe", "hook')
-AGENTS = ("claude", "codex", "gemini", "cursor", "antigravity")
+AGENTS = ("claude", "codex", "gemini", "cursor", "cline", "antigravity")
 
 
 def _ours(command: str) -> bool:
@@ -140,11 +140,65 @@ def codex(remove: bool = False) -> str:
     return f"{'removed from' if remove else 'installed in'} {path}"
 
 
+# -- Cline: global hook files in ~/Documents/Cline/Hooks ------------------------------------
+CLINE_HOOKS = ("UserPromptSubmit", "PreToolUse", "Notification")
+CLINE_MARKER = "agent-voice hook"
+
+
+def _cline_script(windows: bool) -> str:
+    exe, *rest = _hook_argv("cline")
+    if not windows:
+        return f'#!/bin/sh\n# {CLINE_MARKER} (`agent-voice uninstall cline` removes it)\nexec "{exe}" {" ".join(rest)}\n'
+    args = " ".join(f"'{a}'" for a in rest)
+    return (
+        f"# {CLINE_MARKER} (`agent-voice uninstall cline` removes it)\n"
+        "$utf8 = New-Object Text.UTF8Encoding $false  # UTF-8 without BOM: a BOM would break the JSON\n"
+        "[Console]::InputEncoding = $utf8\n"
+        "$OutputEncoding = $utf8\n"
+        "$payload = [Console]::In.ReadToEnd()\n"
+        "# Cline waits for PreToolUse hooks: only the tools agent-voice speaks reach Python.\n"
+        "if ($payload -match '\"hookName\"\\s*:\\s*\"PreToolUse\"' -and "
+        "$payload -notmatch '\"toolName\"\\s*:\\s*\"(attempt_completion|ask_followup_question|plan_mode_respond)\"') "
+        "{ '{}'; exit 0 }\n"
+        f"$payload | & '{exe}' {args}\n"
+    )
+
+
+def cline(remove: bool = False) -> str:
+    """Cline runs every file named after a hook in its global hooks folder (.ps1 on Windows)."""
+    folder = Path.home() / "Documents" / "Cline" / "Hooks"
+    windows = os.name == "nt"
+    done, skipped = [], []
+    for hook in CLINE_HOOKS:
+        path = folder / (f"{hook}.ps1" if windows else hook)
+        ours = path.exists() and CLINE_MARKER in path.read_text(encoding="utf-8", errors="replace")
+        if path.exists() and not ours:
+            skipped.append(path.name)  # the user's own hook: leave it alone
+            continue
+        if remove:
+            if ours:
+                path.unlink()
+                done.append(path.name)
+            continue
+        folder.mkdir(parents=True, exist_ok=True)
+        path.write_text(_cline_script(windows), encoding="utf-8")
+        if not windows:
+            path.chmod(0o755)
+        done.append(path.name)
+    msg = f"{'removed' if remove else 'installed'} {', '.join(done) or 'nothing'} in {folder}"
+    if skipped:
+        msg += f"; skipped your own {', '.join(skipped)} (add agent-voice there by hand)"
+    if not remove:
+        msg += ". In Cline, turn on Settings > Features > Enable Hooks"
+    return msg
+
+
 def antigravity(remove: bool = False) -> str:  # noqa: ARG001
     return "no hook API: select the agent's reply and press the read-selection hotkey (default ctrl+alt+r)"
 
 
-INSTALLERS = {"claude": claude, "codex": codex, "gemini": gemini, "cursor": cursor, "antigravity": antigravity}
+INSTALLERS = {"claude": claude, "codex": codex, "gemini": gemini, "cursor": cursor, "cline": cline,
+              "antigravity": antigravity}
 
 
 # -- Windows autostart ---------------------------------------------------------------------

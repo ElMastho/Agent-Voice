@@ -101,7 +101,9 @@ Open the chevron for **every action with its shortcut**: reply now, hold to talk
 - **Never steals focus**: clicking it keeps your agent window active.
 - **Hide / show**: `Ctrl+Alt+W`, a click on the tray icon, or right-click → *Hide widget*.
 - **Compact**: right-click → *Compact (orb only)* shrinks it to the animated orb; a click on it talks / cancels / skips.
-- **Replies go back to your agent**: dictated replies are typed into the window you last prompted from, even if it is minimized or behind another app; once sent (auto-send), you're returned to where you were. In the Claude desktop app it also opens the right conversation in the sidebar first, so a reply never lands in another thread. The text also stays on the clipboard.
+- **Notch**: right-click → *Notch (top of the screen)* docks it at the top centre like a camera notch. When idle it tucks itself away, leaving a 3-pixel line under the camera; it slides down while the agent talks or listens, when a question comes in, or when you touch the top edge with the mouse, and slides back up 3 seconds after.
+- **Questions**: when the agent asks you to choose (Claude Code's questions, Cline's follow-up questions), the options appear in the widget and are read out. Click one, or just say it: *"the second one"*, *"option 3"*, or the option's name; anything else is sent as your own answer.
+- **Replies go back to your agent**: dictated replies are typed into the window you last prompted from, even if it is minimized or behind another app; once sent (auto-send), you're returned to where you were. In the **Claude desktop app** the reply goes to the right conversation and, with auto-send on, is sent **without bringing the app forward** at all. The text also stays on the clipboard.
 - **Tray menu**: every action, auto-send/mute toggles, start/stop the service, *Start with Windows*.
 
 <br clear="right">
@@ -129,6 +131,7 @@ All of them can be changed in `~/.agent-voice/config.json`.
 | **Codex CLI** | top-level `notify` in `~/.codex/config.toml` | `agent-voice install codex` |
 | **Gemini CLI** | `AfterAgent` hook in `~/.gemini/settings.json` | `agent-voice install gemini` |
 | **Cursor** | `afterAgentResponse` in `~/.cursor/hooks.json` | `agent-voice install cursor` |
+| **Cline** | Hook scripts in `~/Documents/Cline/Hooks` (`.ps1` on Windows): completions, follow-up questions with their options, plan replies | `agent-voice install cline`, then Cline settings → *Enable Hooks* |
 | **Antigravity** / anything else | select + `Ctrl+Alt+R`, or `echo text \| agent-voice say` | none needed |
 
 Installers back up the file they touch (`*.bak-agent-voice`), are idempotent, and `agent-voice uninstall <agent>` reverts them.
@@ -189,6 +192,7 @@ sequenceDiagram
 | *(runtime)* speed | `1.5×` | Voice speed 1× to 2×: widget panel, tray → *Voice speed*, or `agent-voice speed 1.75` |
 | `summary` | `enabled: true`, `max_chars: 280` | Speak a one-sentence summary of final answers (runtime toggle: tray or `agent-voice summary`) |
 | `auto_listen` | `enabled`, 15 s window, 1.5 s silence, 600 s max | Mic after the final answer |
+| `background_send` | `true` | Claude desktop app: with auto-send on, send spoken replies without bringing the window forward |
 | `chime.volume` | `0.35` | Chime mode loudness (0 to 1): a rising chime when done, a double one for questions and permissions |
 | `stt.model` | `small` | Whisper size: `base` is faster, `small` is better in French |
 | `widget` | `enabled: true`, `blur: "acrylic"` | `blur`: `acrylic` / `blur` / `none` |
@@ -204,7 +208,7 @@ agent-voice say "text" [--lang fr|en] [--voice NAME]
 agent-voice stop | mute [on|off|toggle] | unmute | handsfree [on|off|toggle] | summary [on|off|toggle] | speed [1-2]
 agent-voice chime [on|off|toggle]               chime mode: sounds only, for open-plan offices
 agent-voice widget                              reopen the widget + tray icon
-agent-voice install | uninstall [claude codex gemini cursor | all]
+agent-voice install | uninstall [claude codex gemini cursor cline | all]
 agent-voice autostart on|off                    start with Windows
 agent-voice setup                               config, voices, Whisper model
 agent-voice serve                               run in the foreground (debugging)

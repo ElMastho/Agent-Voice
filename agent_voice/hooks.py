@@ -39,7 +39,7 @@ SUMMARY_INSTRUCTION = (
     "Do not add it to intermediate messages."
 )
 # Tools that stop and wait for the user: worth a chime even when nothing is spoken.
-ATTENTION_TOOLS = {"AskUserQuestion", "ExitPlanMode"}
+ATTENTION_TOOLS = {"ExitPlanMode"}
 
 _SUMMARY_LINE = re.compile(r"^[\s>*_`#-]*voice summary\s*:[\s*_`]*(.+?)[\s*_`]*$", re.I | re.M)
 
@@ -237,7 +237,8 @@ def hook_claude(raw: str) -> None:
         return
     if event == "PreToolUse" and data.get("tool_name") in ATTENTION_TOOLS:
         client.request("/notify", {"kind": "attention"}, timeout=1.0)
-    if event == "PreToolUse" and not load_config().get("speak_progress", True):
+    asking = event == "PreToolUse" and data.get("tool_name") == "AskUserQuestion"
+    if event == "PreToolUse" and not asking and not load_config().get("speak_progress", True):
         return
     texts: list[str] = []
     transcript = data.get("transcript_path")
@@ -251,6 +252,20 @@ def hook_claude(raw: str) -> None:
     fresh = _unspoken(str(data.get("session_id", "")), texts)
     final = event == "Stop"
     text = "\n\n".join(fresh)
+    if asking:
+        questions = (data.get("tool_input") or {}).get("questions") or []
+        if questions and isinstance(questions[0], dict):
+            q = questions[0]
+            notify_question(
+                session=str(data.get("session_id", "")),
+                agent="claude",
+                question=str(q.get("question", "")),
+                header=str(q.get("header", "")),
+                options=[str(o.get("label", "")) for o in q.get("options") or [] if isinstance(o, dict)],
+                more=len(questions) - 1,
+                preface=strip_summary(text) if load_config().get("speak_progress", True) else "",
+            )
+            return
     if final and text.strip() and summary_enabled():
         text = summarize(text, int(load_config().get("summary", {}).get("max_chars", 280)))
     else:
@@ -259,6 +274,59 @@ def hook_claude(raw: str) -> None:
     if text.strip() or final:
         # The session id lets the daemon type your spoken reply into this conversation (desktop app).
         client.speak(text, source="claude", final=final, session=str(data.get("session_id", "")))
+
+
+def notify_question(session: str, agent: str, question: str, options: list[str], header: str = "",
+                    more: int = 0, preface: str = "") -> None:
+    """The agent is waiting on a choice: the daemon reads it out and the widget shows the options."""
+    client.request("/notify", {"kind": "question", "session": session, "agent": agent, "question": question,
+                               "header": header, "options": options, "more": more, "preface": preface},
+                   timeout=2.0)
+
+
+# -- Cline: PowerShell (Windows) / executable (macOS, Linux) hook files ----------------
+# Tools whose arguments are what Cline says to you.
+CLINE_SPOKEN = {"attempt_completion": "result", "plan_mode_respond": "response"}
+
+
+def hook_cline(raw: str) -> dict:
+    """Cline sends {hookName, taskId, <hookName in camelCase>: {...}}; returns the hook's JSON reply."""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    name = data.get("hookName", "")
+    task = str(data.get("taskId", ""))
+    if name == "UserPromptSubmit":
+        from agent_voice import winfocus
+
+        client.request("/prompt", {"hwnd": winfocus.foreground()}, timeout=1.0)
+        return {"contextModification": SUMMARY_INSTRUCTION} if summary_enabled() else {}
+    if name == "Notification":
+        note = data.get("notification") or {}
+        if note.get("requiresUserAction") or note.get("waitingForUserInput"):
+            client.request("/notify", {"kind": "attention"}, timeout=1.0)
+        return {}
+    if name != "PreToolUse":
+        return {}
+    pre = data.get("preToolUse") or {}
+    tool, params = pre.get("toolName", ""), pre.get("parameters") or {}
+    if tool == "ask_followup_question":
+        try:
+            options = [str(o) for o in json.loads(params.get("options") or "[]")]
+        except (ValueError, TypeError):
+            options = []
+        question = str(params.get("question", ""))
+        if options:
+            notify_question(session=task, agent="cline", question=question, options=options)
+        elif question.strip():
+            client.speak(question, source="cline", final=True, session=task)
+    elif tool in CLINE_SPOKEN:
+        text = str(params.get(CLINE_SPOKEN[tool], ""))
+        if text.strip() and summary_enabled():
+            text = summarize(text, int(load_config().get("summary", {}).get("max_chars", 280)))
+        client.speak(strip_summary(text), source="cline", final=True, session=task)
+    return {}
 
 
 # -- Generic JSON payloads (Codex, Gemini CLI, Cursor, anything else) -----------------
@@ -282,13 +350,17 @@ def hook_payload(agent: str, raw: str) -> None:
 
 
 def run(agent: str, argv: list[str]) -> int:
+    reply: dict = {}
     try:
         if agent == "codex" and argv:
             raw = argv[-1]  # Codex passes the JSON payload as the last argument
         else:
-            raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+            # Hook payloads are UTF-8 JSON whatever the console code page.
+            raw = sys.stdin.buffer.read().decode("utf-8", "replace").lstrip("﻿") if not sys.stdin.isatty() else ""
         if agent == "claude":
             hook_claude(raw)
+        elif agent == "cline":
+            reply = hook_cline(raw)
         else:
             hook_payload(agent, raw)
     except Exception as exc:  # a voice problem must never break the agent
@@ -301,4 +373,6 @@ def run(agent: str, argv: list[str]) -> int:
     if agent in ("gemini", "cursor"):
         # These agents parse the hook's stdout as JSON.
         sys.stdout.write("{}")
+    if agent == "cline":
+        sys.stdout.write(json.dumps(reply))
     return 0

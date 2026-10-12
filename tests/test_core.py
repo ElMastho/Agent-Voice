@@ -125,14 +125,48 @@ def test_claude_hooks_ring_when_attention_is_needed(monkeypatch, tmp_path):
     import json
 
     monkeypatch.setattr(hooks, "SESSIONS_DIR", tmp_path)
-    sent = []
-    monkeypatch.setattr(hooks.client, "request", lambda path, payload=None, timeout=2.0: sent.append(path))
-    monkeypatch.setattr(hooks.client, "speak", lambda *a, **k: None)
+    sent, spoken = [], []
+    monkeypatch.setattr(hooks.client, "request",
+                        lambda path, payload=None, timeout=2.0: sent.append((path, (payload or {}).get("kind"))))
+    monkeypatch.setattr(hooks.client, "speak", lambda *a, **k: spoken.append(a))
     hooks.hook_claude(json.dumps({"hook_event_name": "Notification", "message": "Claude needs your permission to use Bash"}))
     hooks.hook_claude(json.dumps({"hook_event_name": "Notification", "message": "Claude is waiting for your input"}))
-    hooks.hook_claude(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "session_id": "t"}))
+    ask = {"questions": [{"question": "Which one?", "header": "Pick", "multiSelect": False,
+                          "options": [{"label": "A", "description": "first"}, {"label": "B", "description": "second"}]}]}
+    hooks.hook_claude(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion",
+                                  "session_id": "t", "tool_input": ask}))
     hooks.hook_claude(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "session_id": "t"}))
-    assert sent == ["/notify", "/notify"]
+    assert sent == [("/notify", "attention"), ("/notify", "question")]
+    assert spoken == []  # the question itself is read out by the daemon, with its options
+
+
+def test_cline_hooks(monkeypatch):
+    import json
+
+    sent, spoken = [], []
+    monkeypatch.setattr(hooks.client, "request", lambda path, payload=None, timeout=2.0: sent.append((path, payload)))
+    monkeypatch.setattr(hooks.client, "speak", lambda text, **k: spoken.append((text, k.get("final"))))
+    monkeypatch.setattr(hooks, "summary_enabled", lambda: False)
+
+    def pre(tool, **params):
+        return json.dumps({"hookName": "PreToolUse", "taskId": "T1", "preToolUse": {"toolName": tool, "parameters": params}})
+
+    assert hooks.hook_cline(pre("read_file", path="x")) == {}
+    hooks.hook_cline(pre("attempt_completion", result="All tests pass."))
+    hooks.hook_cline(pre("ask_followup_question", question="Which DB?", options='["Postgres", "SQLite"]'))
+    assert spoken == [("All tests pass.", True)]
+    assert sent[-1][0] == "/notify" and sent[-1][1]["options"] == ["Postgres", "SQLite"]
+
+
+def test_spoken_answers_pick_an_option():
+    from agent_voice.server import match_option
+
+    options = ["Thin strip (Recommended)", "Small pill", "Fully hidden"]
+    assert match_option("the second one", options) == 1
+    assert match_option("small pill please", options) == 1
+    assert match_option("option 3", options) == 2
+    assert match_option("la première", options) == 0
+    assert match_option("let's do something else entirely, one more idea", options) is None
 
 
 def test_only_one_daemon_can_hold_the_instance_lock(tmp_path):

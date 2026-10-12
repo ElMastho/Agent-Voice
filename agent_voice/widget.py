@@ -43,6 +43,11 @@ HIST_Y = MODE_Y + 26 + 10  # top of the "Recent" list
 HIST_ROWS, ROW_H = 5, 22
 EXPANDED_H = HIST_Y + 16 + HIST_ROWS * ROW_H + 8
 COMPACT = 56  # compact mode: just the orb
+# Notch mode: docked to the top centre of the screen like a camera notch, tucked away when idle.
+NOTCH_RADIUS = 16
+NOTCH_PEEK = 3  # pixels left showing when tucked under the top edge: hover them to bring it down
+NOTCH_HIDE_DELAY = 3.0  # seconds it stays down after the mouse leaves or activity ends
+OPTION_ROWS = 5  # question options shown in the panel
 # Matches Windows 11's native window rounding (DWMWCP_ROUND = 8 px), the only rounding that
 # also clips the acrylic blur; any other radius leaves blurred square corners showing.
 RADIUS = 8
@@ -113,8 +118,11 @@ def _hotkey_label(combo: str) -> str:
 
 
 # -- Windows glass ---------------------------------------------------------------------
-def _apply_windows_style(hwnd: int, blur: str) -> bool:
-    """Acrylic blur behind the window, rounded corners, no focus stealing, no taskbar entry."""
+def _apply_windows_style(hwnd: int, blur: str, notch: bool = False) -> bool:
+    """Acrylic blur behind the window, rounded corners, no focus stealing, no taskbar entry.
+
+    Notch mode draws its own shape (square top, rounded bottom): no system rounding and no blur.
+    """
     if sys.platform != "win32":
         return False
     import ctypes
@@ -132,14 +140,11 @@ def _apply_windows_style(hwnd: int, blur: str) -> bool:
     user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST)
 
     # Native Windows 11 rounding: it clips the acrylic too (a window region does not). RADIUS matches it.
-    corner = ctypes.c_int(2)  # DWMWCP_ROUND
+    corner = ctypes.c_int(1 if notch else 2)  # DWMWCP_DONOTROUND / DWMWCP_ROUND
     dwm.DwmSetWindowAttribute(wintypes.HWND(hwnd), 33, ctypes.byref(corner), ctypes.sizeof(corner))
     # Hide the grey system border; we draw our own hairline.
     no_border = ctypes.c_uint(0xFFFFFFFE)  # DWMWA_COLOR_NONE
     dwm.DwmSetWindowAttribute(wintypes.HWND(hwnd), 34, ctypes.byref(no_border), ctypes.sizeof(no_border))
-
-    if blur == "none":
-        return False
 
     class AccentPolicy(ctypes.Structure):
         _fields_ = [("AccentState", ctypes.c_int), ("AccentFlags", ctypes.c_int),
@@ -148,12 +153,12 @@ def _apply_windows_style(hwnd: int, blur: str) -> bool:
     class WinCompAttrData(ctypes.Structure):
         _fields_ = [("Attribute", ctypes.c_int), ("Data", ctypes.POINTER(AccentPolicy)), ("SizeOfData", ctypes.c_size_t)]
 
-    # 4 = acrylic, 3 = plain blur. Tint is AABBGGRR: a dark, slightly blue glass.
-    state = 4 if blur == "acrylic" else 3
+    # 4 = acrylic, 3 = plain blur, 0 = none. Tint is AABBGGRR: a dark, slightly blue glass.
+    state = 0 if notch or blur == "none" else 4 if blur == "acrylic" else 3
     accent = AccentPolicy(state, 2, 0x66201812, 0)
     data = WinCompAttrData(19, ctypes.pointer(accent), ctypes.sizeof(accent))  # WCA_ACCENT_POLICY
     try:
-        return bool(user32.SetWindowCompositionAttribute(wintypes.HWND(hwnd), ctypes.byref(data)))
+        return bool(user32.SetWindowCompositionAttribute(wintypes.HWND(hwnd), ctypes.byref(data))) and state != 0
     except AttributeError:
         return False
 
@@ -246,6 +251,11 @@ class VoiceWidget(QWidget):
         self.title_t = 1.0  # title crossfade progress
         self.expanded = False
         self.compact = False
+        self.notch = False
+        self._bar_pos: tuple[int, int] | None = None  # where the floating bar was before notch mode
+        self._reveal = 1.0  # notch: 0 tucked under the top edge, 1 fully down
+        self._reveal_until = 0.0
+        self._h = float(BAR_H)  # eased window height
         self._copied: str | None = None  # history row just copied, for a brief confirmation
         self._copied_at = 0.0
         self.hover: str | None = None
@@ -261,6 +271,8 @@ class VoiceWidget(QWidget):
         self.f_tile = QFont("Segoe UI Variable Text", 8)
         self.f_tile.setWeight(QFont.Medium)
         self.f_hint = QFont("Segoe UI Variable Text", 7)
+        self.f_q = QFont("Segoe UI Variable Text", 9)
+        self.f_q.setWeight(QFont.DemiBold)
         self.f_chip = QFont("Segoe UI Variable Text", 7)
         self.f_chip.setWeight(QFont.Bold)
         self.f_icon = QFont(ICON_FONT, 11)
@@ -284,7 +296,7 @@ class VoiceWidget(QWidget):
         super().showEvent(event)
         if not getattr(self, "_styled", False):
             self._styled = True
-            self.glass = _apply_windows_style(int(self.winId()), self.blur_mode)
+            self.glass = _apply_windows_style(int(self.winId()), self.blur_mode, self.notch)
 
     def _restore_position(self) -> None:
         screen = QApplication.primaryScreen().availableGeometry()
@@ -293,6 +305,7 @@ class VoiceWidget(QWidget):
             x, y = int(pos["x"]), int(pos["y"])
             self.expanded = bool(pos.get("expanded", False))
             self.compact = bool(pos.get("compact", False))
+            self.notch = bool(pos.get("notch", False))
             self.start_hidden = bool(pos.get("hidden", False))
         except (OSError, ValueError, KeyError):
             x, y = screen.right() - WIDTH - 16, screen.top() + 64
@@ -303,15 +316,57 @@ class VoiceWidget(QWidget):
         self._apply_size()
 
     def _apply_size(self) -> None:
-        if self.compact:
-            self.resize(COMPACT, COMPACT)
-        else:
-            self.resize(WIDTH, EXPANDED_H if self.expanded else BAR_H)
+        w, h = self._target_size()
+        self._h = float(h)
+        self.resize(w, h)
+
+    def _question(self) -> dict | None:
+        return self.st.get("question") or None
+
+    def _is_compact(self) -> bool:
+        # A question needs room: the compact orb opens into the bar until it is answered.
+        return self.compact and not self.notch and not self._question()
+
+    def _target_size(self) -> tuple[int, int]:
+        if self._is_compact():
+            return COMPACT, COMPACT
+        if self._question():
+            return WIDTH, BAR_H + int(self._question_layout()[3])
+        return WIDTH, EXPANDED_H if self.expanded else BAR_H
+
+    def _follow_size(self) -> None:
+        """Glide towards the size the content needs (panel opening, a question arriving...)."""
+        if self._dragged:
+            return
+        w, h = self._target_size()
+        if w != self.width():  # compact <-> bar: keep the right edge where it is
+            right = self.x() + self.width()
+            self.resize(w, self.height())
+            if not self.notch:
+                self.move(right - w, self.y())
+        self._h = h if abs(self._h - h) < 0.6 else _ease(self._h, h, 0.28)
+        if int(round(self._h)) != self.height():
+            self.resize(w, int(round(self._h)))
+
+    def _place_notch(self) -> None:
+        """Top centre of the primary screen, sliding down when wanted and back up when not."""
+        now = time.time()
+        busy = self.phase in ("speaking", "waiting", "recording", "transcribing")
+        if busy or self._hovering or self.expanded or self.pressed or self._question():
+            self._reveal_until = now + NOTCH_HIDE_DELAY
+        self._reveal = _ease(self._reveal, 1.0 if now < self._reveal_until else 0.0, 0.2)
+        geo = QApplication.primaryScreen().geometry()
+        hidden = geo.top() - self.height() + NOTCH_PEEK
+        x = geo.center().x() - self.width() // 2
+        y = int(round(hidden + (geo.top() - hidden) * self._reveal))
+        if (x, y) != (self.x(), self.y()):
+            self.move(x, y)
 
     def _save_position(self) -> None:
         try:
             HOME.mkdir(parents=True, exist_ok=True)
-            state = {"x": self.x(), "y": self.y(), "expanded": self.expanded, "compact": self.compact,
+            x, y = self._bar_pos if self.notch and self._bar_pos else (self.x(), self.y())
+            state = {"x": x, "y": y, "expanded": self.expanded, "compact": self.compact, "notch": self.notch,
                      "hidden": not self.isVisible()}
             POS_FILE.write_text(json.dumps(state), encoding="utf-8")
         except OSError:
@@ -367,8 +422,12 @@ class VoiceWidget(QWidget):
         for key in set(self.hover_t) | ({self.hover} if self.hover else set()):
             self.hover_t[key] = _ease(self.hover_t.get(key, 0.0), 1.0 if key == self.hover else 0.0, 0.25)
 
-        # Discreet when nothing happens, fully visible when active or hovered.
-        active = self.phase not in ("idle", "offline", "muted") or self._hovering or self.expanded
+        self._follow_size()
+        if self.notch:
+            self._place_notch()
+        # Discreet when nothing happens, fully visible when active or hovered (the notch is always solid).
+        active = (self.phase not in ("idle", "offline", "muted") or self._hovering or self.expanded
+                  or self.notch or self._question())
         want = 1.0 if active else 0.62
         self._opacity += (want - self._opacity) * 0.12
         if abs(self.windowOpacity() - self._opacity) > 0.004:
@@ -404,12 +463,16 @@ class VoiceWidget(QWidget):
 
     def _rects(self) -> dict[str, QRectF]:
         r: dict[str, QRectF] = {}
-        if self.compact:
+        if self._is_compact():
             # The whole orb is the main button.
             return {"primary": QRectF(0, 0, COMPACT, COMPACT)} if self._primary() else {}
         if self._primary():
             r["primary"] = QRectF(WIDTH - 82, BAR_H / 2 - 17, 34, 34)
         r["chevron"] = QRectF(WIDTH - 40, BAR_H / 2 - 13, 26, 26)
+        if self._question():
+            for i, row in enumerate(self._question_layout()[2]):
+                r[f"opt:{i}"] = row
+            return r
         if self.height() > BAR_H + 40:
             pad, gap, th = 12, 8, 58
             tw = (WIDTH - 2 * pad - 2 * gap) / 3
@@ -427,6 +490,23 @@ class VoiceWidget(QWidget):
             for i in range(len(self._history())):
                 r[f"hist:{i}"] = self._history_row(i)
         return r
+
+    def _question_layout(self) -> tuple[QRectF, QRectF, list[QRectF], float]:
+        """(header line, question text, option rows, panel height) for the pending question."""
+        q = self._question() or {"question": "", "options": []}
+        fm = QFontMetrics(self.f_q)
+        text_h = fm.boundingRect(0, 0, WIDTH - 28, 400, Qt.TextWordWrap, q["question"]).height()
+        text_h = min(text_h, 3 * fm.lineSpacing())
+        y = BAR_H + 10
+        head = QRectF(14, y, WIDTH - 28, 15)
+        y += 21
+        text = QRectF(14, y, WIDTH - 28, text_h)
+        y += text_h + 8
+        rows = []
+        for _ in q["options"][:OPTION_ROWS]:
+            rows.append(QRectF(10, y, WIDTH - 20, 28))
+            y += 32
+        return head, text, rows, y + 20 - BAR_H
 
     def _history(self) -> list[dict]:
         return list(self.st.get("history") or [])[:HIST_ROWS]
@@ -461,12 +541,19 @@ class VoiceWidget(QWidget):
         w, h = self.width(), self.height()
         body = QRectF(0.5, 0.5, w - 1, h - 1)
         path = QPainterPath()
-        path.addRoundedRect(body, RADIUS, RADIUS)
+        if self.notch:
+            # Square top against the screen edge, rounded bottom: a camera notch.
+            path.addRoundedRect(body, NOTCH_RADIUS, NOTCH_RADIUS)
+            top = QPainterPath()
+            top.addRect(QRectF(0.5, 0.5, w - 1, NOTCH_RADIUS))
+            path = path.united(top)
+        else:
+            path.addRoundedRect(body, RADIUS, RADIUS)
         p.setClipPath(path)
 
-        # Glass body: tinted fill (denser when there is no real blur behind it).
-        p.fillPath(path, QColor(14, 16, 24, 120 if self.glass else 228))
-        if self.compact:
+        # Glass body: tinted fill (denser when there is no real blur behind it); the notch is near-black.
+        p.fillPath(path, QColor(5, 6, 9, 250) if self.notch else QColor(14, 16, 24, 120 if self.glass else 228))
+        if self._is_compact():
             self._paint_compact(p, path)
         else:
             self._paint_full(p, path, h)
@@ -479,7 +566,10 @@ class VoiceWidget(QWidget):
         edge.setColorAt(1, QColor(255, 255, 255, 40))
         p.setPen(QPen(edge, 1))
         p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(body, RADIUS, RADIUS)
+        if self.notch:
+            p.drawPath(path)
+        else:
+            p.drawRoundedRect(body, RADIUS, RADIUS)
         p.end()
 
     def _paint_compact(self, p: QPainter, path: QPainterPath) -> None:
@@ -685,6 +775,8 @@ class VoiceWidget(QWidget):
                 sub = "Chime mode · sounds only, no voice"
         if self.phase == "speaking" and st.get("hands_free"):
             sub = "Skip to answer · auto-send on"
+        if self._question() and self.phase in ("idle", "waiting", "recording"):
+            title, sub = "Your choice", "Click an option or say it"
         x = 62
         right = WIDTH - 92
         p.setFont(self.f_title)
@@ -749,9 +841,49 @@ class VoiceWidget(QWidget):
         p.setPen(QColor(255, 255, 255, 170))
         p.drawText(rect, Qt.AlignCenter, ICONS["up" if self.expanded else "down"])
 
+    def _paint_question(self, p: QPainter) -> None:
+        """The agent's question and its options, each one clickable."""
+        q = self._question()
+        head, text, rows, _ = self._question_layout()
+        self._chip(p, head.x(), head.y(), (q.get("header") or "Question").upper())
+        if q.get("more"):
+            p.setFont(self.f_hint)
+            p.setPen(QColor(226, 232, 240, 120))
+            p.drawText(head, Qt.AlignRight | Qt.AlignVCenter, f"+{q['more']} more in {q.get('agent') or 'the app'}")
+        p.setFont(self.f_q)
+        p.setPen(QColor(255, 255, 255, 235))
+        p.drawText(text, Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignTop, q["question"])
+        fm = QFontMetrics(self.f_tile)
+        for i, (label, row) in enumerate(zip(q["options"], rows)):
+            ht = self.hover_t.get(f"opt:{i}", 0.0)
+            fill = QColor(self.accent)
+            fill.setAlpha(int(30 + 60 * ht))
+            p.setPen(QPen(QColor(255, 255, 255, int(28 + 50 * ht)), 1))
+            p.setBrush(fill)
+            p.drawRoundedRect(row, 8, 8)
+            badge = QRectF(row.x() + 6, row.y() + 5, 18, 18)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 40))
+            p.drawEllipse(badge)
+            p.setFont(self.f_chip)
+            p.setPen(QColor(255, 255, 255, 235))
+            p.drawText(badge, Qt.AlignCenter, str(i + 1))
+            p.setFont(self.f_tile)
+            label_rect = row.adjusted(32, 0, -8, 0)
+            p.drawText(label_rect, Qt.AlignLeft | Qt.AlignVCenter,
+                       fm.elidedText(label, Qt.ElideRight, int(label_rect.width())))
+        p.setFont(self.f_hint)
+        p.setPen(QColor(226, 232, 240, 110))
+        y = rows[-1].bottom() + 4 if rows else text.bottom() + 4
+        p.drawText(QRectF(14, y, WIDTH - 28, 14), Qt.AlignLeft | Qt.AlignVCenter,
+                   "Or say it: “the second one”, or the option’s name")
+
     def _paint_panel(self, p: QPainter) -> None:
         p.setPen(QPen(QColor(255, 255, 255, 22), 1))
         p.drawLine(QPointF(14, BAR_H), QPointF(WIDTH - 14, BAR_H))
+        if self._question():
+            self._paint_question(p)
+            return
         rects = self._rects()
         progress = (self.height() - BAR_H) / (EXPANDED_H - BAR_H)
         for i, (tid, icon, label, hk, active) in enumerate(self._tiles()):
@@ -933,6 +1065,10 @@ class VoiceWidget(QWidget):
             if i < len(items):
                 text = items[i].get("text", "")
                 return (text if len(text) <= 400 else text[:400] + "…") + "\n\nClick to copy"
+        if key and key.startswith("opt:"):
+            q = self._question() or {"options": []}
+            i = int(key.split(":", 1)[1])
+            return q["options"][i] if i < len(q["options"]) else ""
         if key == "mode:voice":
             return "Voice: replies are read aloud and the mic opens"
         if key == "mode:chime":
@@ -943,7 +1079,7 @@ class VoiceWidget(QWidget):
     def mousePressEvent(self, e):
         if e.button() == Qt.RightButton:
             return
-        self._drag_from = e.globalPosition()
+        self._drag_from = None if self.notch else e.globalPosition()  # the notch stays docked
         self._win_from = self.pos()
         self._dragged = False
         self.pressed = self._hit(e.position())
@@ -992,6 +1128,9 @@ class VoiceWidget(QWidget):
             if i < len(items):
                 QApplication.clipboard().setText(items[i].get("text", ""))
                 self._copied, self._copied_at = key, time.time()
+        elif key.startswith("opt:"):
+            _post("/answer", {"index": int(key.split(":", 1)[1])})
+            self.st["question"] = None  # close the card now; the daemon answers in the background
         elif key.startswith("mode:"):
             on = key == "mode:chime"
             self.st["chime"] = on
@@ -1009,7 +1148,8 @@ class VoiceWidget(QWidget):
 
     def toggle_compact(self) -> None:
         """Switch between the full bar and a small orb, keeping the right edge where it was."""
-        self._height_anim.stop()
+        if self.notch:
+            self.toggle_notch()
         right = self.x() + self.width()
         self.compact = not self.compact
         self._apply_size()
@@ -1017,14 +1157,23 @@ class VoiceWidget(QWidget):
         self._snap()
         self._save_position()
 
+    def toggle_notch(self) -> None:
+        """Dock at the top centre of the screen like a camera notch, or float again where it was."""
+        self.notch = not self.notch
+        if self.notch:
+            self._bar_pos = (self.x(), self.y())
+            self.compact = False
+            self._reveal, self._reveal_until = 1.0, time.time() + NOTCH_HIDE_DELAY
+        elif self._bar_pos:
+            self.move(*self._bar_pos)
+        self._apply_size()
+        self.glass = _apply_windows_style(int(self.winId()), self.blur_mode, self.notch)
+        self._save_position()
+
     def toggle_expanded(self) -> None:
         if self.compact:
             self.toggle_compact()
-        self.expanded = not self.expanded
-        self._height_anim.stop()
-        self._height_anim.setStartValue(self.height())
-        self._height_anim.setEndValue(EXPANDED_H if self.expanded else BAR_H)
-        self._height_anim.start()
+        self.expanded = not self.expanded  # _follow_size() glides to the new height
         self._save_position()
 
     def contextMenuEvent(self, e):
@@ -1033,16 +1182,23 @@ class VoiceWidget(QWidget):
         geo = (self.screen() or QApplication.primaryScreen()).availableGeometry()
         if self.compact:
             actions = [("Full widget", self.toggle_compact), ("Show all actions", self.toggle_expanded), (None, None)]
+        elif self.notch:
+            actions = [("Collapse" if self.expanded else "Show all actions", self.toggle_expanded),
+                       ("Float the widget again", self.toggle_notch), (None, None)]
         else:
             actions = [
                 ("Collapse" if self.expanded else "Show all actions", self.toggle_expanded),
                 ("Compact (orb only)", self.toggle_compact),
+                ("Notch (top of the screen)", self.toggle_notch),
+                (None, None),
+            ]
+        if not self.notch:
+            actions += [
+                ("Move to top right", lambda: self._place(geo.right() - WIDTH - 16, geo.top() + 64)),
+                ("Move to top left", lambda: self._place(geo.left() + 16, geo.top() + 64)),
                 (None, None),
             ]
         actions += [
-            ("Move to top right", lambda: self._place(geo.right() - WIDTH - 16, geo.top() + 64)),
-            ("Move to top left", lambda: self._place(geo.left() + 16, geo.top() + 64)),
-            (None, None),
             (f"Hide widget ({_hotkey_label(self.hotkeys.get('widget', ''))})", self.toggle_visible),
             ("Stop voice service", lambda: (_post("/shutdown"))),
         ]
@@ -1114,6 +1270,7 @@ class Tray(QSystemTrayIcon):
 
         add("Hide widget" if w.isVisible() else "Show widget", w.toggle_visible, key=hk.get("widget", ""))
         add("Compact widget (orb only)", w.toggle_compact, checked=w.compact)
+        add("Notch (top of the screen)", w.toggle_notch, checked=w.notch)
         m.addSeparator()
         add("Reply now", lambda: _post("/reply"), online, key=hk.get("reply", ""))
         add("Stop", lambda: _post("/stop"), online, key=hk.get("stop", ""))

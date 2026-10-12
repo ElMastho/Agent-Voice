@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import re
 import socket
 import sys
 import threading
@@ -119,6 +120,37 @@ def chime_audio(kind: str, volume: float = 0.35, rate: int = 44100):
     return (out / peak * max(0.0, min(1.0, volume))).astype(np.float32), rate
 
 
+# Spoken answers to a question: "the second one", "option 2", "la deuxième"...
+_ORDINALS = {
+    1: ("1", "one", "first", "un", "une", "premier", "première", "premiere"),
+    2: ("2", "two", "second", "deux", "deuxième", "deuxieme", "seconde"),
+    3: ("3", "three", "third", "trois", "troisième", "troisieme"),
+    4: ("4", "four", "fourth", "quatre", "quatrième", "quatrieme"),
+    5: ("5", "five", "fifth", "cinq", "cinquième", "cinquieme"),
+}
+
+
+def _plain(text: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
+
+
+def match_option(text: str, options: list[str]) -> int | None:
+    """Which option a spoken answer picks: its label said out loud, or its number. None otherwise."""
+    said = _plain(text)
+    labels = [_plain(re.sub(r"\(.*?\)", "", o)) for o in options]
+    for i in sorted(range(len(labels)), key=lambda i: -len(labels[i])):
+        if labels[i] and labels[i] in said:
+            return i
+    words = said.split()
+    if len(words) <= 5:  # a short answer that names a position, not a sentence that happens to contain "one"
+        found = [n for n, keys in _ORDINALS.items() if n <= len(options) and any(k in words for k in keys)]
+        if len(found) > 1:  # "the second one": "one" is just a filler word there
+            found = [n for n in found if not any(w in words for w in ("one", "un", "une")) or n != 1]
+        if found:
+            return found[0] - 1
+    return None
+
+
 class Daemon:
     def __init__(self, config: dict):
         self.config = config
@@ -142,6 +174,8 @@ class Daemon:
         self._target_hwnd = saved if winfocus.is_window(saved) else 0
         # Agent session whose turn just ended: the conversation a spoken reply belongs to.
         self._reply_session = ""
+        # A question the agent is waiting on (options to pick from the widget or by voice).
+        self.question: dict | None = None
         # Desktop app: CLI session id -> conversation title, learned when you send a prompt.
         self._titles: dict[str, str] = dict(self.state.get("desktop_titles") or {})
         # What the mic is doing, for the widget: "" | waiting | recording | transcribing
@@ -158,11 +192,11 @@ class Daemon:
 
     def _job_loop(self) -> None:
         while True:
-            args = self.jobs.get()
+            job = self.jobs.get()
             try:
-                self.speak(*args)
+                job()
             except Exception:
-                log.exception("speak failed")
+                log.exception("job failed")
 
     # -- state ------------------------------------------------------------------
     @property
@@ -235,11 +269,76 @@ class Daemon:
         except Exception:
             log.exception("chime failed")
 
-    def notify(self, kind: str) -> None:
-        """The agent needs you (a question, a permission, a plan to approve)."""
+    def notify(self, kind: str, data: dict | None = None) -> None:
+        """The agent needs you: a question with options, a permission, a plan to approve."""
+        data = data or {}
         log.info("notify kind=%s chime=%s", kind, self.chime)
+        options = [str(o) for o in data.get("options") or [] if str(o).strip()]
+        if kind == "question" and options:
+            self.question = {
+                "session": str(data.get("session") or ""),
+                "agent": str(data.get("agent") or ""),
+                "question": str(data.get("question") or ""),
+                "header": str(data.get("header") or ""),
+                "options": options,
+                "more": int(data.get("more") or 0),
+                "at": time.time(),
+            }
+            if self.muted:
+                return
+            if self.chime:
+                self.play_chime("attention")
+                return
+            preface = str(data.get("preface") or "")
+            if preface.strip():
+                self.speaker.speak(preface)
+            listed = " ".join(f"{i}: {o}." for i, o in enumerate(options, 1))
+            self.speaker.speak(f"{self.question['question']} {listed}")
+            if self.config["auto_listen"].get("enabled") and self.transcriber is not None:
+                self._reply_session = self.question["session"]
+                self._listen_armed = True  # your spoken answer picks an option
+            return
         if self.chime:
             self.play_chime("attention")
+
+    def _title_for(self, hwnd: int, session: str) -> str:
+        """Desktop app conversation title for an agent session ("" when it isn't one)."""
+        if not (hwnd and session and claudeapp.is_desktop_app(hwnd)):
+            return ""
+        return claudeapp.session_title(session) or self._titles.get(session, "")
+
+    def answer(self, index: int | None = None, text: str = "") -> bool:
+        """Answer the pending question: option `index`, or a spoken/typed `text`."""
+        import pyperclip
+
+        q = self.question
+        if not q:
+            return False
+        options = q["options"]
+        if index is None:
+            index = match_option(text, options)
+        label = options[index] if index is not None and 0 <= index < len(options) else ""
+        hwnd, session = self._target_hwnd, q["session"]
+        title = self._title_for(hwnd, session)
+        log.info("answer option=%r free_text=%s", label, not label)
+        if title:
+            ok = claudeapp.answer_question(hwnd, title, label=label, other="" if label else text)
+        else:
+            # Agents whose question UI we can't drive (Cline): the answer is simply the reply.
+            self._paste(label or text, hwnd, submit=True, session=session)
+            ok = True
+        if ok:
+            self.question = None
+            if q["more"] and title:
+                claudeapp.select_session(hwnd, title)  # more questions: show them
+                winfocus.focus(hwnd)
+        else:
+            pyperclip.copy(label or text)
+            _beep(300, 150)
+            if title:  # let you click it yourself
+                winfocus.focus(hwnd)
+                claudeapp.select_session(hwnd, title)
+        return ok
 
     def set_muted(self, muted: bool) -> None:
         self.state["muted"] = muted
@@ -261,6 +360,8 @@ class Daemon:
         session: str = "",
     ) -> int:
         """Queue text; `final` marks the end of an agent's turn and arms auto-listen."""
+        if session and self.question and self.question["session"] == session:
+            self.question = None  # the agent moved on: the question was answered
         if self.muted:
             return 0
         if self.chime:
@@ -356,6 +457,7 @@ class Daemon:
         cfg = self.config["auto_listen"]
         target = self._target_hwnd or winfocus.foreground()
         session = self._reply_session
+        question = self.question
         self._listen_cancel.clear()
         self._listening = True
         self._mic_phase = "waiting"
@@ -382,7 +484,10 @@ class Daemon:
             if self._listen_cancel.is_set() or is_hallucination(text):
                 return
             self._heard(text, lang)
-            self._paste(text, target, submit=self.hands_free, session=session)
+            if question is not None and question is self.question:
+                self.answer(text=text)
+            else:
+                self._paste(text, target, submit=self.hands_free, session=session)
         except Exception:
             log.exception("auto-listen failed")
         finally:
@@ -396,6 +501,14 @@ class Daemon:
         import pyperclip
 
         self._wait_modifiers_released()
+        title = self._title_for(hwnd, session)
+        if title and submit and self.config.get("background_send", True):
+            # Desktop app: type and send it in place; the app stays wherever it is.
+            if claudeapp.send_message(hwnd, title, text):
+                pyperclip.copy(text)
+                log.info("sent to %r in the background", title)
+                return
+            log.warning("background send to %r failed; typing it instead", title)
         # Where you were: once the reply is sent we hand the screen back to it.
         came_from = winfocus.foreground()
         was_minimized = winfocus.is_minimized(hwnd)
@@ -407,9 +520,6 @@ class Daemon:
             _beep(300, 150)
             return
         # Desktop app: several conversations share one window; open the one this reply answers.
-        title = ""
-        if session and claudeapp.is_desktop_app(hwnd):
-            title = claudeapp.session_title(session) or self._titles.get(session, "")
         if title and not claudeapp.select_session(hwnd, title):
             log.warning("could not open conversation %r; text left on clipboard", title)
             pyperclip.copy(text)
@@ -436,6 +546,14 @@ class Daemon:
             return "speaking"
         return "muted" if self.muted else "idle"
 
+    def _question_status(self) -> dict | None:
+        q = self.question
+        if q and time.time() - q["at"] > 1800:  # stale: answered elsewhere, or abandoned
+            self.question = q = None
+        if not q:
+            return None
+        return {k: q[k] for k in ("question", "header", "options", "more", "agent")}
+
     def status(self) -> dict:
         return {
             "version": __version__,
@@ -447,6 +565,7 @@ class Daemon:
             "last_heard": self.last_heard[-160:],
             "last_heard_lang": self.last_heard_lang,
             "history": self.history,
+            "question": self._question_status(),
             "muted": self.muted,
             "hands_free": self.hands_free,
             "chime": self.chime,
@@ -634,7 +753,7 @@ def _handler(daemon: Daemon):
                     data.get("voice"),
                     str(data.get("session") or ""),
                 )
-                daemon.jobs.put(args)
+                daemon.jobs.put(lambda: daemon.speak(*args))
                 return self._json(200, {"queued": True, "muted": daemon.muted})
             if self.path == "/reply":
                 daemon.reply_now()
@@ -673,7 +792,14 @@ def _handler(daemon: Daemon):
                 daemon.set_chime(not daemon.chime if mode == "toggle" else mode == "on")
                 return self._json(200, {"chime": daemon.chime})
             if self.path == "/notify":
-                daemon.notify(str(data.get("kind", "attention")))
+                # Queued behind speech, so a question is never cleared by an older progress message.
+                kind = str(data.get("kind", "attention"))
+                daemon.jobs.put(lambda: daemon.notify(kind, data))
+                return self._json(200, {"ok": True})
+            if self.path == "/answer":
+                index = data.get("index")
+                kwargs = {"index": int(index)} if isinstance(index, int) else {"text": str(data.get("text") or "")}
+                threading.Thread(target=daemon.answer, kwargs=kwargs, daemon=True).start()
                 return self._json(200, {"ok": True})
             if self.path == "/mute":
                 mode = data.get("mode", "toggle")

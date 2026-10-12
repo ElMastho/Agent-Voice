@@ -68,6 +68,9 @@ DEFAULTS: dict = {
         # Safety cap only: a long reply must never be cut mid-sentence.
         "max_seconds": 600,
     },
+    # Claude desktop app: with auto-send on, type and send spoken replies without bringing the
+    # window forward (falls back to focusing it when that fails).
+    "background_send": True,
     # Chime mode sounds (0.0-1.0). Kept low so they don't disturb people around you.
     "chime": {"volume": 0.35},
 }

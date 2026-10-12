@@ -124,6 +124,7 @@ agent-voice say --voice en_US-ryan-high "Hello, I am Ryan."
 | Codex CLI | `agent-voice install codex` | Adds a top-level `notify = [...]` to `~/.codex/config.toml` (skipped if you already have your own `notify`) |
 | Gemini CLI | `agent-voice install gemini` | Adds an `AfterAgent` hook to `~/.gemini/settings.json` |
 | Cursor | `agent-voice install cursor` | Adds `afterAgentResponse` to `~/.cursor/hooks.json` |
+| Cline | `agent-voice install cline` | Writes `UserPromptSubmit`, `PreToolUse` and `Notification` hooks to `~/Documents/Cline/Hooks` (`.ps1` on Windows; existing hooks of your own are left alone). Turn on *Settings → Features → Enable Hooks* in Cline |
 | Antigravity | — | Use `Ctrl+Alt+R` on the reply |
 
 Every installer keeps a backup (`*.bak-agent-voice`), can be re-run safely, and is reverted with `agent-voice uninstall <agent>`.

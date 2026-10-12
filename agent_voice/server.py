@@ -14,6 +14,7 @@ import socket
 import sys
 import threading
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from agent_voice import __version__, claudeapp, winfocus
@@ -130,6 +131,14 @@ _ORDINALS = {
 }
 
 
+# One colour per conversation, picked from its id so it never changes: you learn which is which.
+THREAD_COLORS = ("#F472B6", "#60A5FA", "#34D399", "#FBBF24", "#A78BFA", "#F87171", "#22D3EE", "#FB923C")
+
+
+def thread_color(key: str) -> str:
+    return THREAD_COLORS[zlib.crc32(key.encode("utf-8")) % len(THREAD_COLORS)]
+
+
 def _plain(text: str) -> str:
     return " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
 
@@ -176,6 +185,9 @@ class Daemon:
         self._reply_session = ""
         # A question the agent is waiting on (options to pick from the widget or by voice).
         self.question: dict | None = None
+        # Session and agent behind the current speech, so the widget can say which thread talks.
+        self._voice_session, self._voice_source = "", ""
+        self._file_titles: dict[str, str] = {}
         # Desktop app: CLI session id -> conversation title, learned when you send a prompt.
         self._titles: dict[str, str] = dict(self.state.get("desktop_titles") or {})
         # What the mic is doing, for the widget: "" | waiting | recording | transcribing
@@ -372,6 +384,8 @@ class Daemon:
             return 0
         if interrupt:
             self.speaker.stop()
+        if text.strip() or final:
+            self._voice_session, self._voice_source = session, source  # whose voice this is, for the widget
         n = self.speaker.speak(text, lang, voice) if text.strip() else 0
         log.info("speak source=%s sentences=%d final=%s", source, n, final)
         if final and self.config["auto_listen"].get("enabled") and self.transcriber is not None:
@@ -546,6 +560,27 @@ class Daemon:
             return "speaking"
         return "muted" if self.muted else "idle"
 
+    def _thread_status(self) -> dict | None:
+        """The conversation the voice (or the open mic) belongs to: its title and a colour of its own."""
+        q = self.question
+        if q:
+            session, source = q["session"], q["agent"]
+        elif self._mic_phase:
+            session, source = self._reply_session, self._voice_source
+        elif self.speaker.busy:
+            session, source = self._voice_session, self._voice_source
+        else:
+            return None
+        title = self._titles.get(session, "")
+        if session and not title:
+            if session not in self._file_titles:  # app session files: read once per session, not per poll
+                self._file_titles[session] = claudeapp.session_title(session)
+            title = self._file_titles[session]
+        title = title or {"claude": "Claude Code", "cline": "Cline"}.get(source, source.capitalize())
+        if not title:
+            return None
+        return {"title": title, "color": thread_color(session or title)}
+
     def _question_status(self) -> dict | None:
         q = self.question
         if q and time.time() - q["at"] > 1800:  # stale: answered elsewhere, or abandoned
@@ -560,12 +595,14 @@ class Daemon:
             "phase": self.phase(),
             "level": round(self.level, 4),
             "speaking_lang": self.speaker.current_spec[:2] if self.speaker.busy else "",
+            "caption": self.speaker.current_text if self.speaker.busy else "",
             "awaiting_reply": self._listen_armed,
             "widget_toggles": self.widget_toggles,
             "last_heard": self.last_heard[-160:],
             "last_heard_lang": self.last_heard_lang,
             "history": self.history,
             "question": self._question_status(),
+            "thread": self._thread_status(),
             "muted": self.muted,
             "hands_free": self.hands_free,
             "chime": self.chime,

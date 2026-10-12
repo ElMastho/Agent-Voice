@@ -44,7 +44,10 @@ HIST_ROWS, ROW_H = 5, 22
 EXPANDED_H = HIST_Y + 16 + HIST_ROWS * ROW_H + 8
 COMPACT = 56  # compact mode: just the orb
 # Notch mode: docked to the top centre of the screen like a camera notch, tucked away when idle.
+NOTCH_SCALE = 1.0
+NOTCH_W, NOTCH_H = 440, 44  # wide and short: one row of status, caption and chips
 NOTCH_RADIUS = 16
+NOTCH_PILL = 0.56  # tucked away, the notch is a pill this fraction of its full width
 NOTCH_PEEK = 3  # pixels left showing when tucked under the top edge: hover them to bring it down
 NOTCH_HIDE_DELAY = 3.0  # seconds it stays down after the mouse leaves or activity ends
 OPTION_ROWS = 5  # question options shown in the panel
@@ -103,6 +106,11 @@ def _round_pen(brush, width: float) -> QPen:
 
 def _ease(current: float, target: float, k: float) -> float:
     return current + (target - current) * k
+
+
+def _smooth(t: float) -> float:
+    t = max(0.0, min(1.0, t))
+    return t * t * (3 - 2 * t)
 
 
 def _mix(a: QColor, b: QColor, k: float) -> QColor:
@@ -253,7 +261,8 @@ class VoiceWidget(QWidget):
         self.compact = False
         self.notch = False
         self._bar_pos: tuple[int, int] | None = None  # where the floating bar was before notch mode
-        self._reveal = 1.0  # notch: 0 tucked under the top edge, 1 fully down
+        self._reveal = 1.0  # notch: 0 tucked under the top edge, 1 fully down (a spring: may overshoot)
+        self._reveal_v = 0.0
         self._reveal_until = 0.0
         self._h = float(BAR_H)  # eased window height
         self._copied: str | None = None  # history row just copied, for a brief confirmation
@@ -271,6 +280,9 @@ class VoiceWidget(QWidget):
         self.f_tile = QFont("Segoe UI Variable Text", 8)
         self.f_tile.setWeight(QFont.Medium)
         self.f_hint = QFont("Segoe UI Variable Text", 7)
+        self.f_notch_title = QFont("Segoe UI Variable Display", 9)
+        self.f_notch_title.setWeight(QFont.DemiBold)
+        self.f_notch_sub = QFont("Segoe UI Variable Text", 8)
         self.f_q = QFont("Segoe UI Variable Text", 9)
         self.f_q.setWeight(QFont.DemiBold)
         self.f_chip = QFont("Segoe UI Variable Text", 7)
@@ -327,23 +339,45 @@ class VoiceWidget(QWidget):
         # A question needs room: the compact orb opens into the bar until it is answered.
         return self.compact and not self.notch and not self._question()
 
+    def _scale(self) -> float:
+        return NOTCH_SCALE if self.notch else 1.0
+
+    def _logical_h(self) -> float:
+        """Window height in layout units (the notch is drawn scaled up)."""
+        return self.height() / self._scale()
+
+    def _to_layout(self, pos: QPointF) -> QPointF:
+        """Notch: window coordinates -> notch-row coordinates (the island is centred while it widens)."""
+        if not self.notch:
+            return pos
+        return QPointF(pos.x() - (self.width() - NOTCH_W) / 2, pos.y())
+
     def _target_size(self) -> tuple[int, int]:
         if self._is_compact():
             return COMPACT, COMPACT
         if self._question():
-            return WIDTH, BAR_H + int(self._question_layout()[3])
-        return WIDTH, EXPANDED_H if self.expanded else BAR_H
+            w, h = WIDTH, BAR_H + int(self._question_layout()[3])
+        else:
+            w, h = WIDTH, EXPANDED_H if self.expanded else BAR_H
+        if self.notch:  # its own row on top, the same panels underneath
+            return NOTCH_W, NOTCH_H + h - BAR_H
+        return w, h
+
+    def _panel_h(self) -> float:
+        """Height of the open panel under the bar (or under the notch row)."""
+        return self.height() - (NOTCH_H if self.notch else BAR_H)
 
     def _follow_size(self) -> None:
         """Glide towards the size the content needs (panel opening, a question arriving...)."""
         if self._dragged:
             return
         w, h = self._target_size()
-        if w != self.width():  # compact <-> bar: keep the right edge where it is
+        if self.notch:
+            w = self.width()  # the notch animates its own width (_place_notch)
+        elif w != self.width():  # compact <-> bar: keep the right edge where it is
             right = self.x() + self.width()
             self.resize(w, self.height())
-            if not self.notch:
-                self.move(right - w, self.y())
+            self.move(right - w, self.y())
         self._h = h if abs(self._h - h) < 0.6 else _ease(self._h, h, 0.28)
         if int(round(self._h)) != self.height():
             self.resize(w, int(round(self._h)))
@@ -354,11 +388,21 @@ class VoiceWidget(QWidget):
         busy = self.phase in ("speaking", "waiting", "recording", "transcribing")
         if busy or self._hovering or self.expanded or self.pressed or self._question():
             self._reveal_until = now + NOTCH_HIDE_DELAY
-        self._reveal = _ease(self._reveal, 1.0 if now < self._reveal_until else 0.0, 0.2)
+        # A lightly damped spring: it drops down, overshoots a hair in width, and settles.
+        target = 1.0 if now < self._reveal_until else 0.0
+        self._reveal_v = self._reveal_v * 0.66 + (target - self._reveal) * 0.12
+        self._reveal += self._reveal_v
+        if abs(target - self._reveal) < 0.002 and abs(self._reveal_v) < 0.002:
+            self._reveal, self._reveal_v = target, 0.0
+        down = _smooth(self._reveal)  # vertical travel never overshoots: it stays glued to the top edge
+        grow = NOTCH_PILL + (1 - NOTCH_PILL) * max(0.0, min(1.04, self._reveal))
         geo = QApplication.primaryScreen().geometry()
+        w = int(round(NOTCH_W * grow))
         hidden = geo.top() - self.height() + NOTCH_PEEK
-        x = geo.center().x() - self.width() // 2
-        y = int(round(hidden + (geo.top() - hidden) * self._reveal))
+        x = geo.center().x() - w // 2
+        y = int(round(hidden + (geo.top() - hidden) * down))
+        if w != self.width():
+            self.resize(w, self.height())
         if (x, y) != (self.x(), self.y()):
             self.move(x, y)
 
@@ -462,6 +506,18 @@ class VoiceWidget(QWidget):
         ]
 
     def _rects(self) -> dict[str, QRectF]:
+        r = self._bar_rects()
+        if not self.notch:
+            return r
+        # Panels keep their bar layout, centred under the notch row.
+        dx, dy = (NOTCH_W - WIDTH) / 2, NOTCH_H - BAR_H
+        out = {k: v.translated(dx, dy) for k, v in r.items() if k not in ("primary", "chevron")}
+        if "primary" in r:
+            out["primary"] = QRectF(NOTCH_W - 66, (NOTCH_H - 28) / 2, 28, 28)
+        out["chevron"] = QRectF(NOTCH_W - 34, (NOTCH_H - 22) / 2, 22, 22)
+        return out
+
+    def _bar_rects(self) -> dict[str, QRectF]:
         r: dict[str, QRectF] = {}
         if self._is_compact():
             # The whole orb is the main button.
@@ -473,7 +529,7 @@ class VoiceWidget(QWidget):
             for i, row in enumerate(self._question_layout()[2]):
                 r[f"opt:{i}"] = row
             return r
-        if self.height() > BAR_H + 40:
+        if self._panel_h() > 40:
             pad, gap, th = 12, 8, 58
             tw = (WIDTH - 2 * pad - 2 * gap) / 3
             for i, tile in enumerate(self._tiles()):
@@ -528,6 +584,7 @@ class VoiceWidget(QWidget):
         return float(min(range(len(SPEEDS)), key=lambda i: abs(SPEEDS[i] - x)))
 
     def _hit(self, pos: QPointF) -> str | None:
+        pos = self._to_layout(pos)
         for key, rect in self._rects().items():
             if rect.contains(pos):
                 return key
@@ -538,7 +595,10 @@ class VoiceWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
-        w, h = self.width(), self.height()
+        s = self._scale()
+        if s != 1.0:
+            p.scale(s, s)
+        w, h = self.width() / s, self.height() / s
         body = QRectF(0.5, 0.5, w - 1, h - 1)
         path = QPainterPath()
         if self.notch:
@@ -555,6 +615,8 @@ class VoiceWidget(QWidget):
         p.fillPath(path, QColor(5, 6, 9, 250) if self.notch else QColor(14, 16, 24, 120 if self.glass else 228))
         if self._is_compact():
             self._paint_compact(p, path)
+        elif self.notch:
+            self._paint_island(p, path, w, h)
         else:
             self._paint_full(p, path, h)
 
@@ -571,6 +633,101 @@ class VoiceWidget(QWidget):
         else:
             p.drawRoundedRect(body, RADIUS, RADIUS)
         p.end()
+
+    def _paint_island(self, p: QPainter, path: QPainterPath, w: float, h: float) -> None:
+        """Notch: the content stays centred while the island widens, and fades in once there is room."""
+        show = _smooth((self._reveal - 0.55) / 0.4)
+        off = (w - NOTCH_W) / 2
+        if show > 0.01:
+            p.save()
+            p.translate(off, 0)
+            p.setOpacity(show)
+            self._paint_notch_row(p)
+            if h > NOTCH_H + 4:
+                p.translate((NOTCH_W - WIDTH) / 2, NOTCH_H - BAR_H)
+                self._paint_panel(p)
+            p.restore()
+        # A soft light along the bottom edge, in the accent colour, that breathes with the voice.
+        glow = QLinearGradient(0, 0, w, 0)
+        c = QColor(self.accent)
+        c.setAlpha(0)
+        glow.setColorAt(0, c)
+        c.setAlpha(int(40 + 150 * self.energy * max(show, 0.35)))
+        glow.setColorAt(0.5, c)
+        c.setAlpha(0)
+        glow.setColorAt(1, c)
+        p.fillRect(QRectF(NOTCH_RADIUS, h - 2.2, w - 2 * NOTCH_RADIUS, 1.6), glow)
+
+    def _paint_notch_row(self, p: QPainter) -> None:
+        """One dense row: orb, status + conversation, live caption, info chips, buttons."""
+        cy = NOTCH_H / 2
+        st = self.st
+        amb = QRadialGradient(QPointF(22, cy), 110)
+        c = QColor(self.accent)
+        c.setAlpha(60 if self.phase not in ("idle", "offline") else 20)
+        amb.setColorAt(0, c)
+        c.setAlpha(0)
+        amb.setColorAt(1, c)
+        p.fillRect(QRectF(0, 0, NOTCH_W, NOTCH_H + 160), amb)  # past the row: no hard edge above a panel
+        self._paint_wave(p, x0=44.0, x1=NOTCH_W - 80.0, base=NOTCH_H - 4, scale=0.55)
+        self._paint_orb(p, QPointF(22, cy), 8.5)
+
+        # Info chips, right to left, before the buttons.
+        chips = []
+        if self._question():
+            chips.append("CHOOSE")
+        lang = st.get("speaking_lang") if self.phase == "speaking" else ""
+        if lang:
+            chips.append(lang.upper())
+        if st.get("chime"):
+            chips.append("CHIME")
+        elif st.get("hands_free"):
+            chips.append("AUTO")
+        if st.get("speed_x"):
+            chips.append(f"{float(st['speed_x']):g}×")
+        fm_chip = QFontMetrics(self.f_chip)
+        right = NOTCH_W - 74
+        for text in chips:
+            cw = fm_chip.horizontalAdvance(text) + 10
+            right -= cw
+            self._chip(p, right, cy - 7.5, text)
+            right -= 5
+
+        # Status and conversation on the first line, caption (or hint) on the second.
+        x, avail = 40.0, right - 40.0 - 6
+        _, title, sub = PHASES.get(self.phase, PHASES["idle"])
+        if self._question() and self.phase in ("idle", "waiting", "recording"):
+            title = "Your choice"
+        p.setFont(self.f_notch_title)
+        fm = QFontMetrics(self.f_notch_title)
+        p.setPen(QColor(255, 255, 255, 240))
+        p.drawText(QPointF(x, 19), fm.elidedText(title, Qt.ElideRight, int(avail)))
+        tx = x + min(fm.horizontalAdvance(title), avail) + 8
+        thread = st.get("thread")
+        if thread and tx < x + avail - 30:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(thread["color"]))
+            p.drawEllipse(QPointF(tx + 3, 15), 3, 3)
+            p.setFont(self.f_notch_sub)
+            p.setPen(QColor(thread["color"]).lighter(125))
+            p.drawText(QPointF(tx + 10, 19), QFontMetrics(self.f_notch_sub).elidedText(
+                thread["title"], Qt.ElideRight, int(x + avail - tx - 10)))
+        line = st.get("caption") or ""
+        if not line:
+            q = self._question()
+            if q:
+                line = q["question"]
+            elif self.phase == "idle" and st.get("last_heard"):
+                line = f"You: “{st['last_heard']}”"
+            elif self.phase == "idle":
+                line = f"{_hotkey_label(self.hotkeys.get('reply', ''))} to talk"
+            else:
+                line = sub
+        p.setFont(self.f_hint)
+        p.setPen(QColor(226, 232, 240, 150))
+        p.drawText(QRectF(x, 23, avail, 14), Qt.AlignLeft | Qt.AlignVCenter,
+                   QFontMetrics(self.f_hint).elidedText(line, Qt.ElideRight, int(avail)))
+        self._paint_buttons(p)
 
     def _paint_compact(self, p: QPainter, path: QPainterPath) -> None:
         """Compact mode: only the orb, centred, with its glow and phase animation."""
@@ -617,6 +774,7 @@ class VoiceWidget(QWidget):
 
         self._paint_orb(p)
         self._paint_text(p)
+        self._paint_thread_stripe(p)
         self._paint_buttons(p)
         if h > BAR_H + 4:
             self._paint_panel(p)
@@ -639,14 +797,13 @@ class VoiceWidget(QWidget):
             g.setColorAt(1, c1)
             p.fillPath(path, g)
 
-    def _paint_wave(self, p: QPainter) -> None:
+    def _paint_wave(self, p: QPainter, x0: float = 62.0, x1: float = WIDTH - 16.0, base: float = BAR_H - 6,
+                    scale: float = 1.0) -> None:
         """A live waveform along the bottom of the bar: the voice when speaking, your mic when listening."""
         t = time.time() - self.t0
-        amp = 0.8 + 4.5 * self.energy
+        amp = (0.8 + 4.5 * self.energy) * scale
         if self.phase == "recording":
-            amp = 1.2 + 7.5 * self.level
-        base = BAR_H - 6
-        x0, x1 = 62.0, WIDTH - 16.0
+            amp = (1.2 + 7.5 * self.level) * scale
         n = 64
         wave = QPainterPath()
         for i in range(n + 1):
@@ -679,10 +836,9 @@ class VoiceWidget(QWidget):
         p.setBrush(Qt.NoBrush)
         p.drawPath(wave)
 
-    def _paint_orb(self, p: QPainter) -> None:
+    def _paint_orb(self, p: QPainter, center: QPointF | None = None, base_r: float = 12.0) -> None:
         t = time.time() - self.t0
-        center = QPointF(34, BAR_H / 2)
-        base_r = 12.0
+        center = center or QPointF(34, BAR_H / 2)
         phase = self.phase
         acc = QColor(self.accent)
 
@@ -796,9 +952,34 @@ class VoiceWidget(QWidget):
             self._chip(p, chip_x, 17, "AUTO")
 
         p.setFont(self.f_sub)
-        p.setPen(QColor(226, 232, 240, 150))
+        thread = st.get("thread")
+        if thread:
+            # Which conversation is talking (or waiting on you): its colour dot and title.
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(thread["color"]))
+            p.drawEllipse(QPointF(x + 4, 43), 3.5, 3.5)
+            x += 12
+            sub = thread["title"]
+            p.setPen(QColor(thread["color"]).lighter(130))
+        else:
+            p.setPen(QColor(226, 232, 240, 150))
         p.drawText(QRectF(x, 34, right - x, 18), Qt.AlignLeft | Qt.AlignVCenter,
                    QFontMetrics(self.f_sub).elidedText(sub, Qt.ElideRight, int(right - x)))
+
+    def _paint_thread_stripe(self, p: QPainter) -> None:
+        """A thin bar in the conversation's colour along the left edge of the bar."""
+        thread = self.st.get("thread")
+        if not thread:
+            return
+        c = QColor(thread["color"])
+        grad = QLinearGradient(0, 8, 0, BAR_H - 8)
+        c.setAlpha(0)
+        grad.setColorAt(0, c)
+        c.setAlpha(220)
+        grad.setColorAt(0.5, c)
+        c.setAlpha(0)
+        grad.setColorAt(1, c)
+        p.fillRect(QRectF(0, 6, 3, BAR_H - 12), grad)
 
     def _chip(self, p: QPainter, x: float, y: float, text: str) -> None:
         fm = QFontMetrics(self.f_chip)
@@ -884,8 +1065,8 @@ class VoiceWidget(QWidget):
         if self._question():
             self._paint_question(p)
             return
-        rects = self._rects()
-        progress = (self.height() - BAR_H) / (EXPANDED_H - BAR_H)
+        rects = self._bar_rects()  # drawn in bar coordinates, also under the notch
+        progress = self._panel_h() / (EXPANDED_H - BAR_H)
         for i, (tid, icon, label, hk, active) in enumerate(self._tiles()):
             rect = rects.get(tid)
             if rect is None:

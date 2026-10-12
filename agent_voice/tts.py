@@ -24,6 +24,22 @@ def download_voice(name: str) -> None:
     _download(name, VOICES_DIR)
 
 
+def _quiet_session(path):
+    """An ONNX Runtime session that doesn't busy-wait: battery matters more than a few milliseconds.
+
+    By default ONNX Runtime's worker threads spin between and after runs: measured here, one sentence
+    cost ~9 s of CPU (most of it spinning after the audio was ready) against ~0.4 s with 2 threads and
+    no spinning, which also synthesises faster.
+    """
+    import onnxruntime as ort
+
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = 2
+    opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
+    return ort.InferenceSession(str(path), sess_options=opts, providers=["CPUExecutionProvider"])
+
+
 class Speaker:
     def __init__(self, config: dict):
         self.config = config
@@ -60,7 +76,9 @@ class Speaker:
                 if not path.exists():
                     log.info("downloading voice %s", name)
                     download_voice(name)
-                self._voices[name] = PiperVoice.load(path)
+                voice = PiperVoice.load(path)
+                voice.session = _quiet_session(path)
+                self._voices[name] = voice
             voice = self._voices[name]
         speaker_id = voice.config.speaker_id_map.get(speaker) if speaker else None
         return voice, speaker_id

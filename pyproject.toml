@@ -17,6 +17,7 @@ dependencies = [
     "numpy",
     "lingua-language-detector",
     "py3langid",
+    "sherpa-onnx",
     "faster-whisper",
     "keyboard",
     "pyperclip",

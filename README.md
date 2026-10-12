@@ -104,7 +104,7 @@ Open the chevron for **every action with its shortcut**: reply now, hold to talk
 - **Notch**: right-click → *Notch (top of the screen)* docks it at the top centre like a camera notch. When idle it tucks itself away, leaving a 3-pixel line under the camera; it slides down while the agent talks or listens, when a question comes in, or when you touch the top edge with the mouse, and slides back up 3 seconds after.
 - **Permissions**: when Claude Code asks to run a command or edit a file, the request is read out and shown with *Allow once* / *Deny*. Say *"yes"* / *"no"* (or *"oui"* / *"non"*) or click; with no answer within a minute, Claude shows its own dialog as usual. Voice never grants more than once.
 - **Several threads at once**: when a second conversation finishes while another is talking (or waiting for your reply), it waits its turn and is then read out, announced by its name. The panel lists your recent threads with what each is doing; click one to open it.
-- **Hey Claude** (off by default, toggle in the panel): while idle, say *"Hey Claude, run the tests"* and it is sent to your last thread as a new prompt; *"Hey Claude"* alone opens the mic for it. Uses a small local Whisper model; nothing leaves the machine.
+- **Hey Claude** (off by default, toggle in the panel): while idle, say *"Hey Claude, run the tests"* and it is sent to your last thread as a new prompt; *"Hey Claude"* alone opens the mic for it. A 3.3M-parameter keyword spotter ([sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), Apache-2.0) listens only while someone speaks, so it costs next to nothing on battery; Whisper confirms the phrase before anything is sent. Say "Claude" the English way. Nothing leaves the machine.
 - **Updates**: when a newer release is on GitHub, the tray menu offers it and the notch shows an *UPDATE* chip.
 - **Questions**: when the agent asks you to choose (Claude Code's questions, Cline's follow-up questions), the options appear in the widget and are read out. Click one, or just say it: *"the second one"*, *"option 3"*, or the option's name; anything else is sent as your own answer.
 - **Replies go back to your agent**: dictated replies are typed into the window you last prompted from, even if it is minimized or behind another app; once sent (auto-send), you're returned to where you were. In the **Claude desktop app** the reply goes to the right conversation and, with auto-send on, is sent **without bringing the app forward** at all. The text also stays on the clipboard.
@@ -197,7 +197,7 @@ sequenceDiagram
 | `summary` | `enabled: true`, `max_chars: 280` | Speak a one-sentence summary of final answers (runtime toggle: tray or `agent-voice summary`) |
 | `auto_listen` | `enabled`, 15 s window, 1.5 s silence, 600 s max | Mic after the final answer |
 | `permissions` | `enabled: true`, `wait_seconds: 60` | Permission prompts by voice / widget, and how long the hook waits before Claude's own dialog |
-| `wake_word` | `phrases: [hey claude, ok claude, …]`, `model: base` | Wake phrases and the Whisper model that listens for them |
+| `wake_word` | `phrases: [hey claude, ok claude, …]` | Phrases accepted when Whisper confirms a keyword-spotter hit |
 | `update_check` | `true` | Look for a newer release on GitHub at start |
 | `background_send` | `true` | Claude desktop app: with auto-send on, send spoken replies without bringing the window forward |
 | `chime.volume` | `0.35` | Chime mode loudness (0 to 1): a rising chime when done, a double one for questions and permissions |
@@ -255,6 +255,7 @@ Architecture notes, invariants and gotchas for contributors (human or AI) are in
 | [sounddevice](https://github.com/spatialaudio/python-sounddevice) | Audio playback & recording | MIT |
 | [keyboard](https://github.com/boppreh/keyboard) | Global hotkeys | MIT |
 | [pyperclip](https://github.com/asweigart/pyperclip) | Clipboard | BSD-3-Clause |
+| [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | "Hey Claude" keyword spotting (model downloaded on first use) | Apache-2.0 |
 | [py3langid](https://github.com/adbar/py3langid) | Language detection in the Windows release (lingua is too large to bundle) | BSD-3-Clause |
 | [comtypes](https://github.com/enthought/comtypes) | UI Automation: open the right conversation in the Claude desktop app | MIT |
 | [NumPy](https://numpy.org) | Audio buffers | BSD-3-Clause |

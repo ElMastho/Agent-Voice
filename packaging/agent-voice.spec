@@ -12,7 +12,7 @@ datas, binaries, hiddenimports = [], [], []
 # Packages that load data files or native libraries at runtime (voices' espeak data, VAD model,
 # CTranslate2 / onnxruntime DLLs, lingua language models).
 # lingua is left out (300 MB of models): lang.py falls back to py3langid.
-for package in ("piper", "faster_whisper", "ctranslate2", "onnxruntime", "py3langid", "tokenizers"):
+for package in ("piper", "faster_whisper", "ctranslate2", "onnxruntime", "py3langid", "tokenizers", "sherpa_onnx"):
     d, b, h = collect_all(package)
     datas += d
     binaries += b

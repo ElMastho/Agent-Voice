@@ -119,11 +119,12 @@ def _smooth(t: float) -> float:
 
 
 def _mix(a: QColor, b: QColor, k: float) -> QColor:
-    return QColor(
-        int(a.red() + (b.red() - a.red()) * k),
-        int(a.green() + (b.green() - a.green()) * k),
-        int(a.blue() + (b.blue() - a.blue()) * k),
-    )
+    def step(x: int, y: int) -> int:
+        d = (y - x) * k
+        # At least one unit per frame: truncating would stall a few shades short of the target forever.
+        return y if abs(y - x) <= 1 else x + (int(d) or (1 if d > 0 else -1))
+
+    return QColor(step(a.red(), b.red()), step(a.green(), b.green()), step(a.blue(), b.blue()))
 
 
 def _hotkey_label(combo: str) -> str:
@@ -270,6 +271,8 @@ class VoiceWidget(QWidget):
         self._reveal_v = 0.0
         self._reveal_until = 0.0
         self._h = float(BAR_H)  # eased window height
+        self._painted_still = False  # battery: the still frame has been drawn, skip redraws until a change
+        self._shown_digest = ""
         self._copied: str | None = None  # history row just copied, for a brief confirmation
         self._copied_at = 0.0
         self.hover: str | None = None
@@ -441,6 +444,13 @@ class VoiceWidget(QWidget):
 
     # -- state ----------------------------------------------------------------------
     def _on_status(self, st) -> None:
+        # Redraw a still widget only when something it shows has changed (not the mic level, nor
+        # the "N min ago" of the thread list until the minute turns).
+        shown = {k: v for k, v in (st or {}).items() if k not in ("level", "threads")}
+        shown["threads"] = [(t.get("session"), t.get("state"), t.get("ago", 0) // 60) for t in (st or {}).get("threads") or []]
+        digest = json.dumps(shown, sort_keys=True, default=str)
+        if digest != self._shown_digest:
+            self._shown_digest, self._painted_still = digest, False
         self.st = st or {}
         phase = st["phase"] if st else "offline"
         if phase != self.phase:
@@ -487,7 +497,34 @@ class VoiceWidget(QWidget):
         self._opacity += (want - self._opacity) * 0.12
         if abs(self.windowOpacity() - self._opacity) > 0.004:
             self.setWindowOpacity(self._opacity)
+        # Battery: 30 fps only while something moves. At rest, no redraws and a slower status poll.
+        still = self._is_still(want)
+        self.poller.interval = 0.6 if still else 0.12
+        if self.frame.interval() != (250 if still else 33):
+            self.frame.setInterval(250 if still else 33)
+        if still and self._painted_still:
+            return
+        self._painted_still = still
         self.update()
+
+    def _is_still(self, opacity_target: float) -> bool:
+        """Nothing is animating or easing: the last frame drawn is still right."""
+        if self.phase not in ("idle", "offline", "muted") or self._hovering or self.pressed or self._dragged:
+            return False
+        if self._question() or self.flash > 0 or self.title_t < 1 or time.time() - self._copied_at < 1.3:
+            return False
+        settled = [
+            abs(self.energy - 0.12) < 0.01,
+            abs(self._opacity - opacity_target) < 0.01,
+            abs(self._h - self._target_size()[1]) < 0.5,
+            all(v < 0.02 or v > 0.98 for v in self.hover_t.values()),
+            self.speed_pos is None or abs(self.speed_pos - self._speed_index()) < 0.01,
+            sum(abs(a - b) for a, b in zip(self.accent.getRgb(), self._accent_target.getRgb())) < 4,
+            sum(abs(a - b) for a, b in zip(self.second.getRgb(), self._second_target.getRgb())) < 4,
+        ]
+        if self.notch:
+            settled.append(abs(self._reveal - round(self._reveal)) < 0.003 and abs(self._reveal_v) < 0.003)
+        return all(settled)
 
     # -- layout -----------------------------------------------------------------------
     def _primary(self) -> tuple[str, str, str] | None:

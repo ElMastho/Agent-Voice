@@ -6,27 +6,31 @@ import json
 import os
 import subprocess
 import sys
+import http.client
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 from agent_voice.config import HOME, load_config
 
 
-def _url(path: str) -> str:
-    cfg = load_config()
-    return f"http://{cfg['host']}:{cfg['port']}{path}"
-
-
 def request(path: str, payload: dict | None = None, timeout: float = 2.0) -> dict | None:
-    data = None if payload is None else json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(_url(path), data=data, headers={"Content-Type": "application/json"})
+    """GET (no payload) or POST JSON to the daemon; None if it isn't there or refused.
+
+    http.client rather than urllib: hooks run once per tool call, and urllib's import alone costs ~40 ms.
+    """
+    cfg = load_config()
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    conn = http.client.HTTPConnection(cfg["host"], int(cfg["port"]), timeout=timeout)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8") or "{}")
-    except (urllib.error.URLError, OSError, ValueError):
+        conn.request("GET" if body is None else "POST", path, body=body, headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        if resp.status >= 400:
+            return None
+        return json.loads(resp.read().decode("utf-8") or "{}")
+    except (OSError, ValueError, http.client.HTTPException):
         return None
+    finally:
+        conn.close()
 
 
 def is_running() -> bool:

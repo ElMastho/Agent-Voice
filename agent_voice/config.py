@@ -75,8 +75,8 @@ DEFAULTS: dict = {
     # The hook waits this long for you before Claude shows its own dialog.
     "permissions": {"enabled": True, "wait_seconds": 60},
     # "Hey Claude, ..." while idle sends a new prompt (turn on from the widget or `agent-voice wake on`).
-    "wake_word": {"phrases": ["hey claude", "ok claude", "okay claude", "hé claude", "hey cloud", "hey clod"],
-                  "model": "base"},
+    # A small keyword spotter listens (only while someone speaks); these phrases confirm it in the transcript.
+    "wake_word": {"phrases": ["hey claude", "ok claude", "okay claude", "hé claude", "hey cloud", "hey clod"]},
     # Tell you when a newer version is on GitHub.
     "update_check": True,
     # Chime mode sounds (0.0-1.0). Kept low so they don't disturb people around you.

@@ -228,7 +228,6 @@ class Daemon:
         self.update: dict | None = None
         # Wake word: always listening for "Hey Claude" while idle (off unless you turn it on).
         self._wake_cancel = threading.Event()
-        self._wake_transcriber = None
         self._force_submit = False
         # Desktop app: CLI session id -> conversation title, learned when you send a prompt.
         self._titles: dict[str, str] = dict(self.state.get("desktop_titles") or {})
@@ -348,6 +347,7 @@ class Daemon:
             preface = str(data.get("preface") or "")
             if preface.strip():
                 self.speaker.speak(preface)
+            self._wake_cancel.set()
             listed = " ".join(f"{i}: {o}." for i, o in enumerate(options, 1))
             self.speaker.speak(f"{self.question['question']} {listed}")
             if self.config["auto_listen"].get("enabled") and self.transcriber is not None:
@@ -793,11 +793,15 @@ class Daemon:
             self.speaker.speak("Wake word on. Say: Hey Claude." if on else "Wake word off.", "en")
 
     def _wake_loop(self) -> None:
-        """While idle, listen for "Hey Claude ..." and send what follows as a new prompt."""
-        from agent_voice.stt import Transcriber, is_hallucination, listen_for_speech
+        """While idle, listen for "Hey Claude ..." and send what follows as a new prompt.
 
-        cfg = self.config.get("wake_word", {})
-        phrases = list(cfg.get("phrases") or ["hey claude"])
+        A tiny keyword spotter does the listening (only while someone speaks); Whisper only runs once
+        it fires, to confirm the phrase and read the command.
+        """
+        from agent_voice.stt import is_hallucination
+
+        phrases = list(self.config.get("wake_word", {}).get("phrases") or ["hey claude"])
+        listener = None
         while True:
             time.sleep(0.3)
             if not self.wake or self.muted or self.chime or self.transcriber is None:
@@ -805,32 +809,33 @@ class Daemon:
             if (self.speaker.busy or self._listening or self._listen_armed or self._ptt_active
                     or self.question or self.permission or self._queue):
                 continue
-            self._wake_cancel.clear()
             try:
-                audio = listen_for_speech(4.0, 0.7, 8.0, self._wake_cancel)
+                if listener is None:
+                    from agent_voice.wakeword import WakeListener
+
+                    listener = WakeListener()
+                self._wake_cancel.clear()
+                audio = listener.listen(self._wake_cancel)
             except Exception:
-                log.exception("wake listening failed")
-                time.sleep(5)
+                log.exception("wake word unavailable")
+                time.sleep(30)
                 continue
             if audio is None or self._wake_cancel.is_set():
                 continue
-            if self._wake_transcriber is None:  # a small model: it runs on everything said nearby
-                self._wake_transcriber = Transcriber({"stt": {**self.config["stt"], "model": cfg.get("model", "base")}})
-            text, lang = self._wake_transcriber.transcribe(audio)
+            text, lang = self.transcriber.transcribe(audio)
             command = strip_wake(text, phrases)
             if command is None or is_hallucination(text):
+                log.info("wake word: false alarm")
                 continue
             log.info("wake word heard (%d chars follow)", len(command))
             session = self._voice_session or self._reply_session
             if len(command.split()) >= 3:
-                if self.transcriber is not None and self.transcriber is not self._wake_transcriber:
-                    text, lang = self.transcriber.transcribe(audio)  # the accurate model for the prompt itself
-                    command = strip_wake(text, phrases) or command
                 self._heard(command, lang)
                 _beep(880, 60)
                 self._paste(command, self._target_hwnd, submit=True, session=session)
             else:
                 # Just "Hey Claude": open the mic for the prompt, and send it.
+                _beep(880, 60)
                 self._reply_session = session
                 self._force_submit = True
                 self._auto_listen()

@@ -58,7 +58,9 @@ The daemon and widget run as `pythonw` in the background. **Code changes need a 
 5. **Local API stays locked down.** `_allowed()` in `server.py` rejects any `Origin` header, a `Host` other than `127.0.0.1:<port>`/`localhost:<port>`, non-JSON POSTs, and bodies over 1 MB. Every new endpoint goes through it; never bind to anything but `127.0.0.1`.
 6. **The widget never steals focus.** It uses `WS_EX_NOACTIVATE` + `Qt.WindowDoesNotAcceptFocus`; dictation pastes into the user's agent window and depends on this.
 7. **The widget is a view.** State lives in the daemon (`/status`). The widget only keeps its own position/visibility (`~/.agent-voice/widget.json`; not `state.json`, which the daemon rewrites wholesale).
-8. **Nothing leaves the machine.** No network calls except model downloads (Piper voices, Whisper weights) on first use.
+8. **Nothing leaves the machine.** No network calls except model downloads (Piper voices, Whisper weights, the wake-word model) on first use, and the optional release check (`update_check`).
+9. **Battery first.** ONNX Runtime sessions we create never busy-wait (`tts._quiet_session`: `allow_spinning=0`, 2 threads; the default spinning cost ~20x the CPU per sentence). Feed models whole chunks, not 30 ms blocks. The wake word runs a volume gate first and the keyword spotter only on finished utterances.
+10. **The widget doesn't redraw at rest.** `_tick` drops to 4 Hz and skips `update()` once `_is_still()`; status polling slows to 0.6 s. Any new animation must be covered by `_is_still()`, or the widget redraws at 30 fps forever.
 
 ## Adding an agent integration
 

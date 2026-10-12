@@ -205,6 +205,7 @@ def selfcheck() -> int:
     """Import every heavy dependency and run the offline parts once (used by the release build)."""
     import sounddevice  # noqa: F401  (PortAudio DLL)
     from faster_whisper.vad import get_vad_model
+    import sherpa_onnx  # noqa: F401  (wake word)
     from piper import PiperVoice  # noqa: F401
     from PySide6.QtWidgets import QApplication  # noqa: F401
 

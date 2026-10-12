@@ -35,6 +35,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
     p = sub.add_parser("handsfree", help="hands-free mode: voice replies are sent automatically (default: toggle)")
     p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
+    p = sub.add_parser("wake", help='"Hey Claude, ..." while idle sends a new prompt (default: toggle)')
+    p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
     p = sub.add_parser("chime", help="chime mode: no voice, a soft sound when the agent is done or needs you (default: toggle)")
     p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
 
@@ -108,6 +110,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "handsfree":
         result = client.request("/handsfree", {"mode": args.mode})
         print("not running" if result is None else f"hands-free {'on' if result['hands_free'] else 'off'}")
+        return 0 if result else 1
+    if args.cmd == "wake":
+        result = client.request("/wake", {"mode": args.mode})
+        print("not running" if result is None else f"wake word {'on' if result['wake'] else 'off'}")
         return 0 if result else 1
     if args.cmd == "chime":
         result = client.request("/chime", {"mode": args.mode})

@@ -166,7 +166,7 @@ def _session_lock(path: Path, timeout: float = 5.0):
     while fd is None:
         try:
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
+        except (FileExistsError, PermissionError):  # Windows: PermissionError while another hook deletes it
             try:
                 if time.time() - lock.stat().st_mtime > 10:  # left behind by a killed hook
                     lock.unlink(missing_ok=True)
@@ -213,12 +213,66 @@ def _unspoken_locked(path: Path, texts: list[str]) -> list[str]:
     return fresh
 
 
+def describe_tool(tool: str, args: dict) -> str:
+    """What a tool call does, as a short phrase that reads well after "Claude wants to"."""
+    args = args if isinstance(args, dict) else {}
+    if tool == "Bash":
+        command = " ".join(str(args.get("command", "")).split())
+        return f"run {command[:90] + '…' if len(command) > 90 else command}"
+    path = str(args.get("file_path") or args.get("notebook_path") or "")
+    name = Path(path).name if path else ""
+    if tool in ("Edit", "MultiEdit", "Write", "NotebookEdit"):
+        return f"edit {name}" if name else "edit a file"
+    if tool == "Read":
+        return f"read {name}" if name else "read a file"
+    if tool in ("WebFetch", "WebSearch"):
+        return f"look up {args.get('url') or args.get('query') or 'the web'}"
+    if tool.startswith("mcp__"):
+        return f"use {tool.split('__')[-1].replace('_', ' ')}"
+    return f"use {tool}"
+
+
+def permission_decision(data: dict) -> dict:
+    """Ask the daemon, then wait (a while) for your answer by voice or from the widget.
+
+    No answer in time, or no daemon: no decision, so Claude Code shows its own dialog.
+    """
+    cfg = load_config().get("permissions", {})
+    if not cfg.get("enabled", True) or not load_state().get("approvals", True):
+        return {}
+    tool = str(data.get("tool_name", ""))
+    reply = client.request("/permission", {"session": str(data.get("session_id", "")), "tool": tool,
+                                           "summary": describe_tool(tool, data.get("tool_input") or {})},
+                           timeout=2.0)
+    if not reply or not reply.get("id"):
+        return {}
+    perm_id = reply["id"]
+    deadline = time.time() + float(cfg.get("wait_seconds", 60))
+    while time.time() < deadline:
+        state = client.request("/permission_state", {"id": perm_id}, timeout=2.0)
+        if state is None:
+            return {}
+        if state.get("decision"):
+            decision = {"behavior": state["decision"]}
+            if state["decision"] == "deny":
+                decision["message"] = "The user said no (agent-voice)."
+            return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
+        time.sleep(0.3)
+    client.request("/permission_state", {"id": perm_id, "cancel": True}, timeout=2.0)
+    return {}
+
+
 def hook_claude(raw: str) -> None:
     try:
         data = json.loads(raw)
     except ValueError:
         return
     event = data.get("hook_event_name", "")
+    if event == "PermissionRequest":
+        out = permission_decision(data)
+        if out:
+            sys.stdout.write(json.dumps(out))
+        return
     if event == "UserPromptSubmit":
         # The window you just typed in is where spoken replies get pasted back.
         from agent_voice import winfocus

@@ -108,7 +108,9 @@ def test_speech_waits_while_mic_is_held(monkeypatch):
     time.sleep(0.2)
     assert played == []
     sp.release()
-    time.sleep(0.2)
+    deadline = time.time() + 3  # the player thread wakes up on its own schedule: wait for it, don't guess
+    while not played and time.time() < deadline:
+        time.sleep(0.02)
     assert len(played) == 1
 
 
@@ -235,3 +237,32 @@ def test_desktop_session_title_and_sidebar_entry(tmp_path):
     assert claudeapp.pick_entry(["Fix the build, rename session"], "Fix the build") == -1
     assert claudeapp.is_current("Fix the build - Claude Code", "Fix the build")
     assert not claudeapp.is_current("Fix the build (fork) - Claude Code", "Fix the build")
+
+
+def test_permission_answers_and_wake_phrases():
+    from agent_voice.server import match_yes_no, strip_wake
+
+    assert match_yes_no("yes go ahead") is True
+    assert match_yes_no("oui vas-y") is True
+    assert match_yes_no("no, don't") is False
+    assert match_yes_no("hmm let me think") is None
+    phrases = ["hey claude", "ok claude"]
+    assert strip_wake("Hey Claude, run the tests please.", phrases) == "run the tests please."
+    assert strip_wake("hey claude", phrases) == ""
+    assert strip_wake("I told him hey claude", phrases) is None
+
+
+def test_permission_hook_waits_for_the_daemon(monkeypatch):
+    calls = []
+
+    def request(path, payload=None, timeout=2.0):
+        calls.append(path)
+        if path == "/permission":
+            return {"id": 7}
+        return {"decision": "allow" if calls.count("/permission_state") > 1 else ""}
+
+    monkeypatch.setattr(hooks.client, "request", request)
+    monkeypatch.setattr(hooks.time, "sleep", lambda s: None)
+    out = hooks.permission_decision({"session_id": "s", "tool_name": "Bash", "tool_input": {"command": "npm test"}})
+    assert out["hookSpecificOutput"]["decision"] == {"behavior": "allow"}
+    assert hooks.describe_tool("Bash", {"command": "npm   test"}) == "run npm test"

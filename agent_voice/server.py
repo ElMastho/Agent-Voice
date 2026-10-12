@@ -96,6 +96,8 @@ def _beep(freq: int, ms: int = 90) -> None:
 
 
 SPEEDS = (1.0, 1.25, 1.5, 1.75, 2.0)
+RELEASES_API = "https://api.github.com/repos/ElMastho/agent-voice/releases/latest"
+RELEASES_PAGE = "https://github.com/ElMastho/agent-voice/releases/latest"
 
 # Chime mode: (frequency Hz, start s) notes. "done" rises, "attention" asks twice.
 CHIMES = {
@@ -137,6 +139,32 @@ THREAD_COLORS = ("#F472B6", "#60A5FA", "#34D399", "#FBBF24", "#A78BFA", "#F87171
 
 def thread_color(key: str) -> str:
     return THREAD_COLORS[zlib.crc32(key.encode("utf-8")) % len(THREAD_COLORS)]
+
+
+_YES = {"yes", "yeah", "yep", "allow", "approve", "ok", "okay", "sure", "go", "oui", "ouais", "vas", "autorise",
+        "autoriser", "accepte", "daccord", "valide"}
+_NO = {"no", "nope", "deny", "refuse", "stop", "dont", "non", "refuser", "annule", "pas"}
+
+
+def match_yes_no(text: str) -> bool | None:
+    """A spoken permission answer: True (allow), False (deny), or None when it isn't clear."""
+    words = set(_plain(text.replace("'", "")).split())
+    yes, no = bool(words & _YES), bool(words & _NO)
+    return None if yes == no else yes
+
+
+def strip_wake(text: str, phrases: list[str]) -> str | None:
+    """The command after a wake phrase at the start ("Hey Claude, run the tests" -> "run the tests")."""
+    for phrase in phrases:
+        words = [re.escape(w) for w in phrase.split()]
+        m = re.match(r"^\W*" + r"\W+".join(words) + r"\b\W*", text, re.I)
+        if m:
+            return text[m.end():].strip()
+    return None
+
+
+def _version(v: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
 
 
 def _plain(text: str) -> str:
@@ -188,6 +216,20 @@ class Daemon:
         # Session and agent behind the current speech, so the widget can say which thread talks.
         self._voice_session, self._voice_source = "", ""
         self._file_titles: dict[str, str] = {}
+        # Speech from other threads that arrived while one was talking (or waiting for your reply).
+        self._queue: list[tuple] = []
+        # Recent conversations, for the widget's thread list: session -> {source, last}.
+        self.threads: dict[str, dict] = {}
+        # A tool call waiting for your permission (Claude Code's PermissionRequest hook polls it).
+        self.permission: dict | None = None
+        self._perm_seq = 0
+        self._perm_decisions: dict[int, str] = {}
+        # Newer release on GitHub, if any (checked once at start).
+        self.update: dict | None = None
+        # Wake word: always listening for "Hey Claude" while idle (off unless you turn it on).
+        self._wake_cancel = threading.Event()
+        self._wake_transcriber = None
+        self._force_submit = False
         # Desktop app: CLI session id -> conversation title, learned when you send a prompt.
         self._titles: dict[str, str] = dict(self.state.get("desktop_titles") or {})
         # What the mic is doing, for the widget: "" | waiting | recording | transcribing
@@ -201,6 +243,8 @@ class Daemon:
         # Bumped by the show/hide hotkey; the widget toggles when it sees the number change.
         self.widget_toggles = 0
         threading.Thread(target=self._listen_monitor, name="listen", daemon=True).start()
+        threading.Thread(target=self._wake_loop, name="wake", daemon=True).start()
+        threading.Thread(target=self._check_update, name="update", daemon=True).start()
 
     def _job_loop(self) -> None:
         while True:
@@ -374,6 +418,14 @@ class Daemon:
         """Queue text; `final` marks the end of an agent's turn and arms auto-listen."""
         if session and self.question and self.question["session"] == session:
             self.question = None  # the agent moved on: the question was answered
+        if session:
+            self.threads[session] = {"source": source, "last": time.time()}
+        if session and self._voice_session and session != self._voice_session and not interrupt and (
+                self.speaker.busy or self._listen_armed or self._listening):
+            # Another thread is talking (or waiting for your reply): this one waits its turn.
+            self._queue.append((text, lang, source, interrupt, final, voice, session))
+            log.info("queued speech from another thread (%d waiting)", len(self._queue))
+            return 0
         if self.muted:
             return 0
         if self.chime:
@@ -386,6 +438,7 @@ class Daemon:
             self.speaker.stop()
         if text.strip() or final:
             self._voice_session, self._voice_source = session, source  # whose voice this is, for the widget
+            self._wake_cancel.set()  # never let the wake word hear our own voice
         n = self.speaker.speak(text, lang, voice) if text.strip() else 0
         log.info("speak source=%s sentences=%d final=%s", source, n, final)
         if final and self.config["auto_listen"].get("enabled") and self.transcriber is not None:
@@ -430,6 +483,9 @@ class Daemon:
             save_state(self.state)
         if hwnd and session and claudeapp.is_desktop_app(hwnd):
             threading.Thread(target=self._learn_title, args=(hwnd, session), daemon=True).start()
+        if session:
+            self._queue = [job for job in self._queue if job[6] != session]  # you moved on in that thread
+            self.threads[session] = {"source": self.threads.get(session, {}).get("source", ""), "last": time.time()}
         self.stop()
 
     def _learn_title(self, hwnd: int, session: str) -> None:
@@ -449,10 +505,32 @@ class Daemon:
             log.info("conversation %r is session %s", title, session[:8])
 
     # -- auto-listen ------------------------------------------------------------
+    def _play_next_thread(self) -> None:
+        """Speak the next waiting thread, announced by its name."""
+        session = self._queue[0][6]
+        jobs = [job for job in self._queue if job[6] == session]
+        self._queue = [job for job in self._queue if job[6] != session]
+        title = self._title(session, jobs[0][2])
+        log.info("playing queued thread %r (%d left)", title, len(self._queue))
+        self._voice_session, self._voice_source = session, jobs[0][2]
+        self.speaker.speak(f"{title}.")
+        for job in jobs:
+            self.speak(*job)
+
     def _listen_monitor(self) -> None:
         idle_since = None
+        queue_idle = None
         while True:
             time.sleep(0.1)
+            free = not (self.speaker.busy or self._listen_armed or self._listening or self._ptt_active
+                        or self.question or self.permission)
+            if free and self._queue and not self.muted:
+                queue_idle = queue_idle or time.time()
+                if time.time() - queue_idle >= 0.6:
+                    queue_idle = None
+                    self._play_next_thread()
+                continue
+            queue_idle = None
             if not self._listen_armed or self._ptt_active or self.muted:
                 idle_since = None
                 continue
@@ -472,6 +550,9 @@ class Daemon:
         target = self._target_hwnd or winfocus.foreground()
         session = self._reply_session
         question = self.question
+        permission = self.permission
+        force_submit, self._force_submit = self._force_submit, False
+        self._wake_cancel.set()
         self._listen_cancel.clear()
         self._listening = True
         self._mic_phase = "waiting"
@@ -498,10 +579,17 @@ class Daemon:
             if self._listen_cancel.is_set() or is_hallucination(text):
                 return
             self._heard(text, lang)
-            if question is not None and question is self.question:
+            if permission is not None and permission is self.permission:
+                allow = match_yes_no(text)
+                if allow is None:
+                    log.info("permission answer unclear: %r", text)
+                    _beep(300, 150)
+                else:
+                    self.answer_permission(permission["id"], allow)
+            elif question is not None and question is self.question:
                 self.answer(text=text)
             else:
-                self._paste(text, target, submit=self.hands_free, session=session)
+                self._paste(text, target, submit=self.hands_free or force_submit, session=session)
         except Exception:
             log.exception("auto-listen failed")
         finally:
@@ -560,10 +648,21 @@ class Daemon:
             return "speaking"
         return "muted" if self.muted else "idle"
 
+    def _title(self, session: str, source: str = "") -> str:
+        """A conversation's name: its desktop-app title when known, else the agent's name."""
+        title = self._titles.get(session, "")
+        if session and not title:
+            if session not in self._file_titles:  # app session files: read once per session, not per poll
+                self._file_titles[session] = claudeapp.session_title(session)
+            title = self._file_titles[session]
+        return title or {"claude": "Claude Code", "cline": "Cline"}.get(source, source.capitalize())
+
     def _thread_status(self) -> dict | None:
         """The conversation the voice (or the open mic) belongs to: its title and a colour of its own."""
-        q = self.question
-        if q:
+        q, perm = self.question, self.permission
+        if perm:
+            session, source = perm["session"], "claude"
+        elif q:
             session, source = q["session"], q["agent"]
         elif self._mic_phase:
             session, source = self._reply_session, self._voice_source
@@ -571,15 +670,170 @@ class Daemon:
             session, source = self._voice_session, self._voice_source
         else:
             return None
-        title = self._titles.get(session, "")
-        if session and not title:
-            if session not in self._file_titles:  # app session files: read once per session, not per poll
-                self._file_titles[session] = claudeapp.session_title(session)
-            title = self._file_titles[session]
-        title = title or {"claude": "Claude Code", "cline": "Cline"}.get(source, source.capitalize())
+        title = self._title(session, source)
         if not title:
             return None
         return {"title": title, "color": thread_color(session or title)}
+
+    def _threads_status(self) -> list[dict]:
+        """The last few conversations heard from, newest first, with what each is doing."""
+        queued = {job[6] for job in self._queue}
+        out = []
+        for session, info in sorted(self.threads.items(), key=lambda kv: -kv[1]["last"])[:4]:
+            if session == (self.permission or {}).get("session"):
+                state = "permission"
+            elif session == (self.question or {}).get("session"):
+                state = "question"
+            elif session == self._voice_session and self.speaker.busy:
+                state = "speaking"
+            elif session == self._reply_session and self._mic_phase:
+                state = "listening"
+            elif session in queued:
+                state = "queued"
+            else:
+                state = ""
+            title = self._title(session, info["source"])
+            out.append({"session": session, "title": title, "color": thread_color(session or title),
+                        "state": state, "ago": int(time.time() - info["last"])})
+        return out
+
+    def open_thread(self, session: str) -> None:
+        """Bring a conversation to the front (widget thread list)."""
+        hwnd = self._target_hwnd
+        title = self._title_for(hwnd, session)
+        if hwnd:
+            winfocus.focus(hwnd)
+            if title:
+                claudeapp.select_session(hwnd, title)
+
+    # -- permissions ------------------------------------------------------------
+    def request_permission(self, session: str, tool: str, summary: str) -> int:
+        """Claude wants to use a tool: ask out loud and in the widget; the hook polls the answer."""
+        self._perm_seq += 1
+        self.permission = {"id": self._perm_seq, "session": session, "tool": tool, "summary": summary,
+                           "at": time.time()}
+        if session:
+            self.threads[session] = {"source": "claude", "last": time.time()}
+        log.info("permission #%d: %s", self._perm_seq, summary)
+        if not self.muted:
+            if self.chime:
+                self.play_chime("attention")
+            else:
+                self.speaker.stop()
+                self._wake_cancel.set()
+                self.speaker.speak(f"{self._title(session, 'claude')} wants to {summary}. Allow?", "en")
+                if self.transcriber is not None:
+                    self._reply_session = session
+                    self._listen_armed = True
+        return self._perm_seq
+
+    def answer_permission(self, perm_id: int, allow: bool) -> None:
+        if self.permission and self.permission["id"] == perm_id:
+            self.permission = None
+        self._perm_decisions[perm_id] = "allow" if allow else "deny"
+        log.info("permission #%d: %s", perm_id, "allowed" if allow else "denied")
+        _beep(880 if allow else 440, 80)
+
+    def permission_state(self, perm_id: int, cancel: bool = False) -> str:
+        """The decision for a request ("" while pending). `cancel`: the hook gave up waiting."""
+        if cancel and self.permission and self.permission["id"] == perm_id:
+            self.permission = None
+            self.cancel_listen()
+        return self._perm_decisions.pop(perm_id, "")
+
+    def _permission_status(self) -> dict | None:
+        p = self.permission
+        if p and time.time() - p["at"] > 900:
+            self.permission = p = None
+        return {k: p[k] for k in ("id", "tool", "summary")} if p else None
+
+    # -- updates ----------------------------------------------------------------
+    def _check_update(self) -> None:
+        """Tell the widget when GitHub has a newer release (once, a few seconds after start)."""
+        if not self.config.get("update_check", True):
+            return
+        time.sleep(5)
+        import urllib.request
+
+        try:
+            req = urllib.request.Request(RELEASES_API, headers={"Accept": "application/vnd.github+json",
+                                                                "User-Agent": "agent-voice"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                latest = json.loads(resp.read().decode("utf-8"))
+        except Exception:  # offline, rate-limited, private repo: no news is fine
+            return
+        tag = str(latest.get("tag_name") or "")
+        if tag and _version(tag) > _version(__version__):
+            self.update = {"version": tag.lstrip("v"), "url": str(latest.get("html_url") or RELEASES_PAGE)}
+            log.info("update available: %s", tag)
+
+    @property
+    def approvals(self) -> bool:
+        return bool(self.state.get("approvals", True))
+
+    def set_approvals(self, on: bool) -> None:
+        # The PermissionRequest hook reads this from state.json.
+        self.state["approvals"] = on
+        save_state(self.state)
+        log.info("approvals=%s", on)
+        if not self.muted:
+            self.speaker.speak("Voice approvals on." if on else "Voice approvals off.", "en")
+
+    # -- wake word --------------------------------------------------------------
+    @property
+    def wake(self) -> bool:
+        return bool(self.state.get("wake"))
+
+    def set_wake(self, on: bool) -> None:
+        self.state["wake"] = on
+        save_state(self.state)
+        log.info("wake=%s", on)
+        self._wake_cancel.set()
+        if not self.muted:
+            self.speaker.speak("Wake word on. Say: Hey Claude." if on else "Wake word off.", "en")
+
+    def _wake_loop(self) -> None:
+        """While idle, listen for "Hey Claude ..." and send what follows as a new prompt."""
+        from agent_voice.stt import Transcriber, is_hallucination, listen_for_speech
+
+        cfg = self.config.get("wake_word", {})
+        phrases = list(cfg.get("phrases") or ["hey claude"])
+        while True:
+            time.sleep(0.3)
+            if not self.wake or self.muted or self.chime or self.transcriber is None:
+                continue
+            if (self.speaker.busy or self._listening or self._listen_armed or self._ptt_active
+                    or self.question or self.permission or self._queue):
+                continue
+            self._wake_cancel.clear()
+            try:
+                audio = listen_for_speech(4.0, 0.7, 8.0, self._wake_cancel)
+            except Exception:
+                log.exception("wake listening failed")
+                time.sleep(5)
+                continue
+            if audio is None or self._wake_cancel.is_set():
+                continue
+            if self._wake_transcriber is None:  # a small model: it runs on everything said nearby
+                self._wake_transcriber = Transcriber({"stt": {**self.config["stt"], "model": cfg.get("model", "base")}})
+            text, lang = self._wake_transcriber.transcribe(audio)
+            command = strip_wake(text, phrases)
+            if command is None or is_hallucination(text):
+                continue
+            log.info("wake word heard (%d chars follow)", len(command))
+            session = self._voice_session or self._reply_session
+            if len(command.split()) >= 3:
+                if self.transcriber is not None and self.transcriber is not self._wake_transcriber:
+                    text, lang = self.transcriber.transcribe(audio)  # the accurate model for the prompt itself
+                    command = strip_wake(text, phrases) or command
+                self._heard(command, lang)
+                _beep(880, 60)
+                self._paste(command, self._target_hwnd, submit=True, session=session)
+            else:
+                # Just "Hey Claude": open the mic for the prompt, and send it.
+                self._reply_session = session
+                self._force_submit = True
+                self._auto_listen()
 
     def _question_status(self) -> dict | None:
         q = self.question
@@ -603,6 +857,12 @@ class Daemon:
             "history": self.history,
             "question": self._question_status(),
             "thread": self._thread_status(),
+            "threads": self._threads_status(),
+            "queued": len(self._queue),
+            "permission": self._permission_status(),
+            "update": self.update,
+            "wake": self.wake,
+            "approvals": self.approvals,
             "muted": self.muted,
             "hands_free": self.hands_free,
             "chime": self.chime,
@@ -690,6 +950,7 @@ class Daemon:
         if self._ptt_active or self.transcriber is None:
             return False
         self._ptt_active = True
+        self._wake_cancel.set()
         self._ptt_release.clear()
         threading.Thread(target=self._ptt_session, daemon=True).start()
         return True
@@ -833,6 +1094,27 @@ def _handler(daemon: Daemon):
                 kind = str(data.get("kind", "attention"))
                 daemon.jobs.put(lambda: daemon.notify(kind, data))
                 return self._json(200, {"ok": True})
+            if self.path == "/permission":
+                perm_id = daemon.request_permission(str(data.get("session") or ""), str(data.get("tool") or ""),
+                                                    str(data.get("summary") or "use a tool"))
+                return self._json(200, {"id": perm_id})
+            if self.path == "/permission_state":
+                decision = daemon.permission_state(int(data.get("id") or 0), cancel=bool(data.get("cancel")))
+                return self._json(200, {"decision": decision})
+            if self.path == "/permission_answer":
+                daemon.answer_permission(int(data.get("id") or 0), bool(data.get("allow")))
+                return self._json(200, {"ok": True})
+            if self.path == "/open_thread":
+                threading.Thread(target=daemon.open_thread, args=(str(data.get("session") or ""),), daemon=True).start()
+                return self._json(200, {"ok": True})
+            if self.path == "/approvals":
+                mode = data.get("mode", "toggle")
+                daemon.set_approvals(not daemon.approvals if mode == "toggle" else mode == "on")
+                return self._json(200, {"approvals": daemon.approvals})
+            if self.path == "/wake":
+                mode = data.get("mode", "toggle")
+                daemon.set_wake(not daemon.wake if mode == "toggle" else mode == "on")
+                return self._json(200, {"wake": daemon.wake})
             if self.path == "/answer":
                 index = data.get("index")
                 kwargs = {"index": int(index)} if isinstance(index, int) else {"text": str(data.get("text") or "")}

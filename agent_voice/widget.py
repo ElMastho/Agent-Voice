@@ -13,8 +13,9 @@ import sys
 import threading
 import time
 
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, QUrl, QVariantAnimation, Signal
 from PySide6.QtGui import (
+    QDesktopServices,
     QAction,
     QIcon,
     QPixmap,
@@ -36,12 +37,13 @@ from agent_voice.config import HOME, load_config
 WIDTH = 320
 BAR_H = 64
 SPEEDS = (1.0, 1.25, 1.5, 1.75, 2.0)
-SPEED_Y = BAR_H + 10 + 2 * 58 + 8 + 6  # top of the speed row
+TILE_ROWS = 3
+SPEED_Y = BAR_H + 10 + TILE_ROWS * 58 + (TILE_ROWS - 1) * 8 + 6  # top of the speed row
 MODES = (("voice", "Voice"), ("chime", "Chimes"))
 MODE_Y = SPEED_Y + 26 + 8  # top of the mode row
-HIST_Y = MODE_Y + 26 + 10  # top of the "Recent" list
-HIST_ROWS, ROW_H = 5, 22
-EXPANDED_H = HIST_Y + 16 + HIST_ROWS * ROW_H + 8
+THREADS_Y = MODE_Y + 26 + 10  # top of the "Threads" list (then "Recent" under it)
+HIST_ROWS, THREAD_ROWS, ROW_H = 5, 4, 22
+EXPANDED_H = THREADS_Y + 2 * (16 + 2 * ROW_H + 8)  # a typical panel; the real one fits its content
 COMPACT = 56  # compact mode: just the orb
 # Notch mode: docked to the top centre of the screen like a camera notch, tucked away when idle.
 NOTCH_SCALE = 1.0
@@ -70,6 +72,9 @@ ICONS = {
     "bell": "",
     "copy": "",
     "check": "",
+    "bolt": "",
+    "list": "",
+    "shield": "",
     "down": "",
     "up": "",
 }
@@ -333,6 +338,12 @@ class VoiceWidget(QWidget):
         self.resize(w, h)
 
     def _question(self) -> dict | None:
+        """The choice waiting on you: a permission request (shown as Allow / Deny), else a question."""
+        perm = self.st.get("permission")
+        if perm:
+            summary = perm["summary"]
+            return {"question": summary[:1].upper() + summary[1:] + "?", "header": "Permission",
+                    "options": ["Allow once", "Deny"], "more": 0, "agent": "claude", "permission": perm["id"]}
         return self.st.get("question") or None
 
     def _is_compact(self) -> bool:
@@ -358,7 +369,7 @@ class VoiceWidget(QWidget):
         if self._question():
             w, h = WIDTH, BAR_H + int(self._question_layout()[3])
         else:
-            w, h = WIDTH, EXPANDED_H if self.expanded else BAR_H
+            w, h = WIDTH, self._expanded_h() if self.expanded else BAR_H
         if self.notch:  # its own row on top, the same panels underneath
             return NOTCH_W, NOTCH_H + h - BAR_H
         return w, h
@@ -503,6 +514,10 @@ class VoiceWidget(QWidget):
             ("handsfree", ICONS["send"], "Auto-send", hk.get("hands_free", ""), bool(st.get("hands_free"))),
             ("mute", ICONS["mute"] if muted else ICONS["volume"], "Muted" if muted else "Mute", hk.get("mute", ""), muted),
             ("read", ICONS["read"], "Read selection", hk.get("read_selection", ""), False),
+            ("wake", ICONS["bolt"], "Hey Claude", "wake word", bool(st.get("wake"))),
+            ("approve", ICONS["shield"], "Voice approvals", "yes / no", bool(st.get("approvals", True))),
+            ("summary", ICONS["list"], "Summaries" if st.get("summary", True) else "Full answers",
+             "short / full", bool(st.get("summary", True))),
         ]
 
     def _rects(self) -> dict[str, QRectF]:
@@ -543,9 +558,25 @@ class VoiceWidget(QWidget):
             seg = track.width() / len(MODES)
             for i, (key, _label) in enumerate(MODES):
                 r[f"mode:{key}"] = QRectF(track.x() + i * seg, track.y(), seg, track.height())
+            for i in range(len(self._threads())):
+                r[f"thr:{i}"] = self._thread_row(i)
             for i in range(len(self._history())):
                 r[f"hist:{i}"] = self._history_row(i)
         return r
+
+    def _threads(self) -> list[dict]:
+        return list(self.st.get("threads") or [])[:THREAD_ROWS]
+
+    def _thread_row(self, i: int) -> QRectF:
+        return QRectF(10, THREADS_Y + 16 + i * ROW_H, WIDTH - 20, ROW_H - 2)
+
+    def _hist_y(self) -> float:
+        n = len(self._threads())
+        return THREADS_Y + (16 + n * ROW_H + 8 if n else 0)
+
+    def _expanded_h(self) -> int:
+        """The open panel fits what it shows: no empty rows."""
+        return int(self._hist_y() + 16 + max(1, len(self._history())) * ROW_H + 8)
 
     def _question_layout(self) -> tuple[QRectF, QRectF, list[QRectF], float]:
         """(header line, question text, option rows, panel height) for the pending question."""
@@ -567,9 +598,8 @@ class VoiceWidget(QWidget):
     def _history(self) -> list[dict]:
         return list(self.st.get("history") or [])[:HIST_ROWS]
 
-    @staticmethod
-    def _history_row(i: int) -> QRectF:
-        return QRectF(10, HIST_Y + 16 + i * ROW_H, WIDTH - 20, ROW_H - 2)
+    def _history_row(self, i: int) -> QRectF:
+        return QRectF(10, self._hist_y() + 16 + i * ROW_H, WIDTH - 20, ROW_H - 2)
 
     @staticmethod
     def _speed_track() -> QRectF:
@@ -674,8 +704,14 @@ class VoiceWidget(QWidget):
 
         # Info chips, right to left, before the buttons.
         chips = []
-        if self._question():
+        if st.get("permission"):
+            chips.append("APPROVE?")
+        elif self._question():
             chips.append("CHOOSE")
+        if st.get("queued"):
+            chips.append(f"+{st['queued']} WAITING")
+        if st.get("update"):
+            chips.append("UPDATE")
         lang = st.get("speaking_lang") if self.phase == "speaking" else ""
         if lang:
             chips.append(lang.upper())
@@ -1056,8 +1092,9 @@ class VoiceWidget(QWidget):
         p.setFont(self.f_hint)
         p.setPen(QColor(226, 232, 240, 110))
         y = rows[-1].bottom() + 4 if rows else text.bottom() + 4
-        p.drawText(QRectF(14, y, WIDTH - 28, 14), Qt.AlignLeft | Qt.AlignVCenter,
-                   "Or say it: “the second one”, or the option’s name")
+        hint = ("Or say “yes” or “no” · no answer in a minute: Claude asks you itself" if q.get("permission")
+                else "Or say it: “the second one”, or the option’s name")
+        p.drawText(QRectF(14, y, WIDTH - 28, 14), Qt.AlignLeft | Qt.AlignVCenter, hint)
 
     def _paint_panel(self, p: QPainter) -> None:
         p.setPen(QPen(QColor(255, 255, 255, 22), 1))
@@ -1066,12 +1103,12 @@ class VoiceWidget(QWidget):
             self._paint_question(p)
             return
         rects = self._bar_rects()  # drawn in bar coordinates, also under the notch
-        progress = self._panel_h() / (EXPANDED_H - BAR_H)
+        progress = self._panel_h() / max(1, self._expanded_h() - BAR_H)
         for i, (tid, icon, label, hk, active) in enumerate(self._tiles()):
             rect = rects.get(tid)
             if rect is None:
                 continue
-            appear = max(0.0, min(1.0, (progress - i * 0.07) / 0.5))
+            appear = max(0.0, min(1.0, (progress - i * 0.05) / 0.5))
             if appear <= 0:
                 continue
             p.save()
@@ -1083,8 +1120,10 @@ class VoiceWidget(QWidget):
                 fill = QColor(self.accent if tid == "hold" else "#8B7CFF")
                 if tid == "mute":
                     fill = QColor("#F87171")
-                if tid == "handsfree":
+                if tid in ("handsfree", "approve"):
                     fill = QColor("#34D399")
+                if tid == "wake":
+                    fill = QColor("#FBBF24")
                 fill.setAlpha(70)
                 border = QColor(fill)
                 border.setAlpha(170)
@@ -1116,22 +1155,71 @@ class VoiceWidget(QWidget):
         self._paint_segmented(p, progress, 7, self._mode_track(), "Mode",
                               [f"mode:{k}" for k, _ in MODES], [label for _, label in MODES], mode_pos)
 
+        self._paint_threads(p, progress)
         self._paint_history(p, progress)
+
+    def _paint_threads(self, p: QPainter, progress: float) -> None:
+        """Recent conversations with what each is doing; click one to open it."""
+        threads = self._threads()
+        if not threads:
+            return
+        appear = max(0.0, min(1.0, (progress - 0.5) / 0.5))
+        if appear <= 0:
+            return
+        p.save()
+        p.setOpacity(appear)
+        p.setFont(self.f_tile)
+        p.setPen(QColor(226, 232, 240, 170))
+        p.drawText(QRectF(14, THREADS_Y, WIDTH - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, "Threads")
+        p.setFont(self.f_hint)
+        p.setPen(QColor(226, 232, 240, 105))
+        queued = int(self.st.get("queued") or 0)
+        p.drawText(QRectF(14, THREADS_Y, WIDTH - 28, 16), Qt.AlignRight | Qt.AlignVCenter,
+                   f"{queued} waiting to speak" if queued else "click to open")
+        labels = {"speaking": "speaking", "listening": "listening", "queued": "next up",
+                  "question": "asks you", "permission": "needs approval"}
+        fm = QFontMetrics(self.f_sub)
+        for i, t in enumerate(threads):
+            row = self._thread_row(i)
+            ht = self.hover_t.get(f"thr:{i}", 0.0)
+            if ht > 0.01:
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(255, 255, 255, int(20 * ht)))
+                p.drawRoundedRect(row, 6, 6)
+            color = QColor(t["color"])
+            p.setPen(Qt.NoPen)
+            p.setBrush(color)
+            p.drawEllipse(QPointF(row.x() + 9, row.center().y()), 3.5, 3.5)
+            state = labels.get(t.get("state", ""), "")
+            if not state:
+                ago = int(t.get("ago", 0))
+                state = "now" if ago < 60 else f"{ago // 60} min ago" if ago < 3600 else f"{ago // 3600} h ago"
+            p.setFont(self.f_hint)
+            p.setPen(color.lighter(130) if t.get("state") else QColor(226, 232, 240, 110))
+            sw = QFontMetrics(self.f_hint).horizontalAdvance(state)
+            p.drawText(QRectF(row.right() - sw - 6, row.y(), sw + 2, row.height()), Qt.AlignRight | Qt.AlignVCenter, state)
+            text_rect = QRectF(row.x() + 20, row.y(), row.width() - sw - 32, row.height())
+            p.setFont(self.f_sub)
+            p.setPen(QColor(226, 232, 240, 215))
+            p.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter,
+                       fm.elidedText(t["title"], Qt.ElideRight, int(text_rect.width())))
+        p.restore()
 
     def _paint_history(self, p: QPainter, progress: float) -> None:
         """The last few things you said, newest first; click one to copy it."""
-        appear = max(0.0, min(1.0, (progress - 8 * 0.07) / 0.5))
+        appear = max(0.0, min(1.0, (progress - 0.55) / 0.45))
         if appear <= 0:
             return
         p.save()
         p.setOpacity(appear)
         dy = 10 * (1 - appear)
+        hist_y = self._hist_y()
         p.setFont(self.f_tile)
         p.setPen(QColor(226, 232, 240, 170))
-        p.drawText(QRectF(14, HIST_Y + dy, WIDTH - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, "Recent")
+        p.drawText(QRectF(14, hist_y + dy, WIDTH - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, "You said")
         p.setFont(self.f_hint)
         p.setPen(QColor(226, 232, 240, 105))
-        p.drawText(QRectF(14, HIST_Y + dy, WIDTH - 28, 16), Qt.AlignRight | Qt.AlignVCenter, "click to copy")
+        p.drawText(QRectF(14, hist_y + dy, WIDTH - 28, 16), Qt.AlignRight | Qt.AlignVCenter, "click to copy")
         items = self._history()
         if not items:
             p.setFont(self.f_sub)
@@ -1246,6 +1334,16 @@ class VoiceWidget(QWidget):
             if i < len(items):
                 text = items[i].get("text", "")
                 return (text if len(text) <= 400 else text[:400] + "…") + "\n\nClick to copy"
+        if key and key.startswith("thr:"):
+            threads = self._threads()
+            i = int(key.split(":", 1)[1])
+            return f"Open “{threads[i]['title']}” in the app" if i < len(threads) else ""
+        if key == "wake":
+            return "Hey Claude: while idle, say “Hey Claude, …” to send a new prompt to your last thread"
+        if key == "approve":
+            return "Voice approvals: permission requests are read out; answer yes / no or click"
+        if key == "summary":
+            return "Final answers as a one-sentence summary, or read in full"
         if key and key.startswith("opt:"):
             q = self._question() or {"options": []}
             i = int(key.split(":", 1)[1])
@@ -1310,8 +1408,25 @@ class VoiceWidget(QWidget):
                 QApplication.clipboard().setText(items[i].get("text", ""))
                 self._copied, self._copied_at = key, time.time()
         elif key.startswith("opt:"):
-            _post("/answer", {"index": int(key.split(":", 1)[1])})
-            self.st["question"] = None  # close the card now; the daemon answers in the background
+            i = int(key.split(":", 1)[1])
+            q = self._question() or {}
+            if q.get("permission"):
+                _post("/permission_answer", {"id": q["permission"], "allow": i == 0})
+                self.st["permission"] = None
+            else:
+                _post("/answer", {"index": i})
+                self.st["question"] = None  # close the card now; the daemon answers in the background
+        elif key.startswith("thr:"):
+            threads = self._threads()
+            i = int(key.split(":", 1)[1])
+            if i < len(threads):
+                _post("/open_thread", {"session": threads[i]["session"]})
+        elif key == "wake":
+            _post("/wake", {"mode": "toggle"})
+        elif key == "approve":
+            _post("/approvals", {"mode": "toggle"})
+        elif key == "summary":
+            _post("/summary", {"mode": "toggle"})
         elif key.startswith("mode:"):
             on = key == "mode:chime"
             self.st["chime"] = on
@@ -1449,6 +1564,11 @@ class Tray(QSystemTrayIcon):
             act.triggered.connect(fn)
             m.addAction(act)
 
+        update = st.get("update")
+        if update:
+            add(f"Update available: v{update['version']} (download)",
+                lambda: QDesktopServices.openUrl(QUrl(update["url"])))
+            m.addSeparator()
         add("Hide widget" if w.isVisible() else "Show widget", w.toggle_visible, key=hk.get("widget", ""))
         add("Compact widget (orb only)", w.toggle_compact, checked=w.compact)
         add("Notch (top of the screen)", w.toggle_notch, checked=w.notch)
@@ -1463,6 +1583,9 @@ class Tray(QSystemTrayIcon):
         add("Chime mode (sounds only)", lambda: _post("/chime", {"mode": "toggle"}), online,
             bool(st.get("chime")), hk.get("chime", ""))
         add("Summarize answers", lambda: _post("/summary", {"mode": "toggle"}), online, bool(st.get("summary", True)))
+        add("Approve permissions by voice", lambda: _post("/approvals", {"mode": "toggle"}), online,
+            bool(st.get("approvals", True)))
+        add("Wake word (Hey Claude)", lambda: _post("/wake", {"mode": "toggle"}), online, bool(st.get("wake")))
         speed_menu = m.addMenu("Voice speed")
         speed_menu.setStyleSheet(MENU_STYLE)
         speed_menu.setEnabled(online)

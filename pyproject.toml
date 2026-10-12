@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-voice"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local, CPU-only voice for AI coding agents (Claude Code, Codex, Gemini CLI, Cursor, Antigravity): speaks replies in French or English, push-to-talk dictation."
 requires-python = ">=3.10"
 license = "GPL-3.0-or-later"

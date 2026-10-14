@@ -684,3 +684,96 @@ def test_desktop_app_notifications_only_from_listed_apps(tmp_path):
     con.close()
     assert w.poll() == [{"app": "chatgpt", "title": "ChatGPT", "text": "Here is the plan: three steps."}]
     assert w.poll() == []  # nothing changed: not even a query
+
+
+def test_browser_extension_reply_detection():
+    """The extension's reply detection (agent_voice/browser/sites.js), run in Node when it's installed."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    root = Path(__file__).resolve().parent.parent
+    out = subprocess.run([node, str(root / "tests" / "browser_sites.test.js"),
+                          str(root / "agent_voice" / "browser" / "sites.js")], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    manifest = json.loads((root / "agent_voice" / "browser" / "manifest.json").read_text(encoding="utf-8"))
+    from agent_voice import install, native_host
+
+    assert native_host.EXTENSION_ID == install.EXTENSION_ID
+    import base64
+    import hashlib
+
+    digest = hashlib.sha256(base64.b64decode(manifest["key"])).hexdigest()[:32]
+    assert "".join(chr(ord("a") + int(c, 16)) for c in digest) == install.EXTENSION_ID  # the id the key pins
+
+
+def test_native_host_relays_the_page(monkeypatch):
+    import io
+
+    from agent_voice import native_host
+
+    sent = []
+    monkeypatch.setattr(native_host.client, "request", lambda path, payload=None, timeout=2.0: sent.append((path, payload)))
+    monkeypatch.setattr(native_host.client, "speak", lambda text, **k: sent.append(("/speak", {"text": text, **k})))
+    monkeypatch.setattr(native_host, "summary_enabled", lambda: False)
+    monkeypatch.setattr(native_host.winfocus, "foreground", lambda: 5)
+    stream = io.BytesIO()
+    for msg in ({"type": "start", "site": "chatgpt", "conversation": "/c/1", "title": "Fix the parser"},
+                {"type": "reply", "site": "chatgpt", "conversation": "/c/1", "text": "Here is the fix."},
+                {"type": "reply", "site": "evil", "text": "nope"}):
+        native_host.write_message(stream, msg)
+    stream.seek(0)
+    out = io.BytesIO()
+    monkeypatch.setattr(native_host.sys, "stdin", type("S", (), {"buffer": stream})())
+    monkeypatch.setattr(native_host.sys, "stdout", type("S", (), {"buffer": out})())
+    assert native_host.run() == 0
+    assert sent[0][0] == "/prompt" and sent[0][1]["hwnd"] == 5 and sent[0][1]["title"] == "Fix the parser"
+    assert sent[1] == ("/speak", {"text": "Here is the fix.", "source": "chatgpt", "final": True,
+                                  "session": sent[0][1]["session"], "autostart": False})
+    assert len(sent) == 2  # an unknown site is ignored
+
+
+def test_cli_parses_every_command(capsys):
+    from agent_voice import cli
+
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    help_text = capsys.readouterr().out
+    for command in ("mcp", "watch", "apps", "usage", "install", "say"):
+        assert command in help_text
+
+
+@pytest.mark.skipif(__import__("sys").platform != "win32", reason="registry")
+def test_browser_bridge_registration(tmp_path, monkeypatch):
+    import winreg
+
+    from agent_voice import config, install
+
+    monkeypatch.setattr(config, "HOME", tmp_path)
+    keys = {}
+
+    class Key:
+        def __init__(self, path):
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    monkeypatch.setattr(winreg, "CreateKey", lambda root, path: Key(path))
+    monkeypatch.setattr(winreg, "SetValueEx", lambda k, name, _r, _t, value: keys.__setitem__(k.path, value))
+    monkeypatch.setattr(winreg, "DeleteKey", lambda root, path: keys.pop(path))
+    assert "Load unpacked" in install.browser()
+    manifest = json.loads((tmp_path / "native-host" / "com.agentvoice.bridge.json").read_text(encoding="utf-8"))
+    assert manifest["allowed_origins"] == ["chrome-extension://bmkeeojeabngjnlndcnopnddhlimlkak/"]
+    assert "native-host" in (tmp_path / "native-host" / "agent-voice-host.cmd").read_text(encoding="utf-8")
+    assert set(keys) == {f"{k}\com.agentvoice.bridge" for k in install._HOST_KEYS}
+    assert install.is_installed("browser")
+    install.browser(remove=True)
+    assert keys == {} and not install.is_installed("browser")
+    assert (install.extension_dir() / "manifest.json").exists()

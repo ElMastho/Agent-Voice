@@ -35,3 +35,6 @@ agent-voice = "agent_voice.cli:main"
 
 [tool.setuptools]
 packages = ["agent_voice"]
+
+[tool.setuptools.package-data]
+agent_voice = ["browser/*"]

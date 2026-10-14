@@ -14,7 +14,8 @@ from agent_voice.client import self_command
 # How our hook commands look, from source (python -m agent_voice hook) or from the release exe.
 MARKERS = ("agent_voice hook", 'agent_voice", "hook', 'agent-voice.exe" hook', 'agent-voice.exe", "hook',
            "agent_voice mcp", 'agent_voice", "mcp', 'agent-voice.exe" mcp', 'agent-voice.exe", "mcp')
-AGENTS = ("claude", "codex", "gemini", "cursor", "cline", "antigravity")
+AGENTS = ("claude", "codex", "gemini", "cursor", "cline", "antigravity", "claude-desktop", "windsurf", "vscode",
+          "browser")
 
 
 def _ours(command: str) -> bool:
@@ -314,8 +315,79 @@ def _codex_mcp(text: str, remove: bool) -> str:
     return f"{text}\n\n{block}" if text else block
 
 
+# -- Browser: the extension talks to us through Chrome/Edge native messaging -----------------------
+HOST_NAME = "com.agentvoice.bridge"
+EXTENSION_ID = "bmkeeojeabngjnlndcnopnddhlimlkak"  # pinned by the "key" in agent_voice/browser/manifest.json
+# Registry keys (Windows) and folders (macOS, Linux) where each browser looks for native messaging hosts.
+_HOST_KEYS = (r"Software\Google\Chrome\NativeMessagingHosts", r"Software\Microsoft\Edge\NativeMessagingHosts",
+              r"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts", r"Software\Chromium\NativeMessagingHosts")
+_HOST_DIRS = {"darwin": ("Google/Chrome", "Microsoft Edge", "BraveSoftware/Brave-Browser", "Chromium"),
+              "linux": ("google-chrome", "microsoft-edge", "BraveSoftware/Brave-Browser", "chromium")}
+
+
+def extension_dir() -> Path:
+    """The unpacked extension to load in the browser (shipped inside the package)."""
+    return Path(__file__).resolve().parent / "browser"
+
+
+def _host_files() -> tuple[Path, Path]:
+    from agent_voice.config import HOME
+
+    folder = HOME / "native-host"
+    return folder / f"{HOST_NAME}.json", folder / ("agent-voice-host.cmd" if os.name == "nt" else "agent-voice-host")
+
+
+def browser(remove: bool = False) -> str:
+    """Register the extension's bridge with Chrome, Edge, Brave and Chromium (user-level, no admin)."""
+    manifest, launcher = _host_files()
+    targets: list[Path] = []
+    if sys.platform != "win32":
+        base = _app_data() if sys.platform == "darwin" else Path.home() / ".config"
+        targets = [base / d / "NativeMessagingHosts" / f"{HOST_NAME}.json"
+                   for d in _HOST_DIRS.get(sys.platform, _HOST_DIRS["linux"])]
+    if remove:
+        for path in (manifest, launcher, *targets):
+            path.unlink(missing_ok=True)
+        if sys.platform == "win32":
+            import winreg
+
+            for key in _HOST_KEYS:
+                try:
+                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, f"{key}\\{HOST_NAME}")
+                except OSError:
+                    pass
+        return "removed the browser bridge (remove the extension from the browser yourself)"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    exe, *rest = self_command("native-host", windowed=False)
+    if os.name == "nt":  # the browser starts a .exe/.bat/.cmd; ours passes the arguments on
+        launcher.write_text(f'@"{exe}" {" ".join(rest)} %*\r\n', encoding="utf-8")
+    else:
+        launcher.write_text(f'#!/bin/sh\nexec "{exe}" {" ".join(rest)} "$@"\n', encoding="utf-8")
+        launcher.chmod(0o755)
+    _write_json(manifest, {"name": HOST_NAME, "description": "agent-voice: the browser extension's bridge",
+                           "path": str(launcher), "type": "stdio",
+                           "allowed_origins": [f"chrome-extension://{EXTENSION_ID}/"]})
+    if sys.platform == "win32":
+        import winreg
+
+        for key in _HOST_KEYS:
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"{key}\\{HOST_NAME}") as k:
+                winreg.SetValueEx(k, "", 0, winreg.REG_SZ, str(manifest))
+    for target in targets:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(manifest, target)
+    return (f"bridge registered. Now load the extension: open chrome://extensions (or edge://extensions), turn on "
+            f"Developer mode, click \"Load unpacked\" and pick {extension_dir()}")
+
+
+def _browser_installed() -> bool:
+    manifest, _ = _host_files()
+    return manifest.exists()
+
+
 INSTALLERS = {"claude": claude, "codex": codex, "gemini": gemini, "cursor": cursor, "cline": cline,
-              "antigravity": antigravity, "claude-desktop": claude_desktop, "windsurf": windsurf, "vscode": vscode}
+              "antigravity": antigravity, "claude-desktop": claude_desktop, "windsurf": windsurf, "vscode": vscode,
+              "browser": browser}
 
 # Where each agent keeps its settings (relative to home): the folder existing means the agent is installed.
 AGENT_DIRS = {"claude": ".claude", "codex": ".codex", "gemini": ".gemini", "cursor": ".cursor",
@@ -323,6 +395,11 @@ AGENT_DIRS = {"claude": ".claude", "codex": ".codex", "gemini": ".gemini", "curs
 
 
 def _agent_dir(agent: str) -> Path:
+    if agent == "browser":  # a Chromium browser's profile folder
+        local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        found = [local / "Google" / "Chrome", local / "Microsoft" / "Edge", _app_data() / "Google" / "Chrome",
+                 Path.home() / ".config" / "google-chrome"]
+        return next((p for p in found if p.is_dir()), found[0])
     if agent == "claude-desktop":
         return _app_data() / "Claude"
     if agent == "vscode":
@@ -330,7 +407,7 @@ def _agent_dir(agent: str) -> Path:
     return Path.home() / AGENT_DIRS[agent]
 
 
-AGENT_KEYS = (*AGENT_DIRS, "claude-desktop", "vscode")
+AGENT_KEYS = (*AGENT_DIRS, "claude-desktop", "vscode", "browser")
 MCP_ONLY = {"antigravity", "claude-desktop", "windsurf", "vscode"}
 
 
@@ -349,6 +426,8 @@ def _config_file(agent: str) -> Path:
 def is_installed(agent: str) -> bool:
     """Our hook (or MCP server) is in the agent's settings."""
     try:
+        if agent == "browser":
+            return _browser_installed()
         if agent == "cline":
             folder = Path.home() / "Documents" / "Cline" / "Hooks"
             return any(CLINE_MARKER in p.read_text(encoding="utf-8", errors="replace")

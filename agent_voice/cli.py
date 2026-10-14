@@ -211,20 +211,22 @@ def main(argv: list[str] | None = None) -> int:
 
 def quickstart() -> int:
     """agent-voice.exe double-clicked: download what's needed, hook into installed agents, start."""
-    from pathlib import Path
-
-    from agent_voice.install import AGENT_DIRS
+    from agent_voice.install import agent_states
 
     print("agent-voice: a local voice for your coding agents\n")
     try:
         main(["setup"])
-        found = [name for name, folder in AGENT_DIRS.items() if (Path.home() / folder).is_dir()]
+        # Every agent found on this PC; the browser extension needs a click in the browser, so it's offered later.
+        found = [name for name, state in agent_states().items() if state != "missing" and name != "browser"]
         print()
         if found:
             main(["install", *found])
         else:
-            print("No agent found (Claude Code, Codex, Gemini CLI, Cursor, Cline). "
-                  "Install one, then run `agent-voice install`.")
+            print("No agent found (Claude Code, Codex, Gemini CLI, Cursor, Cline, Antigravity, Claude Desktop, "
+                  "Windsurf, VS Code). Install one, then run `agent-voice install`.")
+        print()
+        print("ChatGPT, Claude or Gemini in the browser: `agent-voice install browser`.")
+        print("Aider, OpenCode or any terminal agent: `agent-voice watch <command>`.")
         print()
         ok = main(["start"]) == 0
         if ok:

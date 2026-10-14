@@ -949,6 +949,8 @@ class Daemon:
         except Exception:  # a malformed settings file must not take the daemon down
             log.exception("install %s failed", agent)
         self._agents_at = 0.0
+        if agent == "browser" and sys.platform == "win32":
+            os.startfile(install.extension_dir())  # the folder to pick in "Load unpacked"
 
     def replay(self, session: str = "") -> None:
         """Say a conversation's last turn again (the last one heard by default); the mic stays closed."""
@@ -998,8 +1000,13 @@ class Daemon:
         self.state["history"] = self.history
         save_state(self.state)
 
-    def prompt_submitted(self, hwnd: int, session: str = "", source: str = "") -> None:
-        """The user sent a new prompt: remember its window (and conversation), and stop talking/listening."""
+    def prompt_submitted(self, hwnd: int, session: str = "", source: str = "", title: str = "") -> None:
+        """The user sent a new prompt: remember its window (and conversation), and stop talking/listening.
+
+        `title`: the conversation's name when the caller knows it (a browser tab's title).
+        """
+        if session and title:
+            self._file_titles[session] = title
         if hwnd and hwnd != self._target_hwnd:
             self._target_hwnd = hwnd
             self.state["target_hwnd"] = hwnd
@@ -1816,7 +1823,7 @@ def _handler(daemon: Daemon):
                 return self._json(200, {"ok": True})
             if self.path == "/install":
                 agent = str(data.get("agent") or "")
-                if agent not in install.AGENT_DIRS:
+                if agent not in install.INSTALLERS:
                     return self._json(400, {"error": "unknown agent"})
                 threading.Thread(target=daemon.install_agent, args=(agent,), daemon=True).start()
                 return self._json(200, {"ok": True})
@@ -1828,8 +1835,8 @@ def _handler(daemon: Daemon):
                 threading.Thread(target=daemon._read_selection, daemon=True).start()
                 return self._json(200, {"ok": True})
             if self.path == "/prompt":
-                daemon.prompt_submitted(int(data.get("hwnd") or 0), str(data.get("session") or ""),
-                                        str(data.get("source") or ""))
+                daemon.prompt_submitted(_int(data.get("hwnd")), str(data.get("session") or ""),
+                                        str(data.get("source") or ""), str(data.get("title") or "")[:80])
                 return self._json(200, {"ok": True})
             if self.path == "/activity":
                 if data.get("done"):

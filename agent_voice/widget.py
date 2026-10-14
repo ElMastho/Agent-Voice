@@ -37,10 +37,11 @@ from agent_voice.config import HOME, load_config
 WIDTH = 320
 BAR_H = 64
 SPEEDS = (1.0, 1.25, 1.5, 1.75, 2.0)
-MODES = (("voice", "Voice"), ("chime", "Chimes"))
+MODES = (("voice", "Voice"), ("chime", "Chimes"), ("silent", "Silent"))
 HIST_ROWS, THREAD_ROWS, ROW_H = 5, 4, 22
+THREAD_H = 36  # a thread row: its title and state, then the start of its last reply
 # Tiles that only matter when replies are spoken: hidden in chime mode.
-VOICE_ONLY = {"read", "wake", "approve", "summary", "replay"}
+VOICE_ONLY = {"read", "wake", "replay"}
 # Agents the panel can connect (install.AGENT_DIRS has the same keys).
 AGENT_LABELS = (("claude", "Claude"), ("codex", "Codex"), ("gemini", "Gemini"), ("cursor", "Cursor"), ("cline", "Cline"))
 AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI", "cursor": "Cursor", "cline": "Cline"}
@@ -244,12 +245,20 @@ class Poller(QObject):
         threading.Thread(target=self._run, daemon=True).start()
 
     def _run(self) -> None:
+        tag = ""
         while True:
+            # At rest, wait for the daemon to report a change (one request every 20 s) instead of asking
+            # several times a second; while something moves, poll for the mic level and the animations.
+            waiting = self.interval >= 0.5 and tag
+            path = f"/status?wait={tag}&timeout=20" if waiting else "/status"
+            st = client.request(path, timeout=25 if waiting else 0.5)
+            tag = (st or {}).get("tag", "")
             try:
-                self.status.emit(client.request("/status", timeout=0.5))
+                self.status.emit(st)
             except RuntimeError:  # widget closed
                 return
-            time.sleep(self.interval)
+            if not waiting or st is None:
+                time.sleep(self.interval)
 
 
 def _post(path: str, payload: dict | None = None) -> None:
@@ -598,7 +607,7 @@ class VoiceWidget(QWidget):
     def _place_notch(self) -> None:
         """Top centre of the primary screen, sliding down when wanted and back up when not."""
         now = time.time()
-        busy = self.phase in ("speaking", "waiting", "recording", "transcribing")
+        busy = self.phase in ("speaking", "waiting", "recording", "transcribing") or bool(self._activity())
         if busy or self._hovering or self.expanded or self.pressed or self._question():
             self._reveal_until = now + NOTCH_HIDE_DELAY
         # A lightly damped spring: it drops down, overshoots a hair in width, and settles.
@@ -685,7 +694,7 @@ class VoiceWidget(QWidget):
         self.flash = max(0.0, self.flash - 0.022)
         target_idx = self._speed_index()
         self.speed_pos = target_idx if self.speed_pos is None else _ease(self.speed_pos, target_idx, 0.22)
-        mode_idx = 1.0 if self.st.get("chime") else 0.0
+        mode_idx = float([k for k, _ in MODES].index(self._output()))
         self.mode_pos = mode_idx if self.mode_pos is None else _ease(self.mode_pos, mode_idx, 0.22)
         self.title_t = min(1.0, self.title_t + 0.09)
         for key in set(self.hover_t) | ({self.hover} if self.hover else set()):
@@ -759,10 +768,10 @@ class VoiceWidget(QWidget):
             ("hold", ICONS["mic"], "Hold to talk", hk.get("push_to_talk", ""), self.pressed == "hold"),
             ("stop", ICONS["stop"], "Stop", hk.get("stop", ""), False),
             ("handsfree", ICONS["send"], "Auto-send", hk.get("hands_free", ""), bool(st.get("hands_free"))),
-            ("mute", ICONS["mute"] if muted else ICONS["volume"], "Muted" if muted else "Mute", hk.get("mute", ""), muted),
+            ("mute", ICONS["mute"], "Silent", hk.get("mute", ""), muted),
             ("read", ICONS["read"], "Read selection", hk.get("read_selection", ""), False),
             ("wake", ICONS["bolt"], "Hey Claude", "wake word", bool(st.get("wake"))),
-            ("approve", ICONS["shield"], "Voice approvals", "yes / no", bool(st.get("approvals", True))),
+            ("approve", ICONS["shield"], "Approvals", "voice or click", bool(st.get("approvals", True))),
             ("summary", ICONS["list"], "Summaries" if st.get("summary", True) else "Full answers",
              "short / full", bool(st.get("summary", True))),
         ]
@@ -771,9 +780,20 @@ class VoiceWidget(QWidget):
             tiles[7:7] = [("copyreply", ICONS["check"] if self._copied == "copyreply" and time.time() - self._copied_at < 1.3
                            else ICONS["copy"], "Copy reply", "to clipboard", False)]
             tiles[11:11] = [("openchat", ICONS["open"], "Open chat", "last thread", False)]
-        if st.get("chime"):
-            tiles = [t for t in tiles if t[0] not in VOICE_ONLY]
+        if self._output() != "voice":
+            # Voice-only tiles go, and so does Silent: the Mode row already switches it.
+            tiles = [t for t in tiles if t[0] not in VOICE_ONLY | {"mute"}]
         return tiles
+
+    def _output(self) -> str:
+        st = self.st
+        return st.get("output") or ("silent" if st.get("muted") else "chime" if st.get("chime") else "voice")
+
+    def _activity(self) -> dict | None:
+        """The agent's live activity, shown while nothing else needs the notch."""
+        if self.phase != "idle" or self._question():
+            return None
+        return self.st.get("activity") or None
 
     def _rects(self) -> dict[str, QRectF]:
         r = self._bar_rects()
@@ -815,7 +835,11 @@ class VoiceWidget(QWidget):
             seg = track.width() / len(MODES)
             for i, (key, _label) in enumerate(MODES):
                 r[f"mode:{key}"] = QRectF(track.x() + i * seg, track.y(), seg, track.height())
-            for i in range(len(self._threads())):
+            for i, t in enumerate(self._threads()):
+                if t.get("reply"):  # its own buttons first: they sit on top of the row
+                    row = self._thread_row(i)
+                    r[f"thrplay:{i}"] = QRectF(row.right() - 44, row.y() + 17, 18, 16)
+                    r[f"thrcopy:{i}"] = QRectF(row.right() - 22, row.y() + 17, 18, 16)
                 r[f"thr:{i}"] = self._thread_row(i)
             for i in range(len(self._history())):
                 r[f"hist:{i}"] = self._history_row(i)
@@ -823,7 +847,7 @@ class VoiceWidget(QWidget):
         return r
 
     def _show_speed(self) -> bool:
-        return not self.st.get("chime")  # chimes have no voice to speed up
+        return self._output() == "voice"  # chimes and silence have no voice to speed up
 
     def _speed_y(self) -> float:
         rows = -(-len(self._tiles()) // self._cols())
@@ -849,11 +873,11 @@ class VoiceWidget(QWidget):
         return list(self.st.get("threads") or [])[:THREAD_ROWS]
 
     def _thread_row(self, i: int) -> QRectF:
-        return QRectF(10, self._threads_y() + 16 + i * ROW_H, self.pw - 20, ROW_H - 2)
+        return QRectF(10, self._threads_y() + 16 + i * THREAD_H, self.pw - 20, THREAD_H - 2)
 
     def _hist_y(self) -> float:
         n = len(self._threads())
-        return self._threads_y() + (16 + n * ROW_H + 8 if n else 0)
+        return self._threads_y() + (16 + n * THREAD_H + 8 if n else 0)
 
     def _expanded_h(self) -> int:
         """The open panel fits what it shows: no empty rows."""
@@ -1023,8 +1047,17 @@ class VoiceWidget(QWidget):
         lang = st.get("speaking_lang") if self.phase == "speaking" else ""
         if lang:
             chips.append(lang.upper())
-        if st.get("chime"):
+        act = self._activity()
+        if act:
+            if act.get("others"):
+                chips.append(f"+{act['others']} working")
+            chips.append(f"{act['elapsed'] // 60}:{act['elapsed'] % 60:02d}")
+        if st.get("in_call"):
+            chips.append("In a call")
+        elif self._output() == "chime":
             chips.append("Chime")
+        elif self._output() == "silent":
+            chips.append("Silent")
         elif st.get("hands_free"):
             chips.append("Auto")
         if st.get("speed_x"):
@@ -1043,12 +1076,14 @@ class VoiceWidget(QWidget):
         _, title, sub = PHASES.get(self.phase, PHASES["idle"])
         if self._question() and self.phase in ("idle", "waiting", "recording"):
             title = "Your choice"
+        if act:
+            title = "Working"
         p.setFont(self.f_notch_title)
         fm = QFontMetrics(self.f_notch_title)
         p.setPen(QColor(255, 255, 255, 240))
         p.drawText(QPointF(x, 20), fm.elidedText(title, Qt.ElideRight, int(avail)))
         tx = x + min(fm.horizontalAdvance(title), avail) + 8
-        thread = st.get("thread")
+        thread = st.get("thread") or act
         if thread and tx < x + avail - 30:
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(thread["color"]))
@@ -1058,6 +1093,9 @@ class VoiceWidget(QWidget):
             p.drawText(QPointF(tx + 10, 20), QFontMetrics(self.f_notch_sub).elidedText(
                 thread["title"], Qt.ElideRight, int(x + avail - tx - 10)))
         line = st.get("caption") or ""
+        if not line and act:
+            steps = act["steps"]
+            line = f"{act.get('label') or 'Thinking'} · {steps} step{'s' if steps != 1 else ''}"
         if not line:
             q = self._question()
             if q:
@@ -1092,6 +1130,16 @@ class VoiceWidget(QWidget):
             p.setPen(_round_pen(acc, 2.0))
             p.setBrush(Qt.NoBrush)
             p.drawArc(QRectF(c.x() - 6, c.y() - 6, 12, 12), int(-t * 360 * 16) % (360 * 16), 250 * 16)
+        elif self._activity():
+            # Working: three dots, one lit, moving on each second (the status changes once a second,
+            # so this costs one repaint per second, not a 30 fps animation).
+            act = self._activity()
+            color = QColor(act["color"])
+            for i in range(3):
+                dot = QColor(color)
+                dot.setAlpha(255 if i == act["elapsed"] % 3 else 80)
+                p.setBrush(dot)
+                p.drawEllipse(QPointF(c.x() - 6 + i * 6, c.y()), 2.2, 2.2)
         else:
             r = 4.0 + (0.8 * math.sin(t * 2.2) if self.phase == "waiting" else 0.0)
             p.drawEllipse(c, r, r)
@@ -1319,12 +1367,17 @@ class VoiceWidget(QWidget):
         st = self.st
         if self.phase == "idle":
             sub = "Auto-send on · replies are sent" if st.get("hands_free") else f"{_hotkey_label(self.hotkeys.get('reply', ''))} to talk"
-            if st.get("chime"):
-                sub = "Chime mode · sounds only, no voice"
+            if self._output() != "voice":
+                sub = "In a call · chimes only" if st.get("in_call") else (
+                    "Chime mode · sounds only, no voice" if self._output() == "chime" else "Silent · replies as banners")
         if self.phase == "speaking" and st.get("hands_free"):
             sub = "Skip to answer · auto-send on"
         if self._question() and self.phase in ("idle", "waiting", "recording"):
             title, sub = "Your choice", "Click an option or say it"
+        act = self._activity()
+        if act:
+            title = "Working"
+            sub = f"{act.get('label') or 'Thinking'} · {act['elapsed'] // 60}:{act['elapsed'] % 60:02d}"
         x = 62
         right = WIDTH - 92
         p.setFont(self.f_title)
@@ -1512,7 +1565,7 @@ class VoiceWidget(QWidget):
         if self._show_speed():
             self._paint_segmented(p, progress, 6, self._speed_track(), "Speed",
                                   [f"speed:{x}" for x in SPEEDS], [f"{x:g}×" for x in SPEEDS], speed_pos)
-        mode_pos = self.mode_pos if self.mode_pos is not None else (1.0 if self.st.get("chime") else 0.0)
+        mode_pos = self.mode_pos if self.mode_pos is not None else float([k for k, _ in MODES].index(self._output()))
         self._paint_segmented(p, progress, 7, self._mode_track(), "Mode",
                               [f"mode:{k}" for k, _ in MODES], [label for _, label in MODES], mode_pos)
 
@@ -1586,7 +1639,7 @@ class VoiceWidget(QWidget):
         p.drawText(QRectF(14, self._threads_y(), self.pw - 28, 16), Qt.AlignRight | Qt.AlignVCenter,
                    f"{queued} waiting to speak" if queued else "click to open")
         labels = {"speaking": "speaking", "listening": "listening", "queued": "next up",
-                  "question": "asks you", "permission": "needs approval"}
+                  "question": "asks you", "permission": "needs approval", "working": "working"}
         fm = QFontMetrics(self.f_sub)
         for i, t in enumerate(threads):
             row = self._thread_row(i)
@@ -1598,7 +1651,8 @@ class VoiceWidget(QWidget):
             color = QColor(t["color"])
             p.setPen(Qt.NoPen)
             p.setBrush(color)
-            p.drawEllipse(QPointF(row.x() + 9, row.center().y()), 3.5, 3.5)
+            line1 = QRectF(row.x(), row.y() + 1, row.width(), 16)
+            p.drawEllipse(QPointF(row.x() + 9, line1.center().y()), 3.5, 3.5)
             state = labels.get(t.get("state", ""), "")
             if not state:
                 ago = int(t.get("ago", 0))
@@ -1606,12 +1660,27 @@ class VoiceWidget(QWidget):
             p.setFont(self.f_hint)
             p.setPen(color.lighter(130) if t.get("state") else QColor(226, 232, 240, 110))
             sw = QFontMetrics(self.f_hint).horizontalAdvance(state)
-            p.drawText(QRectF(row.right() - sw - 6, row.y(), sw + 2, row.height()), Qt.AlignRight | Qt.AlignVCenter, state)
-            text_rect = QRectF(row.x() + 20, row.y(), row.width() - sw - 32, row.height())
+            p.drawText(QRectF(row.right() - sw - 6, line1.y(), sw + 2, line1.height()), Qt.AlignRight | Qt.AlignVCenter, state)
+            text_rect = QRectF(row.x() + 20, line1.y(), row.width() - sw - 32, line1.height())
             p.setFont(self.f_sub)
             p.setPen(QColor(226, 232, 240, 215))
             p.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter,
                        fm.elidedText(t["title"], Qt.ElideRight, int(text_rect.width())))
+            reply = t.get("reply") or ""
+            if reply:
+                # The conversation's last reply, with replay and copy at hand.
+                p.setFont(self.f_hint)
+                p.setPen(QColor(226, 232, 240, 120))
+                line2 = QRectF(row.x() + 20, row.y() + 17, row.width() - 72, 16)
+                p.drawText(line2, Qt.AlignLeft | Qt.AlignVCenter,
+                           QFontMetrics(self.f_hint).elidedText(reply, Qt.ElideRight, int(line2.width())))
+                for key, icon in ((f"thrplay:{i}", ICONS["replay"]), (f"thrcopy:{i}", ICONS["copy"])):
+                    done = key.startswith("thrcopy") and self._copied == key and time.time() - self._copied_at < 1.2
+                    kt = self.hover_t.get(key, 0.0)
+                    rect = QRectF(row.right() - (44 if "play" in key else 22), row.y() + 17, 18, 16)
+                    p.setFont(self.f_icon_small)
+                    p.setPen(QColor(255, 255, 255, 235 if done else int(110 + 140 * kt)))
+                    p.drawText(rect, Qt.AlignCenter, ICONS["check"] if done else icon)
         p.restore()
 
     def _paint_history(self, p: QPainter, progress: float) -> None:
@@ -1775,7 +1844,14 @@ class VoiceWidget(QWidget):
             return "Voice: replies are read aloud and the mic opens"
         if key == "mode:chime":
             hk = _hotkey_label(self.hotkeys.get("chime", ""))
-            return f"Chimes: no voice, a soft sound when done or when you're needed ({hk})"
+            return f"Chimes: no voice, a soft sound and the reply as a banner ({hk})"
+        if key == "mode:silent":
+            hk = _hotkey_label(self.hotkeys.get("mute", ""))
+            return f"Silent: no sound at all, replies show as a banner ({hk})"
+        if key and key.startswith("thrplay:"):
+            return "Hear this conversation's last reply again"
+        if key and key.startswith("thrcopy:"):
+            return "Copy this conversation's last reply"
         return ""
 
     def mousePressEvent(self, e):
@@ -1823,10 +1899,18 @@ class VoiceWidget(QWidget):
         elif key == "replay":
             _post("/replay")
         elif key == "copyreply":
-            text = (self.st.get("last_reply") or {}).get("text", "")
-            if text:
-                QApplication.clipboard().setText(text)
+            if self.st.get("last_reply"):
+                _post("/copy_reply")
                 self._copied, self._copied_at = key, time.time()
+        elif key.startswith("thrplay:") or key.startswith("thrcopy:"):
+            threads = self._threads()
+            i = int(key.split(":", 1)[1])
+            if i < len(threads):
+                if key.startswith("thrplay:"):
+                    _post("/replay", {"session": threads[i]["session"]})
+                else:
+                    _post("/copy_reply", {"session": threads[i]["session"]})
+                    self._copied, self._copied_at = key, time.time()
         elif key.startswith("agent:"):
             agent = key.split(":", 1)[1]
             if self._agent_state(agent) == "off":
@@ -1868,9 +1952,9 @@ class VoiceWidget(QWidget):
         elif key == "summary":
             _post("/summary", {"mode": "toggle"})
         elif key.startswith("mode:"):
-            on = key == "mode:chime"
-            self.st["chime"] = on
-            _post("/chime", {"mode": "on" if on else "off"})
+            mode = key.split(":", 1)[1]
+            self.st["output"] = mode  # move the indicator now
+            _post("/output", {"mode": mode})
 
     def toggle_visible(self) -> None:
         if self.isVisible():

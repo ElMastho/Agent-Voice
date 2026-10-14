@@ -277,8 +277,8 @@ def hook_claude(raw: str) -> None:
         # The window you just typed in is where spoken replies get pasted back.
         from agent_voice import winfocus
 
-        client.request("/prompt", {"hwnd": winfocus.foreground(), "session": str(data.get("session_id", ""))},
-                       timeout=1.0)
+        client.request("/prompt", {"hwnd": winfocus.foreground(), "session": str(data.get("session_id", "")),
+                                   "source": "claude"}, timeout=1.0)
         if summary_enabled():
             # Claude Code adds this to the model's context for the turn.
             out = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": SUMMARY_INSTRUCTION}}
@@ -289,6 +289,11 @@ def hook_claude(raw: str) -> None:
         if "permission" in str(data.get("message", "")).lower():
             client.request("/notify", {"kind": "attention"}, timeout=1.0)
         return
+    if event == "PreToolUse" and data.get("tool_name") != "AskUserQuestion":
+        # Live activity in the notch: what it's doing now (this hook is async: the tool doesn't wait).
+        label = describe_tool(str(data.get("tool_name", "")), data.get("tool_input") or {})
+        client.request("/activity", {"session": str(data.get("session_id", "")), "source": "claude",
+                                     "label": label[:1].upper() + label[1:]}, timeout=1.0)
     if event == "PreToolUse" and data.get("tool_name") in ATTENTION_TOOLS:
         client.request("/notify", {"kind": "attention"}, timeout=1.0)
     asking = event == "PreToolUse" and data.get("tool_name") == "AskUserQuestion"
@@ -354,7 +359,7 @@ def hook_cline(raw: str) -> dict:
     if name == "UserPromptSubmit":
         from agent_voice import winfocus
 
-        client.request("/prompt", {"hwnd": winfocus.foreground()}, timeout=1.0)
+        client.request("/prompt", {"hwnd": winfocus.foreground(), "session": task, "source": "cline"}, timeout=1.0)
         return {"contextModification": SUMMARY_INSTRUCTION} if summary_enabled() else {}
     if name == "Notification":
         note = data.get("notification") or {}

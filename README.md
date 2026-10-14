@@ -94,7 +94,7 @@ Then open a **new** Claude Code session and ask it anything. You'll hear the ans
 
 <img align="right" src="docs/images/panel.jpg" alt="Expanded widget with all actions" width="330">
 
-Open the chevron for **every action with its shortcut**: reply now, hold to talk, stop, auto-send, mute, read selection, plus the voice speed and the **Voice / Chimes** mode. The **Recent** list shows the last 5 things it heard from you, with their language: click one to copy it again.
+Open the chevron for **every action with its shortcut**: reply now, hold to talk, stop, auto-send, silent, read selection, plus the voice speed and the **Voice / Chimes / Silent** mode. **Threads** lists your recent conversations with what each is doing and the start of its last reply (replay or copy it from there). **You said** shows the last 5 things it heard from you: click one to copy it again.
 
 - **Drag** it anywhere: it snaps to screen edges and remembers its place.
 - **Discreet**: it fades when idle and lights up when something happens.
@@ -102,7 +102,13 @@ Open the chevron for **every action with its shortcut**: reply now, hold to talk
 - **Hide / show**: `Ctrl+Alt+W`, a click on the tray icon, or right-click → *Hide widget*.
 - **Compact**: right-click → *Compact (orb only)* shrinks it to the animated orb; a click on it talks / cancels / skips.
 - **Notch** (the default): docked at the top centre like a camera notch, a pure-black island that flares into the screen edge. When idle it tucks itself away, leaving a 3-pixel line under the camera; it slides down while the agent talks or listens, when a question comes in, or when you touch the top edge with the mouse, and slides back up 3 seconds after. A thin light runs around its edge, in the state's colour, only while the voice or the mic is live. Expanded, it adds *Replay*, *Copy reply* and *Open chat*. Right-click → *Notch* switches back to the floating bar.
-- **Chime mode banner**: with Chimes on, each finished reply (summary or full text, as set) drops down under the notch as a notification for about 5 seconds. Hover to keep it, swipe it up to dismiss it, click it to open the conversation. Buttons that only matter for the voice are hidden in chime mode.
+- **Live activity**: while an agent works, the notch shows it: *Working · Edit widget.py · 14 steps*, a timer, and how many other conversations are working. It updates once a second, nothing more.
+- **Three modes, one switch**: *Voice*, *Chimes* (a soft sound) or *Silent* (no sound at all). In Chimes and Silent nothing talks, not even a setting change, and replies show as a banner.
+- **Calls**: while another app holds the microphone (Teams, Zoom, Meet in a browser...), agent-voice switches to chimes and back when the call ends; the notch says *In a call*. Pick *Voice* during the call to override it. It reads Windows' privacy records every few seconds; no audio is touched.
+- **A voice per conversation**: each conversation speaks a little lower or higher than the others, so you can tell who's talking without looking (`thread_voices`).
+- **Replies go back where they came from**: each conversation remembers the window it was prompted from, so with Claude in one terminal and Codex in another, a reply never lands in the wrong one.
+- **Voice commands**: in the reply window, *"repeat that"*, *"slower"*, *"faster"* or *"never mind"* (*"répète"*, *"plus lentement"*, *"plus vite"*, *"annule"*) drive agent-voice instead of being sent.
+- **Chime mode banner**: with Chimes (or Silent) on, each finished reply (summary or full text, as set) drops down under the notch as a notification for about 5 seconds. Hover to keep it, swipe it up to dismiss it, click it to open the conversation. Buttons that only matter for the voice are hidden in chime mode.
 - **Agents**: the panel's *Agents* row shows which agents speak through agent-voice; click one that isn't connected to add its hooks, or *?* for the setup guide.
 - **Permissions**: when Claude Code asks to run a command or edit a file, the request is read out and shown with *Allow once* / *Deny*. Say *"yes"* / *"no"* (or *"oui"* / *"non"*) or click; with no answer within a minute, Claude shows its own dialog as usual. Voice never grants more than once.
 - **Several threads at once**: when a second conversation finishes while another is talking (or waiting for your reply), it waits its turn and is then read out, announced by its name. The panel lists your recent threads with what each is doing; click one to open it.
@@ -122,7 +128,7 @@ Open the chevron for **every action with its shortcut**: reply now, hold to talk
 | `Ctrl+Alt+Space` *(hold)* | **Push-to-talk** in any window |
 | `Ctrl+Alt+S` | **Stop** speaking / listening |
 | `Ctrl+Alt+H` | **Auto-send** on/off (the voice confirms) |
-| `Ctrl+Alt+M` | **Mute** on/off |
+| `Ctrl+Alt+M` | **Silent** on/off (no sound; replies as banners) |
 | `Ctrl+Alt+C` | **Chime mode** on/off: no voice, a soft sound when the agent is done or needs you |
 | `Ctrl+Alt+R` | **Read** the selected text aloud |
 | `Ctrl+Alt+W` | **Show / hide** the widget |
@@ -201,6 +207,8 @@ sequenceDiagram
 | `permissions` | `enabled: true`, `wait_seconds: 60` | Permission prompts by voice / widget, and how long the hook waits before Claude's own dialog |
 | `wake_word` | `phrases: [hey claude, ok claude, …]` | Phrases accepted when Whisper confirms a keyword-spotter hit |
 | `update_check` | `true` | Look for a newer release on GitHub at start |
+| `auto_chime_in_calls` | `true` | Chimes instead of the voice while another app uses the microphone |
+| `thread_voices` | `true` | Each conversation speaks slightly lower or higher than the others |
 | `background_send` | `true` | Claude desktop app: with auto-send on, send spoken replies without bringing the window forward |
 | `chime.volume` | `0.35` | Chime mode loudness (0 to 1): a rising chime when done, a double one for questions and permissions |
 | `stt.model` | `small` | Whisper size: `base` is faster, `small` is better in French |

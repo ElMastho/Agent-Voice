@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from agent_voice import hooks, lang, textclean
 
 
@@ -138,7 +140,7 @@ def test_claude_hooks_ring_when_attention_is_needed(monkeypatch, tmp_path):
     hooks.hook_claude(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion",
                                   "session_id": "t", "tool_input": ask}))
     hooks.hook_claude(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "session_id": "t"}))
-    assert sent == [("/notify", "attention"), ("/notify", "question")]
+    assert sent == [("/notify", "attention"), ("/notify", "question"), ("/activity", None)]
     assert spoken == []  # the question itself is read out by the daemon, with its options
 
 
@@ -287,3 +289,123 @@ def test_agent_states(tmp_path, monkeypatch):
     assert states["claude"] == "on"
     assert states["gemini"] == "off"
     assert states["cursor"] == "missing"
+
+
+# -- the daemon, without audio or threads ----------------------------------------------------
+class FakeSpeaker:
+    def __init__(self, config):
+        self.said = []
+        self.busy = False
+        self.current_spec = self.current_text = ""
+
+    def speak(self, text, lang=None, voice=None, pitch=1.0):
+        self.said.append((text, pitch))
+        return 1
+
+    def stop(self):
+        pass
+
+    hold = release = stop
+
+
+@pytest.fixture
+def daemon(monkeypatch):
+    from agent_voice import config, server
+
+    monkeypatch.setattr(server, "Speaker", FakeSpeaker)
+    monkeypatch.setattr(server, "load_state", lambda: {})
+    monkeypatch.setattr(server, "save_state", lambda state: None)
+    monkeypatch.setattr(server.install, "agent_states", lambda: {})
+    monkeypatch.setattr(server.claudeapp, "session_title", lambda session: "")
+    monkeypatch.setattr(server.winfocus, "is_window", lambda hwnd: True)
+    d = server.Daemon(config.load_config(), start_threads=False)
+    d.chimes = []
+    monkeypatch.setattr(d, "play_chime", lambda kind: d.chimes.append(kind))
+    return d
+
+
+def test_chime_and_silent_show_the_reply_as_a_banner(daemon):
+    daemon.state["chime"] = True
+    daemon.speak("Working on it.", source="claude", session="a")
+    daemon.speak("Voice summary: all tests pass.", source="claude", final=True, session="a")
+    assert daemon.speaker.said == []  # no voice in chime mode
+    assert daemon.chimes == ["done"]
+    assert daemon.banner["text"].endswith("all tests pass.")
+    daemon.set_output("silent")
+    daemon.speak("Second answer.", source="claude", final=True, session="a")
+    assert daemon.banner["text"] == "Second answer." and daemon.output == "silent"
+    assert daemon.speaker.said == []
+
+
+def test_settings_stay_quiet_without_a_voice(daemon):
+    daemon.state["chime"] = True
+    daemon.set_hands_free(True)
+    daemon.set_summary(False)
+    assert daemon.speaker.said == []
+    daemon.state["chime"] = False
+    daemon.set_hands_free(False)
+    assert daemon.speaker.said[-1][0] == "Auto-send off."
+
+
+def test_replay_and_copy_use_the_whole_turn(daemon, monkeypatch):
+    import pyperclip
+
+    copied = []
+    monkeypatch.setattr(pyperclip, "copy", copied.append)
+    daemon.speak("First part.", source="claude", session="a")
+    daemon.speak("Last part.", source="claude", final=True, session="a")
+    daemon.copy_reply()
+    assert copied == ["First part.\n\nLast part."]
+    daemon.replay("a")
+    assert daemon.speaker.said[-1][0] == "First part.\n\nLast part."
+    daemon.prompt_submitted(0, "a")
+    daemon.speak("New turn.", source="claude", session="a")
+    assert daemon._turn_text("a") == "New turn."
+
+
+def test_each_conversation_has_its_window_and_voice(daemon):
+    daemon.prompt_submitted(111, "a")
+    daemon.prompt_submitted(222, "b")
+    assert daemon._hwnd_for("a") == 111 and daemon._hwnd_for("b") == 222
+    daemon.speak("From a.", session="a")
+    daemon.speaker.busy = False
+    daemon.speak("From b.", session="b", interrupt=True)
+    assert [pitch for _, pitch in daemon.speaker.said] == [1.0, 0.92]
+
+
+def test_live_activity(daemon):
+    daemon.prompt_submitted(0, "a", "claude")
+    daemon.tool_used("a", "claude", "Edit widget.py")
+    daemon.tool_used("a", "claude", "Run pytest")
+    act = daemon.status()["activity"]
+    assert act["label"] == "Run pytest" and act["steps"] == 2 and act["others"] == 0
+    daemon.speak("Done.", source="claude", final=True, session="a")
+    assert daemon.status()["activity"] is None
+
+
+def test_calls_switch_to_chimes_until_you_ask_for_the_voice(daemon):
+    daemon.in_call = "Zoom"
+    assert daemon.chime and daemon.output == "chime"
+    daemon.set_chime(False)
+    assert not daemon.chime  # you chose the voice during the call
+    daemon.in_call, daemon._call_override = "", False
+    assert not daemon.chime
+
+
+def test_voice_commands():
+    from agent_voice.server import match_command
+
+    assert match_command("Repeat that.") == "repeat"
+    assert match_command("Répète.") == "repeat"
+    assert match_command("Slower, please") == "slower"
+    assert match_command("never mind") == "cancel"
+    assert match_command("Repeat the tests on the server please") is None
+
+
+def test_status_tag_ignores_what_the_widget_does_not_show():
+    from agent_voice.server import status_tag
+
+    a = {"phase": "idle", "level": 0.1, "threads": [{"ago": 61}], "banner": {"id": 1, "age": 2}}
+    b = {"phase": "idle", "level": 0.3, "threads": [{"ago": 100}], "banner": {"id": 1, "age": 9}}
+    assert status_tag(a) == status_tag(b)
+    assert status_tag(a) != status_tag({**a, "phase": "speaking"})

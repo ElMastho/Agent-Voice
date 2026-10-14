@@ -80,6 +80,10 @@ DEFAULTS: dict = {
                               "hey clode", "eh claude", "et claude", "hi claude", "hay claude", "hey clawed"]},
     # Tell you when a newer version is on GitHub.
     "update_check": True,
+    # While another app has the mic (Teams, Zoom, Meet...), chimes instead of the voice.
+    "auto_chime_in_calls": True,
+    # Each conversation speaks a little lower or higher than the others, so you can tell them apart.
+    "thread_voices": True,
     # Chime mode sounds (0.0-1.0). Kept low so they don't disturb people around you.
     "chime": {"volume": 0.35},
 }

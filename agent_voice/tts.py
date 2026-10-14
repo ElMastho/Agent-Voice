@@ -89,8 +89,11 @@ class Speaker:
         langdet.warm_up()
 
     # -- public API -------------------------------------------------------------
-    def speak(self, text: str, lang: str | None = None, voice: str | None = None) -> int:
-        """Queue text for speaking (optionally forcing a voice spec). Returns the number of sentences queued."""
+    def speak(self, text: str, lang: str | None = None, voice: str | None = None, pitch: float = 1.0) -> int:
+        """Queue text for speaking (optionally forcing a voice spec). Returns the number of sentences queued.
+
+        `pitch` plays it a little lower or higher (and slower or faster): one voice per conversation, free.
+        """
         cleaned = textclean.truncate(textclean.clean(text), int(self.config["max_chars"]))
         paras = textclean.paragraphs(cleaned)
         if not paras:
@@ -99,7 +102,7 @@ class Speaker:
         segments = [(lang, s) for s in units] if lang else langdet.segment(units, self.config["default_lang"])
         gen = self._gen
         for seg_lang, sentence in segments:
-            self._text_q.put((gen, voice or self._spec(seg_lang), sentence))
+            self._text_q.put((gen, voice or self._spec(seg_lang), sentence, pitch))
         return len(segments)
 
     def hold(self) -> None:
@@ -134,7 +137,7 @@ class Speaker:
         from piper import SynthesisConfig
 
         while True:
-            gen, spec, sentence = self._text_q.get()
+            gen, spec, sentence, pitch = self._text_q.get()
             if gen != self._gen:
                 continue
             self._synthesizing.set()
@@ -150,7 +153,7 @@ class Speaker:
                 # A short pause between sentences sounds more natural.
                 audio = np.concatenate([audio, np.zeros(int(chunks[0].sample_rate * 0.12), dtype=np.float32)])
                 self._captions[id(audio)] = sentence
-                self._audio_q.put((gen, audio, chunks[0].sample_rate, spec))
+                self._audio_q.put((gen, audio, int(chunks[0].sample_rate * pitch), spec))
             except Exception:  # never let one bad sentence kill the worker
                 log.exception("synthesis failed for %r", sentence)
             finally:

@@ -29,6 +29,7 @@ agent_voice/
   install.py    writes/removes hooks in each agent's config; Windows autostart
   client.py     stdlib-only HTTP client used by hooks/CLI/widget; can start the daemon detached
   winfocus.py   Win32 foreground window get/restore (ctypes)
+  calls.py      is another app on the mic (a call)? read from Windows' privacy records
   widget.py     glass widget, tray icon, animations
 scripts/render_docs.py   regenerates docs/images/* from the real widget code
 tests/test_core.py       pytest suite (no audio/GUI needed)
@@ -60,7 +61,7 @@ The daemon and widget run as `pythonw` in the background. **Code changes need a 
 7. **The widget is a view.** State lives in the daemon (`/status`). The widget only keeps its own position/visibility (`~/.agent-voice/widget.json`; not `state.json`, which the daemon rewrites wholesale).
 8. **Nothing leaves the machine.** No network calls except model downloads (Piper voices, Whisper weights, the wake-word model) on first use, and the optional release check (`update_check`).
 9. **Battery first.** ONNX Runtime sessions we create never busy-wait (`tts._quiet_session`: `allow_spinning=0`, 2 threads; the default spinning cost ~20x the CPU per sentence). Feed models whole chunks, not 30 ms blocks. The wake word runs a volume gate first and the keyword spotter only on finished utterances.
-10. **The widget doesn't redraw at rest.** `_tick` drops to 4 Hz and skips `update()` once `_is_still()`; status polling slows to 0.6 s. Any new animation must be covered by `_is_still()`, or the widget redraws at 30 fps forever.
+10. **The widget doesn't redraw at rest.** `_tick` drops to 4 Hz and skips `update()` once `_is_still()`; status polling slows to 0.6 s. Any new animation must be covered by `_is_still()`, or the widget redraws at 30 fps forever. At rest the widget long-polls `/status?wait=<tag>` (one request per change, or every 20 s): keep `server.status_tag` blind to values that change without anything visible changing (mic level, seconds).
 
 ## Adding an agent integration
 

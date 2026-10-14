@@ -16,8 +16,9 @@ import threading
 import time
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
-from agent_voice import __version__, claudeapp, install, textclean, winfocus
+from agent_voice import __version__, calls, claudeapp, install, textclean, winfocus
 from agent_voice.config import HOME, LOG_DIR, load_config, load_state, save_state
 from agent_voice.tts import Speaker
 
@@ -175,6 +176,28 @@ def strip_wake(text: str, phrases: list[str]) -> str | None:
     return text[m.end():].strip() if m else None
 
 
+# Said on their own in the reply window, these drive agent-voice instead of being sent to the agent.
+_COMMANDS = {
+    "repeat": re.compile(r"^(?:repeat|repeat that|say (?:that|it) again|again|what did you say|"
+                         r"r[ée]p[èe]te|r[ée]p[èe]te[- ]?le|tu peux r[ée]p[ée]ter)$"),
+    "slower": re.compile(r"^(?:slower|slow down|speak slower|plus lentement|moins vite|ralentis)$"),
+    "faster": re.compile(r"^(?:faster|speed up|speak faster|plus vite|acc[ée]l[èe]re)$"),
+    "cancel": re.compile(r"^(?:cancel|never ?mind|forget it|nothing|annule|laisse tomber|rien)$"),
+}
+# A slightly different voice per conversation, so you can tell threads apart by ear. The first one
+# keeps the natural voice; playback-rate shifts cost nothing (no second voice to download).
+THREAD_PITCHES = (1.0, 0.92, 1.08, 0.86, 1.14)
+
+
+def match_command(text: str) -> str | None:
+    """'Repeat that.' -> 'repeat'; anything longer than a few words is a reply, never a command."""
+    plain = re.sub(r"[^\w\s'-]", "", text.lower()).strip()
+    plain = re.sub(r"^(?:please|s'il te pla[iî]t|ok|okay)\s+|\s+(?:please|s'il te pla[iî]t)$", "", plain)
+    if not plain or len(plain.split()) > 5:
+        return None
+    return next((name for name, rx in _COMMANDS.items() if rx.match(plain)), None)
+
+
 def _version(v: str) -> tuple:
     return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
 
@@ -201,18 +224,19 @@ def match_option(text: str, options: list[str]) -> int | None:
 
 
 class Daemon:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, start_threads: bool = True):
         self.config = config
         self.state = load_state()
         if self.state.get("speed_x"):
             # The speaker reads config["speed"] (Piper length_scale) for every sentence.
             config["speed"] = 1.0 / float(self.state["speed_x"])
         self.speaker = Speaker(config)
+        # HTTP handlers, the job worker, the mic and wake threads all touch the thread queue.
+        self._lock = threading.RLock()
         self.transcriber = None
         self._ptt_active = False
         # Requests are processed in order by one worker so replies are never spoken out of order.
         self.jobs: queue.Queue = queue.Queue()
-        threading.Thread(target=self._job_loop, name="jobs", daemon=True).start()
         # Auto-listen: armed by an agent's final answer, starts once the speaker goes quiet.
         self._listen_armed = False
         self._listen_cancel = threading.Event()
@@ -251,17 +275,29 @@ class Daemon:
         self.last_heard_lang = ""
         # Last few transcriptions, newest first, so a reply can be copied again from the widget.
         self.history: list[dict] = list(self.state.get("history") or [])[:5]
-        self.last_reply: dict | None = None
+        # Each conversation's latest turn (everything said since your prompt): replay and copy use it.
+        self._turns: dict[str, dict] = {}
+        self._last_session = ""
+        # The window each conversation was prompted from, so a reply goes back to the right terminal.
+        self._session_hwnd: dict[str, int] = {k: int(v) for k, v in (self.state.get("session_hwnds") or {}).items()}
+        # What each agent is doing right now (from its tool calls), for the notch's live activity.
+        self.activity: dict[str, dict] = {}
+        self._pitches: dict[str, float] = {}
         self._agents: dict[str, str] = {}
-        self.banner: dict | None = None  # chime mode: the reply shown as a notification under the notch
-        self._chime_text: dict[str, str] = {}
         self._agents_at = 0.0
+        self.banner: dict | None = None  # chime/silent: the reply shown as a notification under the notch
+        # Another app holds the mic (a call): chimes instead of the voice until it ends.
+        self.in_call = ""
+        self._call_override = False
         self._ptt_release = threading.Event()
         # Bumped by the show/hide hotkey; the widget toggles when it sees the number change.
         self.widget_toggles = 0
-        threading.Thread(target=self._listen_monitor, name="listen", daemon=True).start()
-        threading.Thread(target=self._wake_loop, name="wake", daemon=True).start()
-        threading.Thread(target=self._check_update, name="update", daemon=True).start()
+        if start_threads:
+            threading.Thread(target=self._job_loop, name="jobs", daemon=True).start()
+            threading.Thread(target=self._listen_monitor, name="listen", daemon=True).start()
+            threading.Thread(target=self._wake_loop, name="wake", daemon=True).start()
+            threading.Thread(target=self._check_update, name="update", daemon=True).start()
+            threading.Thread(target=self._call_watch, name="calls", daemon=True).start()
 
     def _job_loop(self) -> None:
         while True:
@@ -284,9 +320,7 @@ class Daemon:
         self.state["hands_free"] = on
         save_state(self.state)
         log.info("hands_free=%s", on)
-        # Say it, so you know which mode you are in without looking.
-        self.speaker.stop()
-        self.speaker.speak("Hands-free on. Your replies will be sent automatically." if on else "Hands-free off.", "en")
+        self._confirm("Auto-send on. Your replies will be sent automatically." if on else "Auto-send off.")
 
     @property
     def summary(self) -> bool:
@@ -299,8 +333,7 @@ class Daemon:
         self.state["summary"] = on
         save_state(self.state)
         log.info("summary=%s", on)
-        self.speaker.stop()
-        self.speaker.speak("Summaries on." if on else "Full answers.", "en")
+        self._confirm("Summaries on." if on else "Full answers.")
 
     @property
     def speed_x(self) -> float:
@@ -314,22 +347,50 @@ class Daemon:
         save_state(self.state)
         log.info("speed=%sx", x)
         # Applies from the next sentence; give a sample when idle so the change can be heard.
-        if not self.speaker.busy and not self.muted:
-            self.speaker.speak(f"Speed {x:g}.", "en")
+        if not self.speaker.busy:
+            self._confirm(f"Speed {x:g}.")
 
     @property
     def chime(self) -> bool:
-        return bool(self.state.get("chime"))
+        """Chimes instead of the voice: chosen, or automatic while you're in a call."""
+        return bool(self.state.get("chime")) or bool(self.in_call and not self._call_override)
+
+    @property
+    def quiet(self) -> bool:
+        """No voice (chimes or silent): replies show as a banner instead."""
+        return self.muted or self.chime
+
+    @property
+    def output(self) -> str:
+        return "silent" if self.muted else "chime" if self.chime else "voice"
+
+    def _confirm(self, text: str) -> None:
+        """Say a setting change out loud, unless the voice is off (chimes, silent)."""
+        if not self.quiet:
+            self.speaker.stop()
+            self.speaker.speak(text, "en")
 
     def set_chime(self, on: bool) -> None:
         self.state["chime"] = on
         save_state(self.state)
         log.info("chime=%s", on)
+        if self.in_call and not on:
+            self._call_override = True  # you asked for the voice during a call: keep it
         self.stop()  # no voice and no open mic in chime mode
         if on:
             self.play_chime("done")
-        elif not self.muted:
-            self.speaker.speak("Voice mode.", "en")
+        else:
+            self._confirm("Voice mode.")
+
+    def set_output(self, mode: str) -> None:
+        """voice | chime | silent: one choice instead of separate mute and chime switches."""
+        if mode == "silent":
+            self.state["chime"] = False
+            self.set_muted(True)
+            return
+        if self.muted:
+            self.state["muted"] = False
+        self.set_chime(mode == "chime")
 
     def play_chime(self, kind: str) -> None:
         if self.muted:
@@ -392,7 +453,8 @@ class Daemon:
         if index is None:
             index = match_option(text, options)
         label = options[index] if index is not None and 0 <= index < len(options) else ""
-        hwnd, session = self._target_hwnd, q["session"]
+        session = q["session"]
+        hwnd = self._hwnd_for(session)
         title = self._title_for(hwnd, session)
         log.info("answer option=%r free_text=%s", label, not label)
         if title:
@@ -418,7 +480,7 @@ class Daemon:
         self.state["muted"] = muted
         save_state(self.state)
         if muted:
-            self.speaker.stop()
+            self.stop()
         _beep(440 if muted else 880)
         log.info("muted=%s", muted)
 
@@ -438,39 +500,70 @@ class Daemon:
             self.question = None  # the agent moved on: the question was answered
         if session:
             self.threads[session] = {"source": source, "last": time.time()}
-        if session and self._voice_session and session != self._voice_session and not interrupt and (
-                self.speaker.busy or self._listen_armed or self._listening):
-            # Another thread is talking (or waiting for your reply): this one waits its turn.
-            self._queue.append((text, lang, source, interrupt, final, voice, session))
-            log.info("queued speech from another thread (%d waiting)", len(self._queue))
-            return 0
-        if self.muted:
-            return 0
-        if self.chime:
-            # Sounds only: progress is silent, the end of a turn rings, the mic stays closed.
-            log.info("speak source=%s chime=%s final=%s", source, final, final)
+        with self._lock:
+            if session and self._voice_session and session != self._voice_session and not interrupt and (
+                    self.speaker.busy or self._listen_armed or self._listening):
+                # Another thread is talking (or waiting for your reply): this one waits its turn.
+                self._queue.append((text, lang, source, interrupt, final, voice, session))
+                log.info("queued speech from another thread (%d waiting)", len(self._queue))
+                return 0
+        self._record_turn(session, source, text, lang, voice, final)
+        if final:
+            self.activity.pop(session, None)  # the agent is done working
+        if self.quiet:
+            # Chimes or silent: no voice and no open mic; the end of a turn shows as a banner.
+            log.info("speak source=%s output=%s final=%s", source, self.output, final)
             if final:
-                shown = text.strip() or self._chime_text.get(session, "")
-                self._chime_text.pop(session, None)
+                turn = self._turn_text(session)
+                shown = text.strip() if self.summary and text.strip() else turn or text.strip()
                 if shown:
                     self._show_banner(shown, session, source)
-                self.play_chime("done")
-            elif text.strip():
-                self._chime_text[session] = text.strip()  # shown at the end of the turn if nothing newer comes
+                self.play_chime("done")  # silent: no sound either
             return 0
         if interrupt:
             self.speaker.stop()
         if text.strip() or final:
             self._voice_session, self._voice_source = session, source  # whose voice this is, for the widget
             self._wake_cancel.set()  # never let the wake word hear our own voice
-        if text.strip():
-            self.last_reply = {"text": text, "lang": lang, "voice": voice, "session": session}
-        n = self.speaker.speak(text, lang, voice) if text.strip() else 0
+        n = self.speaker.speak(text, lang, voice, pitch=self._pitch(session)) if text.strip() else 0
         log.info("speak source=%s sentences=%d final=%s", source, n, final)
         if final and self.config["auto_listen"].get("enabled") and self.transcriber is not None:
             self._reply_session = session
             self._listen_armed = True
         return n
+
+    def _record_turn(self, session: str, source: str, text: str, lang, voice, final: bool) -> None:
+        """Collect what a conversation says in one turn (progress, then the end), for replay and copy."""
+        turn = self._turns.get(session)
+        if turn is None or (turn["done"] and text.strip()):
+            turn = {"texts": [], "done": False, "lang": lang, "voice": voice, "source": source}
+            self._turns[session] = turn
+            self._turns = dict(list(self._turns.items())[-20:])
+        if text.strip():
+            turn["texts"].append(text.strip())
+            turn["lang"], turn["voice"] = lang, voice
+            self._last_session = session
+        if final:
+            turn["done"] = True
+
+    def _turn_text(self, session: str) -> str:
+        return "\n\n".join((self._turns.get(session) or {}).get("texts") or [])
+
+    def _pitch(self, session: str) -> float:
+        """This conversation's voice: the first one natural, the next ones a little lower or higher."""
+        if not session or not self.config.get("thread_voices", True):
+            return 1.0
+        if session not in self._pitches:
+            self._pitches[session] = THREAD_PITCHES[len(self._pitches) % len(THREAD_PITCHES)]
+        return self._pitches[session]
+
+    def copy_reply(self, session: str = "") -> bool:
+        import pyperclip
+
+        text = self._turn_text(session or self._last_session)
+        if text:
+            pyperclip.copy(text)
+        return bool(text)
 
     def _show_banner(self, text: str, session: str, source: str) -> None:
         """Chime mode: what would have been said, as a notification (summary or full text, as set)."""
@@ -493,14 +586,19 @@ class Daemon:
             log.exception("install %s failed", agent)
         self._agents_at = 0.0
 
-    def replay(self) -> None:
-        """Say the last reply again (it doesn't reopen the mic)."""
-        r = self.last_reply
-        if r and not self.muted:
-            self.speaker.stop()
-            self._wake_cancel.set()
-            self._voice_session = r["session"]
-            self.speaker.speak(r["text"], r["lang"], r["voice"])
+    def replay(self, session: str = "") -> None:
+        """Say a conversation's last turn again (the last one heard by default); the mic stays closed."""
+        session = session or self._last_session
+        turn = self._turns.get(session)
+        if not turn or not turn["texts"]:
+            return
+        if self.quiet:  # no voice now: show it instead
+            self._show_banner(self._turn_text(session), session, turn["source"])
+            return
+        self.speaker.stop()
+        self._wake_cancel.set()
+        self._voice_session, self._voice_source = session, turn["source"]
+        self.speaker.speak(self._turn_text(session), turn["lang"], turn["voice"], pitch=self._pitch(session))
 
     def stop(self) -> None:
         self.speaker.stop()
@@ -531,7 +629,7 @@ class Daemon:
         self.state["history"] = self.history
         save_state(self.state)
 
-    def prompt_submitted(self, hwnd: int, session: str = "") -> None:
+    def prompt_submitted(self, hwnd: int, session: str = "", source: str = "") -> None:
         """The user sent a new prompt: remember its window (and conversation), and stop talking/listening."""
         if hwnd and hwnd != self._target_hwnd:
             self._target_hwnd = hwnd
@@ -540,9 +638,72 @@ class Daemon:
         if hwnd and session and claudeapp.is_desktop_app(hwnd):
             threading.Thread(target=self._learn_title, args=(hwnd, session), daemon=True).start()
         if session:
-            self._queue = [job for job in self._queue if job[6] != session]  # you moved on in that thread
-            self.threads[session] = {"source": self.threads.get(session, {}).get("source", ""), "last": time.time()}
+            with self._lock:
+                self._queue = [job for job in self._queue if job[6] != session]  # you moved on in that thread
+            source = source or self.threads.get(session, {}).get("source", "")
+            self.threads[session] = {"source": source, "last": time.time()}
+            if hwnd and self._session_hwnd.get(session) != hwnd:
+                self._session_hwnd[session] = hwnd
+                self._session_hwnd = dict(list(self._session_hwnd.items())[-50:])
+                self.state["session_hwnds"] = self._session_hwnd
+                save_state(self.state)
+            if session in self._turns:
+                self._turns[session]["done"] = True  # what comes next is a new turn
+            now = time.time()
+            self.activity[session] = {"source": source, "started": now, "last": now, "steps": 0, "label": "Thinking"}
         self.stop()
+
+    def _hwnd_for(self, session: str) -> int:
+        """The window a conversation was prompted from; the last prompted window otherwise."""
+        hwnd = self._session_hwnd.get(session, 0)
+        return hwnd if hwnd and winfocus.is_window(hwnd) else self._target_hwnd
+
+    def tool_used(self, session: str, source: str, label: str) -> None:
+        """An agent is working: one more step, and what it's doing now."""
+        now = time.time()
+        act = self.activity.get(session)
+        if act is None or now - act["last"] > 900:
+            act = {"source": source, "started": now, "steps": 0}
+            self.activity[session] = act
+        act.update(last=now, label=label[:80], steps=act["steps"] + 1)
+        if session:
+            self.threads[session] = {"source": source or self.threads.get(session, {}).get("source", ""),
+                                     "last": now}
+
+    def _activity_status(self) -> dict | None:
+        """The busiest-looking conversation's live activity (the most recent), and how many others work."""
+        now = time.time()
+        live = {s: a for s, a in self.activity.items() if now - a["last"] < 900}
+        self.activity = live
+        if not live:
+            return None
+        session, act = max(live.items(), key=lambda kv: kv[1]["last"])
+        title = self._title(session, act["source"])
+        return {"session": session, "title": title, "color": thread_color(session or title),
+                "label": act.get("label", ""), "steps": act["steps"], "elapsed": int(now - act["started"]),
+                "others": len(live) - 1}
+
+    def _call_watch(self) -> None:
+        """Every few seconds: is another app on the mic? Then chimes until the call ends."""
+        while True:
+            time.sleep(4)
+            if not self.config.get("auto_chime_in_calls", True):
+                continue
+            try:
+                apps = calls.apps_using_mic()
+            except Exception:
+                log.exception("call check failed")
+                time.sleep(60)
+                continue
+            label = calls.app_label(apps[0]) if apps else ""
+            if label and not self.in_call:
+                log.info("call started (%s): chimes until it ends", label)
+                self.in_call, self._call_override = label, False
+                if not self.state.get("chime"):
+                    self.stop()  # stop talking over your call
+            elif not label and self.in_call:
+                log.info("call ended")
+                self.in_call, self._call_override = "", False
 
     def _learn_title(self, hwnd: int, session: str) -> None:
         """You type in the conversation on screen, so its title belongs to this session.
@@ -563,13 +724,17 @@ class Daemon:
     # -- auto-listen ------------------------------------------------------------
     def _play_next_thread(self) -> None:
         """Speak the next waiting thread, announced by its name."""
-        session = self._queue[0][6]
-        jobs = [job for job in self._queue if job[6] == session]
-        self._queue = [job for job in self._queue if job[6] != session]
+        with self._lock:
+            if not self._queue:
+                return
+            session = self._queue[0][6]
+            jobs = [job for job in self._queue if job[6] == session]
+            self._queue = [job for job in self._queue if job[6] != session]
         title = self._title(session, jobs[0][2])
         log.info("playing queued thread %r (%d left)", title, len(self._queue))
         self._voice_session, self._voice_source = session, jobs[0][2]
-        self.speaker.speak(f"{title}.")
+        if not self.quiet:
+            self.speaker.speak(f"{title}.", pitch=self._pitch(session))
         for job in jobs:
             self.speak(*job)
 
@@ -603,8 +768,8 @@ class Daemon:
         from agent_voice.stt import is_hallucination, listen_for_speech
 
         cfg = self.config["auto_listen"]
-        target = self._target_hwnd or winfocus.foreground()
         session = self._reply_session
+        target = self._hwnd_for(session) or winfocus.foreground()
         question = self.question
         permission = self.permission
         force_submit, self._force_submit = self._force_submit, False
@@ -644,6 +809,8 @@ class Daemon:
                     self.answer_permission(permission["id"], allow)
             elif question is not None and question is self.question:
                 self.answer(text=text)
+            elif match_command(text):
+                self._run_command(match_command(text), session)
             elif self.wake and strip_wake(text, list(self.config.get("wake_word", {}).get("phrases") or [])) is not None:
                 # "Hey Claude, ..." while the reply mic was open: the rest is the reply; the phrase alone is nothing.
                 rest = strip_wake(text, list(self.config.get("wake_word", {}).get("phrases") or []))
@@ -660,6 +827,16 @@ class Daemon:
             self.speaker.release()
             self._mic_phase = ""
             self.level = 0.0
+
+    def _run_command(self, command: str, session: str) -> None:
+        """A spoken command in the reply window: handled here, nothing is sent to the agent."""
+        log.info("voice command: %s", command)
+        if command == "repeat":
+            self.replay(session)
+        elif command in ("slower", "faster"):
+            self.set_speed(self.speed_x + (0.25 if command == "faster" else -0.25))
+        else:
+            _beep(400, 60)
 
     def _paste(self, text: str, hwnd: int = 0, submit: bool = False, session: str = "") -> None:
         import keyboard
@@ -756,13 +933,17 @@ class Daemon:
             else:
                 state = ""
             title = self._title(session, info["source"])
+            if not state and session in self.activity:
+                state = "working"
+            reply = self._turn_text(session)
             out.append({"session": session, "title": title, "color": thread_color(session or title),
-                        "state": state, "ago": int(time.time() - info["last"])})
+                        "state": state, "ago": int(time.time() - info["last"]),
+                        "reply": " ".join(reply.split())[-160:]})
         return out
 
     def open_thread(self, session: str) -> None:
         """Bring a conversation to the front (widget thread list)."""
-        hwnd = self._target_hwnd
+        hwnd = self._hwnd_for(session)
         title = self._title_for(hwnd, session)
         if hwnd:
             winfocus.focus(hwnd)
@@ -839,8 +1020,7 @@ class Daemon:
         self.state["approvals"] = on
         save_state(self.state)
         log.info("approvals=%s", on)
-        if not self.muted:
-            self.speaker.speak("Voice approvals on." if on else "Voice approvals off.", "en")
+        self._confirm("Approvals on." if on else "Approvals off.")
 
     # -- wake word --------------------------------------------------------------
     @property
@@ -852,8 +1032,7 @@ class Daemon:
         save_state(self.state)
         log.info("wake=%s", on)
         self._wake_cancel.set()
-        if not self.muted:
-            self.speaker.speak("Wake word on. Say: Hey Claude." if on else "Wake word off.", "en")
+        self._confirm("Wake word on. Say: Hey Claude." if on else "Wake word off.")
 
     def _wake_loop(self) -> None:
         """While idle, listen for "Hey Claude ..." and send what follows as a new prompt.
@@ -913,7 +1092,7 @@ class Daemon:
             if len(command.split()) >= 3:
                 self._heard(command, lang)
                 _beep(880, 60)
-                self._paste(command, self._target_hwnd, submit=True, session=session)
+                self._paste(command, self._hwnd_for(session), submit=True, session=session)
             else:
                 # Just "Hey Claude": open the mic for the prompt, and send it.
                 _beep(880, 60)
@@ -942,10 +1121,12 @@ class Daemon:
             "last_heard_lang": self.last_heard_lang,
             "history": self.history,
             "agents": self.agent_states(),
+            "activity": self._activity_status(),
+            "output": self.output,
+            "in_call": self.in_call,
             "banner": {**self.banner, "age": round(time.time() - self.banner["at"], 1)}
             if self.banner and time.time() - self.banner["at"] < 60 else None,
-            "last_reply": {"text": self.last_reply["text"][:4000], "session": self.last_reply["session"]}
-            if self.last_reply else None,
+            "last_reply": {"session": self._last_session} if self._turn_text(self._last_session) else None,
             "question": self._question_status(),
             "thread": self._thread_status(),
             "threads": self._threads_status(),
@@ -1080,6 +1261,18 @@ class Daemon:
             self.level = 0.0
 
 
+def status_tag(st: dict) -> str:
+    """What the widget shows, as a short tag: it changes when something visible changes.
+
+    Not the mic level (a widget that animates polls normally) nor the banner's age.
+    """
+    shown = {k: v for k, v in st.items() if k != "level"}
+    if shown.get("banner"):
+        shown["banner"] = {k: v for k, v in shown["banner"].items() if k != "age"}
+    shown["threads"] = [{**t, "ago": t["ago"] // 60} for t in shown.get("threads") or []]  # "N min ago"
+    return f"{zlib.crc32(json.dumps(shown, sort_keys=True, default=str).encode()):08x}"
+
+
 def _handler(daemon: Daemon):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # silence default stderr logging
@@ -1123,8 +1316,21 @@ def _handler(daemon: Daemon):
         def do_GET(self):
             if not self._allowed(post=False):
                 return None
-            if self.path == "/status":
-                return self._json(200, daemon.status())
+            url = urlparse(self.path)
+            if url.path == "/status":
+                query = parse_qs(url.query)
+                if "wait" not in query:
+                    st = daemon.status()
+                    return self._json(200, {**st, "tag": status_tag(st)})
+                # Long poll: answer as soon as something changes (or after `timeout`), so a widget at
+                # rest makes one request every 20 s instead of several a second.
+                wait, end = query["wait"][0], time.time() + min(30.0, float(query.get("timeout", ["20"])[0]))
+                while True:
+                    st = daemon.status()
+                    tag = status_tag(st)
+                    if tag != wait or time.time() >= end:
+                        return self._json(200, {**st, "tag": tag})
+                    time.sleep(0.25)
             self._json(404, {"error": "not found"})
 
         def do_POST(self):
@@ -1160,14 +1366,28 @@ def _handler(daemon: Daemon):
                 threading.Thread(target=daemon.install_agent, args=(agent,), daemon=True).start()
                 return self._json(200, {"ok": True})
             if self.path == "/replay":
-                daemon.jobs.put(daemon.replay)
+                session = str(data.get("session") or "")
+                daemon.jobs.put(lambda: daemon.replay(session))
                 return self._json(200, {"ok": True})
             if self.path == "/read":
                 threading.Thread(target=daemon._read_selection, daemon=True).start()
                 return self._json(200, {"ok": True})
             if self.path == "/prompt":
-                daemon.prompt_submitted(int(data.get("hwnd") or 0), str(data.get("session") or ""))
+                daemon.prompt_submitted(int(data.get("hwnd") or 0), str(data.get("session") or ""),
+                                        str(data.get("source") or ""))
                 return self._json(200, {"ok": True})
+            if self.path == "/activity":
+                daemon.tool_used(str(data.get("session") or ""), str(data.get("source") or ""),
+                                 str(data.get("label") or ""))
+                return self._json(200, {"ok": True})
+            if self.path == "/output":
+                mode = str(data.get("mode") or "")
+                if mode not in ("voice", "chime", "silent"):
+                    return self._json(400, {"error": "mode must be voice, chime or silent"})
+                daemon.set_output(mode)
+                return self._json(200, {"output": daemon.output})
+            if self.path == "/copy_reply":
+                return self._json(200, {"ok": daemon.copy_reply(str(data.get("session") or ""))})
             if self.path == "/stop":
                 daemon.stop()
                 return self._json(200, {"ok": True})

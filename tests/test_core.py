@@ -629,3 +629,32 @@ def test_statusline_reports_usage(monkeypatch):
                                         "rate_limits": {"five_hour": {"used_percentage": 63, "resets_at": 99}}}))
     assert line == "Opus · context 42% · 5h 63%"
     assert sent == [{"session": "s", "source": "claude", "context": 42.4, "five_hour": {"pct": 63, "resets": 99}}]
+
+
+def test_watch_tracks_a_terminal_agent():
+    from agent_voice import watch
+
+    clock = [0.0]
+    posts = []
+    t = watch.Tracker("aider", lambda path, payload: posts.append((path, payload)), rows=10, cols=60,
+                      now=lambda: clock[0])
+    t.output("aider v1\r\n> ")
+    t.typed_input("fix the bug")
+    t.output("fix the bug")
+    t.typed_input("\r")
+    assert posts == [("/prompt", {"hwnd": 0, "session": t.session, "source": "aider"})]
+    t.output("\r\nEditing server.py\r\nFixed the off-by-one in server.py. All tests pass.\r\n> ")
+    clock[0] = 1.0
+    t.tick()  # still talking: a live label
+    assert posts[-1][1]["label"] == "Fixed the off-by-one in server.py. All tests pass."
+    clock[0] = 5.0
+    t.tick()  # quiet: that was the reply
+    path, payload = posts[-1]
+    assert path == "/speak" and payload["final"] and "off-by-one" in payload["text"]
+    assert "fix the bug" not in payload["text"]
+    t.typed_input("go\r")
+    t.output("go\r\nApply these edits? (y/n) ")
+    clock[0] = 10.0
+    t.tick()
+    assert posts[-2] == ("/notify", {"kind": "input", "session": t.session, "agent": "aider",
+                                     "text": "Apply these edits? (y/n)"})

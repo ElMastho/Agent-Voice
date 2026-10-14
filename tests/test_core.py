@@ -409,3 +409,14 @@ def test_status_tag_ignores_what_the_widget_does_not_show():
     b = {"phase": "idle", "level": 0.3, "threads": [{"ago": 100}], "banner": {"id": 1, "age": 9}}
     assert status_tag(a) == status_tag(b)
     assert status_tag(a) != status_tag({**a, "phase": "speaking"})
+
+
+def test_read_along_follows_the_voice(daemon):
+    daemon.speaker.busy = True
+    daemon.speak("First sentence. Second one.", source="claude", session="a")
+    assert daemon.status()["reading"]["text"] == "First sentence. Second one."
+    daemon.speaker.busy = False
+    assert daemon.status()["reading"] is None  # the voice stopped: the text goes with it
+    daemon.state["chime"] = True
+    daemon.speaker.busy = True
+    assert daemon.status()["reading"] is None  # no voice in chime mode: the end-of-turn banner instead

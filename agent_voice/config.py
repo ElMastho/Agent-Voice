@@ -82,6 +82,8 @@ DEFAULTS: dict = {
     "update_check": True,
     # While another app has the mic (Teams, Zoom, Meet...), chimes instead of the voice.
     "auto_chime_in_calls": True,
+    # While a reply is read out, show its text under the notch (gone when the voice stops).
+    "read_along": True,
     # Each conversation speaks a little lower or higher than the others, so you can tell them apart.
     "thread_voices": True,
     # Chime mode sounds (0.0-1.0). Kept low so they don't disturb people around you.

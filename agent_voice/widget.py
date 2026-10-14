@@ -279,6 +279,8 @@ class Banner(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setMouseTracking(True)
         self.item: dict | None = None
+        self.holding = False  # reading along with the voice
+        self.dismissed = False
         self.lines: list[str] = []
         self.t, self.v = 0.0, 0.0  # appearance (a spring) and its velocity
         self.until = 0.0
@@ -294,13 +296,14 @@ class Banner(QWidget):
         super().showEvent(event)
         _apply_windows_style(int(self.winId()), "none", notch=True)
 
-    def present(self, item: dict, width: int) -> None:
-        self.item, self.drag = item, 0.0
+    def present(self, item: dict, width: int, hold: bool = False) -> None:
+        """Show `item`; `hold` keeps it until release() (read along: as long as the voice plays)."""
+        self.item, self.drag, self.holding = item, 0.0, hold
         fm = QFontMetrics(self.f_text)
         self.lines = self._wrap(item.get("text", ""), fm, width - 36)
         self.resize(width, int(40 + len(self.lines) * fm.lineSpacing() + 14))
         words = len(item.get("text", "").split())
-        self.until = time.time() + min(15.0, 5.0 + max(0, words - 12) * 0.25)  # ~5 s, longer for long text
+        self.until = 1e12 if hold else time.time() + min(15.0, 5.0 + max(0, words - 12) * 0.25)  # ~5 s, more if long
         if not self.isVisible():
             self.t, self.v = 0.0, 0.0
             self.show()
@@ -324,6 +327,13 @@ class Banner(QWidget):
 
     def dismiss(self) -> None:
         self.until = 0.0
+        self.dismissed = self.holding  # swiped away while reading along: not again for this speech
+
+    def release(self) -> None:
+        """The voice stopped: go away with it."""
+        if self.holding:
+            self.holding = False
+            self.until = min(self.until, time.time() + 0.3)
 
     def step(self, anchor: QRectF) -> bool:
         """Move with the notch (or bar); returns True while it is animating."""
@@ -382,7 +392,8 @@ class Banner(QWidget):
                                                      self.width() - 90)
         p.drawText(QRectF(30, 10, self.width() - 90, 20), Qt.AlignLeft | Qt.AlignVCenter, head)
         p.setPen(QColor(255, 255, 255, 90))
-        p.drawText(QRectF(0, 10, self.width() - 18, 20), Qt.AlignRight | Qt.AlignVCenter, "done")
+        p.drawText(QRectF(0, 10, self.width() - 18, 20), Qt.AlignRight | Qt.AlignVCenter,
+                   "speaking" if self.holding else "done")
         p.setFont(self.f_text)
         p.setPen(QColor(255, 255, 255, 228))
         fm = QFontMetrics(self.f_text)
@@ -459,6 +470,7 @@ class VoiceWidget(QWidget):
         self.notch = False
         self.banner = Banner()
         self._banner_seen: int | None = None
+        self._reading_shown: tuple | None = None
         self._banner_busy = False
         self._bar_pos: tuple[int, int] | None = None  # where the floating bar was before notch mode
         self._reveal = 1.0  # notch: 0 tucked under the top edge, 1 fully down (a spring: may overshoot)
@@ -660,6 +672,7 @@ class VoiceWidget(QWidget):
         if digest != self._shown_digest:
             self._shown_digest, self._painted_still = digest, False
         self.st = st or {}
+        self._read_along(self.st.get("reading"))
         banner = self.st.get("banner")
         if banner and banner["id"] != self._banner_seen:
             self._banner_seen = banner["id"]
@@ -681,6 +694,25 @@ class VoiceWidget(QWidget):
         if self.tray:
             self.tray.refresh()
         self._second_target = QColor(SECONDARY.get(phase, SECONDARY["idle"]))
+
+    def _read_along(self, reading: dict | None) -> None:
+        """Voice mode: the text being spoken, under the notch, from the sentence being read onwards."""
+        if not reading:
+            self.banner.release()
+            self.banner.dismissed = False
+            self._reading_shown = None
+            return
+        if self.banner.dismissed:
+            return
+        text = reading["text"]
+        caption = " ".join((self.st.get("caption") or "").split())
+        flat = " ".join(text.split())
+        at = flat.find(caption[:48]) if caption else -1
+        shown = flat[at:] if at > 0 else flat  # a teleprompter: what's left to hear, starting now
+        key = (reading.get("session"), shown)
+        if key != self._reading_shown:
+            self._reading_shown = key
+            self.banner.present({**reading, "text": shown}, int(self.pw), hold=True)
 
     def _tick(self) -> None:
         # Ease colour and mic level so transitions glide instead of jumping.
@@ -1060,7 +1092,7 @@ class VoiceWidget(QWidget):
             chips.append("Silent")
         elif st.get("hands_free"):
             chips.append("Auto")
-        if st.get("speed_x"):
+        if st.get("speed_x") and self.phase == "speaking":  # only while there's a voice to speed up
             chips.append(f"{float(st['speed_x']):g}×")
         fm_chip = QFontMetrics(self.f_notch_chip)
         right = NOTCH_W - NOTCH_EAR - 78
@@ -1093,6 +1125,8 @@ class VoiceWidget(QWidget):
             p.drawText(QPointF(tx + 10, 20), QFontMetrics(self.f_notch_sub).elidedText(
                 thread["title"], Qt.ElideRight, int(x + avail - tx - 10)))
         line = st.get("caption") or ""
+        if st.get("reading") and not self.banner.dismissed:
+            line = ""  # the text is in the banner below: the hint instead of the same sentence twice
         if not line and act:
             steps = act["steps"]
             line = f"{act.get('label') or 'Thinking'} · {steps} step{'s' if steps != 1 else ''}"

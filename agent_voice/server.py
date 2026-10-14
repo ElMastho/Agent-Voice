@@ -286,6 +286,7 @@ class Daemon:
         self._agents: dict[str, str] = {}
         self._agents_at = 0.0
         self.banner: dict | None = None  # chime/silent: the reply shown as a notification under the notch
+        self._reading = ""  # voice mode: what is being read out, shown under the notch to read along
         # Another app holds the mic (a call): chimes instead of the voice until it ends.
         self.in_call = ""
         self._call_override = False
@@ -525,6 +526,10 @@ class Daemon:
         if text.strip() or final:
             self._voice_session, self._voice_source = session, source  # whose voice this is, for the widget
             self._wake_cancel.set()  # never let the wake word hear our own voice
+        if text.strip():
+            # Read along: a new speech replaces the text, one queued behind the current one adds to it.
+            busy = self.speaker.busy and session == self._voice_session
+            self._reading = f"{self._reading}\n\n{text.strip()}" if busy and self._reading else text.strip()
         n = self.speaker.speak(text, lang, voice, pitch=self._pitch(session)) if text.strip() else 0
         log.info("speak source=%s sentences=%d final=%s", source, n, final)
         if final and self.config["auto_listen"].get("enabled") and self.transcriber is not None:
@@ -565,6 +570,15 @@ class Daemon:
             pyperclip.copy(text)
         return bool(text)
 
+    def _reading_status(self) -> dict | None:
+        """Voice mode: the text being read out, for the widget to show while (and only while) it plays."""
+        if not (self.speaker.busy and self._reading and self.config.get("read_along", True)) or self.quiet:
+            return None
+        session = self._voice_session
+        title = self._title(session, self._voice_source)
+        return {"text": textclean.clean(self._reading)[:1500], "title": title,
+                "color": thread_color(session or title), "session": session}
+
     def _show_banner(self, text: str, session: str, source: str) -> None:
         """Chime mode: what would have been said, as a notification (summary or full text, as set)."""
         title = self._title(session, source)
@@ -598,6 +612,7 @@ class Daemon:
         self.speaker.stop()
         self._wake_cancel.set()
         self._voice_session, self._voice_source = session, turn["source"]
+        self._reading = self._turn_text(session)
         self.speaker.speak(self._turn_text(session), turn["lang"], turn["voice"], pitch=self._pitch(session))
 
     def stop(self) -> None:
@@ -1122,6 +1137,7 @@ class Daemon:
             "history": self.history,
             "agents": self.agent_states(),
             "activity": self._activity_status(),
+            "reading": self._reading_status(),
             "output": self.output,
             "in_call": self.in_call,
             "banner": {**self.banner, "age": round(time.time() - self.banner["at"], 1)}

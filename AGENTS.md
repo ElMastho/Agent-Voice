@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guidance for AI coding agents (and humans) working on **agent-voice**: local text-to-speech and dictation for AI coding agents, with a glass status widget. Read this before changing code.
+Guidance for AI coding agents (and humans) working on **agent-voice**: local text-to-speech and dictation for AI coding agents, with a notch-style status widget. Read this before changing code.
 
 ## What this project is
 
@@ -10,7 +10,7 @@ A Windows-first Python app with three cooperating processes:
 |---|---|---|
 | **Daemon** | `agent-voice serve` → `agent_voice/server.py` | Owns the models, audio, global hotkeys and a local HTTP API on `127.0.0.1:59125` |
 | **Hook** (short-lived, per event) | `agent-voice hook <agent>` → `agent_voice/hooks.py` | Called by Claude Code / Codex / Gemini CLI / Cursor; extracts the reply text and POSTs it to the daemon |
-| **Widget + tray** | `agent-voice widget` → `agent_voice/widget.py` | PySide6 UI; polls `/status` every 120 ms and calls daemon endpoints |
+| **Widget + tray** | `agent-voice widget` → `agent_voice/widget.py` | PySide6 UI (the notch by default, or a floating bar); polls `/status` while animating, long-polls it at rest, and calls daemon endpoints |
 
 The daemon launches the widget on start (`config.widget.enabled`). A Windows Startup `.vbs` (`agent-voice autostart on`) launches the daemon at sign-in.
 
@@ -30,7 +30,7 @@ agent_voice/
   client.py     stdlib-only HTTP client used by hooks/CLI/widget; can start the daemon detached
   winfocus.py   Win32 foreground window get/restore (ctypes)
   calls.py      is another app on the mic (a call)? read from Windows' privacy records
-  widget.py     glass widget, tray icon, animations
+  widget.py     notch / floating bar, banner (read along, chimes), tray icon, animations
 scripts/render_docs.py   regenerates docs/images/* from the real widget code
 tests/test_core.py       pytest suite (no audio/GUI needed)
 ```

@@ -289,8 +289,21 @@ def antigravity(remove: bool = False) -> str:
     return "; ".join(_mcp_json(p, "antigravity", remove) for p in _antigravity_configs())
 
 
+def _claude_desktop_dir() -> Path:
+    """Claude Desktop's settings folder. The Microsoft Store / MSIX install keeps it in its package's
+    LocalCache, where only the app itself sees it at %APPDATA%\\Claude."""
+    plain = _app_data() / "Claude"
+    if sys.platform == "win32" and not plain.is_dir():
+        local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        for package in sorted(local.glob("Packages/Claude_*")):
+            packaged = package / "LocalCache" / "Roaming" / "Claude"
+            if packaged.is_dir():
+                return packaged
+    return plain
+
+
 def claude_desktop(remove: bool = False) -> str:
-    return _mcp_json(_app_data() / "Claude" / "claude_desktop_config.json", "claude-desktop", remove)
+    return _mcp_json(_claude_desktop_dir() / "claude_desktop_config.json", "claude-desktop", remove)
 
 
 def windsurf(remove: bool = False) -> str:
@@ -401,7 +414,7 @@ def _agent_dir(agent: str) -> Path:
                  Path.home() / ".config" / "google-chrome"]
         return next((p for p in found if p.is_dir()), found[0])
     if agent == "claude-desktop":
-        return _app_data() / "Claude"
+        return _claude_desktop_dir()
     if agent == "vscode":
         return _app_data() / "Code" / "User"
     return Path.home() / AGENT_DIRS[agent]
@@ -419,7 +432,7 @@ def _config_file(agent: str) -> Path:
         return _antigravity_configs()[0]
     return {"claude": home / ".claude" / "settings.json", "gemini": home / ".gemini" / "settings.json",
             "cursor": home / ".cursor" / "hooks.json", "windsurf": home / ".codeium" / "windsurf" / "mcp_config.json",
-            "claude-desktop": _app_data() / "Claude" / "claude_desktop_config.json",
+            "claude-desktop": _claude_desktop_dir() / "claude_desktop_config.json",
             "vscode": _app_data() / "Code" / "User" / "mcp.json"}[agent]
 
 

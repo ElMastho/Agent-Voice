@@ -732,7 +732,8 @@ class Daemon:
             return
         said = f"While you were away: {'; '.join(parts)}."
         log.info("catch-up: %s", said)
-        self._show_banner("\n".join([said, *lines[-3:]]), "", "", kind="catchup", tag="while you were away")
+        # The banner's header already says "While you were away": the body goes straight to the news.
+        self._show_banner(" ".join([f"{'; '.join(parts)}.", *lines[-3:]]), "", "", kind="catchup")
         if not self.quiet:
             self._wake_cancel.set()
             self.speaker.speak(said, "en")

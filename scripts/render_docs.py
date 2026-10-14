@@ -157,12 +157,21 @@ def notch_shot(st: dict, expanded: bool = False, hover: bool = False, seconds: f
 
 
 THREADS = [
-    {"session": "a", "title": "Notch redesign", "color": "#F59E0B", "state": "working", "ago": 20,
+    {"session": "a", "title": "Notch redesign", "color": "#F59E0B", "state": "working", "ago": 20, "context": 42,
      "reply": "I moved the banner under the notch and all the tests pass."},
-    {"session": "b", "title": "API refactor", "color": "#34D399", "state": "", "ago": 420,
-     "reply": "The new endpoint is live; the client needs a version bump."},
+    {"session": "c", "title": "Codex", "color": "#60A5FA", "state": "permission", "ago": 35,
+     "reply": "I'll run the migration once you approve it."},
+    {"session": "b", "title": "API refactor", "color": "#34D399", "state": "", "ago": 140,
+     "result": {"files": 3, "tests": "passed"}, "reply": "The new endpoint is live; the client needs a version bump."},
 ]
-AGENTS = {"claude": "on", "codex": "on", "gemini": "off", "cursor": "off", "cline": "missing"}
+NEEDS = [
+    {"kind": "permission", "id": 7, "session": "c", "title": "Codex", "color": "#60A5FA",
+     "text": "run npm run migrate", "at": 0},
+    {"kind": "input", "session": "g", "title": "Gemini", "color": "#A78BFA", "text": "Apply these edits? (y/n)", "at": 0},
+]
+LIMITS = {"claude": {"five_hour": {"pct": 63, "resets": 1792072800}, "seven_day": {"pct": 41, "resets": 1792500000}}}
+AGENTS = {"claude": "on", "codex": "on", "gemini": "on", "cursor": "off", "cline": "missing", "antigravity": "on",
+          "claude-desktop": "on", "windsurf": "missing", "vscode": "off", "browser": "on"}
 HISTORY = [
     {"text": "Yes, go ahead and deploy.", "lang": "en"},
     {"text": "Can you add tests for the server?", "lang": "en"},
@@ -222,7 +231,10 @@ def render_states() -> None:
 
 def render_panel() -> None:
     st = status("idle", last_heard=HISTORY[0]["text"], last_heard_lang="en", history=HISTORY, agents=AGENTS,
-                threads=THREADS, wake=True, approvals=True, summary=True, last_reply={"session": "a"})
+                threads=THREADS, needs=NEEDS, limits=LIMITS, wake=True, approvals=True, summary=True,
+                last_reply={"session": "a"},
+                activity={"session": "a", "title": "Notch redesign", "color": "#F59E0B", "label": "Run pytest",
+                          "steps": 9, "elapsed": 74, "others": 1})
     w, shot, k = notch_shot(st, expanded=True, hover=True)
     w.hover, w.hover_t["replay"] = "replay", 1.0
     w.update()
@@ -282,6 +294,48 @@ def render_you_said() -> None:
     img = drop(backdrop(w_, h_, seed=17), shot, (w_ - shot.width) // 2, 0)
     img = drop(img, banner, (w_ - banner.width) // 2, shot.height + int(8 * k))
     img.convert("RGB").save(OUT / "you-said.jpg", quality=90, optimize=True)
+
+
+def render_companion() -> None:
+    """Every agent at a glance: a dot per conversation, who needs you, and what the last turn changed."""
+    rows = []
+    working = status("idle", threads=THREADS, needs=NEEDS,
+                     activity={"session": "a", "title": "Notch redesign", "color": "#F59E0B", "label": "Run pytest",
+                               "steps": 9, "elapsed": 74, "others": 1, "context": 86})
+    done = status("idle", threads=[{**t, "state": ""} for t in THREADS],
+                  result={"session": "b", "title": "API refactor", "color": "#34D399", "files": 3, "tests": "passed",
+                          "at": 0})
+    k = 1.0
+    for st in (working, done):
+        _, shot, k = notch_shot(st)
+        rows.append(shot)
+    catch = W.Banner()
+    catch.present({"id": 3, "kind": "catchup", "tag": "", "title": "", "session": "",
+                   "text": "Notch redesign and API refactor finished; Codex needs you. "
+                           "API refactor: the new endpoint is live, the client needs a version bump."}, int(W.NOTCH_W - 2 * W.NOTCH_EAR))
+    catch.t = 1.0
+    needs = W.Banner()
+    needs.present({"id": 4, "kind": "needs", "tag": "needs you", "title": "Aider", "color": "#22D3EE", "session": "w",
+                   "text": "Apply these edits to server.py? (y/n)"}, int(W.NOTCH_W - 2 * W.NOTCH_EAR))
+    needs.t = 1.0
+    banners = [to_pil(catch.grab().toImage()), to_pil(needs.grab().toImage())]
+    # Each notch hangs from its own slice of screen; the two banners drop under the second one.
+    gap = int(16 * k)
+    w_ = rows[0].width + int(120 * k)
+    tiles = [drop(backdrop(w_, rows[0].height + int(24 * k), seed=23), rows[0], (w_ - rows[0].width) // 2, 0)]
+    h_ = rows[1].height + sum(b.height for b in banners) + gap * 3
+    img = drop(backdrop(w_, h_, seed=24), rows[1], (w_ - rows[1].width) // 2, 0)
+    y = rows[1].height + gap
+    for banner in banners:
+        img = drop(img, banner, (w_ - banner.width) // 2, y)
+        y += banner.height + gap
+    tiles.append(img)
+    out = Image.new("RGB", (w_, sum(t.height for t in tiles) + gap), (13, 17, 23))
+    y = 0
+    for tile in tiles:
+        out.paste(tile.convert("RGB"), (0, y), rounded_mask(tile.size, int(10 * k)))
+        y += tile.height + gap
+    out.save(OUT / "companion.jpg", quality=90, optimize=True)
 
 
 def render_bar() -> None:
@@ -371,6 +425,7 @@ def main() -> None:
     render_banner()
     render_read_along()
     render_you_said()
+    render_companion()
     render_bar()
     render_gif()
     for f in sorted(OUT.iterdir()):

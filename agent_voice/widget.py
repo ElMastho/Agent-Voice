@@ -34,6 +34,15 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QToolTip, QW
 from agent_voice import client
 from agent_voice.config import HOME, load_config
 
+
+def result_label(result: dict) -> str:
+    """{"files": 3, "tests": "passed"} -> '3 files changed · tests passed' (as the daemon writes it)."""
+    files = int(result.get("files") or 0)
+    parts = [f"{files} file{'s' if files != 1 else ''} changed"] if files else []
+    if result.get("tests"):
+        parts.append(f"tests {result['tests']}")
+    return " · ".join(parts)
+
 WIDTH = 320
 BAR_H = 64
 SPEEDS = (1.0, 1.25, 1.5, 1.75, 2.0)
@@ -42,9 +51,17 @@ HIST_ROWS, THREAD_ROWS, ROW_H = 5, 4, 22
 THREAD_H = 36  # a thread row: its title and state, then the start of its last reply
 # Tiles that only matter when replies are spoken: hidden in chime mode.
 VOICE_ONLY = {"read", "wake", "replay"}
-# Agents the panel can connect (install.AGENT_DIRS has the same keys).
-AGENT_LABELS = (("claude", "Claude"), ("codex", "Codex"), ("gemini", "Gemini"), ("cursor", "Cursor"), ("cline", "Cline"))
-AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI", "cursor": "Cursor", "cline": "Cline"}
+# Agents the panel can connect (install.INSTALLERS has the same keys).
+AGENT_LABELS = (("claude", "Claude"), ("codex", "Codex"), ("gemini", "Gemini"), ("cursor", "Cursor"), ("cline", "Cline"),
+                ("antigravity", "Antigravity"), ("claude-desktop", "Claude app"), ("windsurf", "Windsurf"),
+                ("vscode", "VS Code"), ("browser", "Browser"))
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI", "cursor": "Cursor", "cline": "Cline",
+               "antigravity": "Antigravity", "claude-desktop": "the Claude desktop app", "windsurf": "Windsurf",
+               "vscode": "VS Code (Copilot agent)", "browser": "ChatGPT, Claude and Gemini in your browser"}
+AGENTS_PER_ROW = 6
+NEED_ROWS, NEED_H = 3, 28  # "needs you" rows at the top of the panel
+# Banner kinds: the accent around it and its header.
+BANNER_KINDS = {"you": ("#10E0A0", ""), "needs": ("#FBBF24", ""), "catchup": ("#8B7CFF", "While you were away")}
 GUIDE_URL = "https://github.com/ElMastho/agent-voice/blob/main/docs/guide.md"
 COMPACT = 56  # compact mode: just the orb
 # Notch mode: docked to the top centre of the screen like a camera notch, tucked away when idle.
@@ -378,29 +395,34 @@ class Banner(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
-        yours = self.item.get("kind") == "you"
+        kind = self.item.get("kind")
+        yours = kind == "you"
+        accent, fixed_title = BANNER_KINDS.get(kind, ("", ""))
         body = QRectF(1, 1, self.width() - 2, self.height() - 2)
-        if yours:
-            # Your words get the listening colour around them: never mistaken for the agent's.
-            p.setPen(QPen(QColor(16, 224, 160, 210 if self._hover else 170), 1.6))
+        if accent:
+            # Your words (green), an agent waiting on you (amber), the catch-up (violet): framed in colour,
+            # never mistaken for a reply.
+            ring = QColor(accent)
+            ring.setAlpha(210 if self._hover else 170)
+            p.setPen(QPen(ring, 1.6))
         else:
             p.setPen(QPen(QColor(255, 255, 255, 26 + (14 if self._hover else 0)), 1))
         p.setBrush(QColor(0, 0, 0, 245))
         p.drawRoundedRect(body, 18, 18)
-        color = QColor("#10E0A0" if yours else self.item.get("color") or "#94A3B8")
+        color = QColor(accent if yours or kind == "catchup" else self.item.get("color") or "#94A3B8")
         p.setPen(Qt.NoPen)
         p.setBrush(color)
         p.drawEllipse(QPointF(21, 20), 3, 3)
         p.setFont(self.f_head)
         p.setPen(QColor(255, 255, 255, 150))
-        title = self.item.get("title") or ""
+        title = fixed_title or self.item.get("title") or ""
         if yours:
             title = f"You  →  {title}" if title else "You said"
         head = QFontMetrics(self.f_head).elidedText(title or "Reply", Qt.ElideRight, self.width() - 90)
         p.drawText(QRectF(30, 10, self.width() - 90, 20), Qt.AlignLeft | Qt.AlignVCenter, head)
         p.setPen(QColor(255, 255, 255, 90))
         p.drawText(QRectF(0, 10, self.width() - 18, 20), Qt.AlignRight | Qt.AlignVCenter,
-                   "speaking" if self.holding else self.item.get("tag") or "done")
+                   "speaking" if self.holding else self.item.get("tag") or ("" if kind in BANNER_KINDS else "done"))
         p.setFont(self.f_text)
         p.setPen(QColor(255, 255, 255, 228))
         fm = QFontMetrics(self.f_text)
@@ -495,6 +517,8 @@ class VoiceWidget(QWidget):
         self._dragged = False
         self._opacity = 1.0
         self._hovering = False
+        self._drop: dict | None = None  # files being dragged over: where they'd go
+        self.setAcceptDrops(True)
 
         self.f_title = QFont("Segoe UI Variable Display", 10)
         self.f_title.setWeight(QFont.DemiBold)
@@ -631,7 +655,8 @@ class VoiceWidget(QWidget):
     def _place_notch(self) -> None:
         """Top centre of the primary screen, sliding down when wanted and back up when not."""
         now = time.time()
-        busy = self.phase in ("speaking", "waiting", "recording", "transcribing") or bool(self._activity())
+        busy = (self.phase in ("speaking", "waiting", "recording", "transcribing") or bool(self._activity())
+                or bool(self._drop))
         if busy or self._hovering or self.expanded or self.pressed or self._question():
             self._reveal_until = now + NOTCH_HIDE_DELAY
         # A lightly damped spring: it drops down, overshoots a hair in width, and settles.
@@ -772,6 +797,8 @@ class VoiceWidget(QWidget):
         """Nothing is animating or easing: the last frame drawn is still right."""
         if self.phase not in ("idle", "offline", "muted") or self._hovering or self.pressed or self._dragged:
             return False
+        if self._drop:
+            return False
         if self._banner_busy:
             return False
         if self._question() or self.flash > 0 or self.title_t < 1 or time.time() - self._copied_at < 1.3:
@@ -829,6 +856,32 @@ class VoiceWidget(QWidget):
             tiles = [t for t in tiles if t[0] not in VOICE_ONLY | {"mute"}]
         return tiles
 
+    def _needs(self) -> list[dict]:
+        """Everything waiting on you, minus the question shown as a card right now."""
+        q = self._question()
+        items = list(self.st.get("needs") or [])
+        if q and q.get("permission"):
+            items = [n for n in items if n.get("id") != q["permission"]]
+        elif q:
+            items = [n for n in items if n["kind"] != "question"]
+        return items
+
+    def _pills(self) -> list[dict]:
+        """One dot per conversation that's live (working, waiting on you, talking) or just finished."""
+        live = [t for t in self.st.get("threads") or [] if t.get("state") or int(t.get("ago", 9999)) < 300]
+        return live[:4] if len(live) >= 2 else []
+
+    def _result(self) -> dict | None:
+        """The turn that just ended and what it changed, while nothing else needs the second line."""
+        if self.phase != "idle" or self._question() or self._activity():
+            return None
+        return self.st.get("result") or None
+
+    def _context_warning(self) -> int | None:
+        act = self._activity() or {}
+        pct = act.get("context")
+        return int(pct) if isinstance(pct, (int, float)) and pct >= 80 else None
+
     def _output(self) -> str:
         st = self.st
         return st.get("output") or ("silent" if st.get("muted") else "chime" if st.get("chime") else "voice")
@@ -849,7 +902,15 @@ class VoiceWidget(QWidget):
         if "primary" in r:
             out["primary"] = QRectF(NOTCH_W - NOTCH_EAR - 68, (NOTCH_H - 28) / 2, 28, 28)
         out["chevron"] = QRectF(NOTCH_W - NOTCH_EAR - 36, (NOTCH_H - 26) / 2, 26, 26)
+        out.update(self._pill_rects())
+        if self._result():
+            out["result"] = QRectF(NOTCH_EAR + 38, 23, NOTCH_W / 2 - 40, 15)
         return out
+
+    def _pill_rects(self) -> dict[str, QRectF]:
+        right = NOTCH_W - NOTCH_EAR - 82
+        pills = self._pills()
+        return {f"pill:{i}": QRectF(right - (len(pills) - i) * 12, NOTCH_H / 2 - 7, 12, 14) for i in range(len(pills))}
 
     def _bar_rects(self) -> dict[str, QRectF]:
         r: dict[str, QRectF] = {}
@@ -867,9 +928,16 @@ class VoiceWidget(QWidget):
             pad, gap, th = 12, 8, 58
             cols = self._cols()
             tw = (self.pw - 2 * pad - (cols - 1) * gap) / cols
+            for i, n in enumerate(self._needs()[:NEED_ROWS]):
+                row = self._need_row(i)
+                if n["kind"] == "permission":
+                    r[f"deny:{i}"] = QRectF(row.right() - 46, row.y() + 4, 42, row.height() - 8)
+                    r[f"allow:{i}"] = QRectF(row.right() - 94, row.y() + 4, 44, row.height() - 8)
+                r[f"need:{i}"] = row
+            top = BAR_H + 10 + self._needs_h()
             for i, tile in enumerate(self._tiles()):
                 row, col = divmod(i, cols)
-                r[tile[0]] = QRectF(pad + col * (tw + gap), BAR_H + 10 + row * (th + gap), tw, th)
+                r[tile[0]] = QRectF(pad + col * (tw + gap), top + row * (th + gap), tw, th)
             if self._show_speed():
                 track = self._speed_track()
                 seg = track.width() / len(SPEEDS)
@@ -890,12 +958,19 @@ class VoiceWidget(QWidget):
             r.update(self._agent_rects())
         return r
 
+    def _needs_h(self) -> float:
+        n = min(NEED_ROWS, len(self._needs()))
+        return 18 + n * NEED_H + 8 if n else 0
+
+    def _need_row(self, i: int) -> QRectF:
+        return QRectF(10, BAR_H + 10 + 18 + i * NEED_H, self.pw - 20, NEED_H - 4)
+
     def _show_speed(self) -> bool:
         return self._output() == "voice"  # chimes and silence have no voice to speed up
 
     def _speed_y(self) -> float:
         rows = -(-len(self._tiles()) // self._cols())
-        return BAR_H + 10 + rows * 58 + (rows - 1) * 8 + 6
+        return BAR_H + 10 + self._needs_h() + rows * 58 + (rows - 1) * 8 + 6
 
     def _mode_y(self) -> float:
         return self._speed_y() + (34 if self._show_speed() else 0)
@@ -909,9 +984,10 @@ class VoiceWidget(QWidget):
     def _agent_rects(self) -> dict[str, QRectF]:
         keys = [f"agent:{a}" for a, _ in AGENT_LABELS] + ["guide"]
         gap = 6
-        w = (self.pw - 20 - (len(keys) - 1) * gap) / len(keys)
+        w = (self.pw - 20 - (AGENTS_PER_ROW - 1) * gap) / AGENTS_PER_ROW
         y = self._agents_y() + 18
-        return {k: QRectF(10 + i * (w + gap), y, w, 24) for i, k in enumerate(keys)}
+        return {k: QRectF(10 + (i % AGENTS_PER_ROW) * (w + gap), y + (i // AGENTS_PER_ROW) * 30, w, 24)
+                for i, k in enumerate(keys)}
 
     def _threads(self) -> list[dict]:
         return list(self.st.get("threads") or [])[:THREAD_ROWS]
@@ -925,7 +1001,8 @@ class VoiceWidget(QWidget):
 
     def _expanded_h(self) -> int:
         """The open panel fits what it shows: no empty rows."""
-        return int(self._agents_y() + 18 + 24 + 12)
+        rows = -(-(len(AGENT_LABELS) + 1) // AGENTS_PER_ROW)
+        return int(self._agents_y() + 18 + rows * 30 - 6 + 12)
 
     def _question_layout(self) -> tuple[QRectF, QRectF, list[QRectF], float]:
         """(header line, question text, option rows, panel height) for the pending question."""
@@ -1085,6 +1162,12 @@ class VoiceWidget(QWidget):
             chips.append("Approve?")
         elif self._question():
             chips.append("Choose")
+        waiting = len(self._needs())
+        if waiting:
+            chips.append(f"{waiting} need{'s' if waiting == 1 else ''} you")
+        ctx = self._context_warning()
+        if ctx:
+            chips.append(f"Context {ctx}%")
         if st.get("queued"):
             chips.append(f"+{st['queued']} waiting")
         if st.get("update"):
@@ -1093,8 +1176,9 @@ class VoiceWidget(QWidget):
         if lang:
             chips.append(lang.upper())
         act = self._activity()
+        pills = self._pills()
         if act:
-            if act.get("others"):
+            if act.get("others") and not pills:  # the pills already show who else is working
                 chips.append(f"+{act['others']} working")
             chips.append(f"{act['elapsed'] // 60}:{act['elapsed'] % 60:02d}")
         if st.get("in_call"):
@@ -1109,6 +1193,9 @@ class VoiceWidget(QWidget):
             chips.append(f"{float(st['speed_x']):g}×")
         fm_chip = QFontMetrics(self.f_notch_chip)
         right = NOTCH_W - NOTCH_EAR - 78
+        if pills:
+            self._paint_pills(p, pills)
+            right -= len(pills) * 12 + 8
         for text in chips:
             cw = fm_chip.horizontalAdvance(text) + 12
             right -= cw
@@ -1128,7 +1215,7 @@ class VoiceWidget(QWidget):
         p.setPen(QColor(255, 255, 255, 240))
         p.drawText(QPointF(x, 20), fm.elidedText(title, Qt.ElideRight, int(avail)))
         tx = x + min(fm.horizontalAdvance(title), avail) + 8
-        thread = st.get("thread") or act
+        thread = st.get("thread") or act or self._result()
         if thread and tx < x + avail - 30:
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(thread["color"]))
@@ -1140,6 +1227,13 @@ class VoiceWidget(QWidget):
         line = st.get("caption") or ""
         if st.get("reading") and not self.banner.dismissed:
             line = ""  # the text is in the banner below: the hint instead of the same sentence twice
+        if self._drop:
+            line = f"Drop to add to {self._drop['title']}"
+        result = self._result()
+        if not line and result:
+            line = f"Done · {result_label(result)}"
+            if self.hover == "result":
+                line += "  ·  open"
         if not line and act:
             steps = act["steps"]
             line = act.get("label") or "Thinking"
@@ -1160,6 +1254,21 @@ class VoiceWidget(QWidget):
         p.drawText(QRectF(x, 23, avail, 15), Qt.AlignLeft | Qt.AlignVCenter,
                    QFontMetrics(self.f_notch_sub).elidedText(line, Qt.ElideRight, int(avail)))
         self._paint_notch_buttons(p)
+
+    def _paint_pills(self, p: QPainter, pills: list[dict]) -> None:
+        """A dot per live conversation: filled while it works or talks, ringed in amber when it waits on you."""
+        for (key, rect), t in zip(self._pill_rects().items(), pills):
+            c = rect.center()
+            color = QColor(t["color"])
+            state = t.get("state", "")
+            ht = self.hover_t.get(key, 0.0)
+            p.setPen(Qt.NoPen)
+            if state in ("permission", "question", "input"):
+                p.setPen(QPen(QColor("#FBBF24"), 1.4))
+            if not state:
+                color.setAlpha(110)  # finished a moment ago
+            p.setBrush(color)
+            p.drawEllipse(c, 3.2 + ht, 3.2 + ht)
 
     def _paint_indicator(self, p: QPainter, c: QPointF) -> None:
         """Flat state mark: live bars for a voice, a spinning arc while transcribing, a dot otherwise."""
@@ -1279,6 +1388,7 @@ class VoiceWidget(QWidget):
             return
         rects = self._bar_rects()  # drawn in bar coordinates, also under the notch
         progress = self._panel_h() / max(1, self._expanded_h() - BAR_H)
+        self._paint_needs(p, rects)
         for i, (tid, icon, label, hk, active) in enumerate(self._tiles()):
             rect = rects.get(tid)
             if rect is None:
@@ -1335,6 +1445,54 @@ class VoiceWidget(QWidget):
         self._paint_history(p, progress)
         self._paint_agents(p, progress)
 
+    def _paint_needs(self, p: QPainter, rects: dict[str, QRectF]) -> None:
+        """Every agent waiting on you: approve or deny here, or open it."""
+        needs = self._needs()[:NEED_ROWS]
+        if not needs:
+            return
+        p.setFont(self.f_tile)
+        p.setPen(QColor("#FBBF24"))
+        p.drawText(QRectF(14, BAR_H + 10, self.pw - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, "Needs you")
+        p.setFont(self.f_hint)
+        p.setPen(QColor(226, 232, 240, 105))
+        more = len(self._needs()) - len(needs)
+        p.drawText(QRectF(14, BAR_H + 10, self.pw - 28, 16), Qt.AlignRight | Qt.AlignVCenter,
+                   f"+{more} more" if more > 0 else "or say “approve Codex”")
+        fm = QFontMetrics(self.f_sub)
+        for i, n in enumerate(needs):
+            row = self._need_row(i)
+            ht = self.hover_t.get(f"need:{i}", 0.0)
+            p.setPen(QPen(QColor(251, 191, 36, int(60 + 60 * ht)), 1))
+            p.setBrush(QColor(251, 191, 36, int(14 + 14 * ht)))
+            p.drawRoundedRect(row, 8, 8)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(n["color"]))
+            p.drawEllipse(QPointF(row.x() + 11, row.center().y()), 3.5, 3.5)
+            buttons = n["kind"] == "permission"
+            text_rect = row.adjusted(22, 0, -(100 if buttons else 46), 0)
+            p.setFont(self.f_sub)
+            p.setPen(QColor(255, 255, 255, 230))
+            label = f"{n['title']}: {n['text'][:1].upper()}{n['text'][1:]}" + ("?" if buttons else "")
+            p.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, fm.elidedText(label, Qt.ElideRight, int(text_rect.width())))
+            if buttons:
+                for key, text, fill in ((f"allow:{i}", "Allow", "#34D399"), (f"deny:{i}", "Deny", "#F87171")):
+                    rect = rects.get(key)
+                    if rect is None:
+                        continue
+                    kt = self.hover_t.get(key, 0.0)
+                    c = QColor(fill)
+                    c.setAlpha(int(60 + 90 * kt))
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(c)
+                    p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+                    p.setFont(self.f_chip)
+                    p.setPen(QColor(255, 255, 255, 240))
+                    p.drawText(rect, Qt.AlignCenter, text)
+            else:
+                p.setFont(self.f_hint)
+                p.setPen(QColor(255, 255, 255, int(150 + 90 * ht)))
+                p.drawText(row.adjusted(0, 0, -10, 0), Qt.AlignRight | Qt.AlignVCenter, "Open")
+
     def _agent_state(self, agent: str) -> str:
         """'on' (hooks installed), 'off' (agent found, not connected) or 'missing' (not on this PC)."""
         return (self.st.get("agents") or {}).get(agent, "missing")
@@ -1367,7 +1525,7 @@ class VoiceWidget(QWidget):
             label = dict(AGENT_LABELS)[key.split(":", 1)[1]]
             fm = QFontMetrics(self.f_hint)
             tw = fm.horizontalAdvance(label)
-            x = rect.center().x() - (tw + 9) / 2
+            x = max(rect.x() + 6, rect.center().x() - (tw + 9) / 2)
             if state == "on":
                 p.setPen(Qt.NoPen)
                 p.setBrush(QColor("#34D399"))
@@ -1378,8 +1536,9 @@ class VoiceWidget(QWidget):
                 p.drawEllipse(QPointF(x + 2.5, rect.center().y()), 2.5, 2.5)
             p.setFont(self.f_hint)
             p.setPen(QColor(255, 255, 255, {"on": 225, "off": 170}.get(state, 70)))
-            p.drawText(QRectF(x + 9 if state != "missing" else x + 4.5, rect.y(), tw + 2, rect.height()),
-                       Qt.AlignLeft | Qt.AlignVCenter, label)
+            room = rect.right() - (x + 9) - 4
+            p.drawText(QRectF(x + 9 if state != "missing" else x + 4.5, rect.y(), min(tw + 2, room + 6), rect.height()),
+                       Qt.AlignLeft | Qt.AlignVCenter, fm.elidedText(label, Qt.ElideRight, int(room + 6)))
         p.restore()
 
     def _paint_threads(self, p: QPainter, progress: float) -> None:
@@ -1398,10 +1557,12 @@ class VoiceWidget(QWidget):
         p.setFont(self.f_hint)
         p.setPen(QColor(226, 232, 240, 105))
         queued = int(self.st.get("queued") or 0)
+        limits = self._limits_label()
         p.drawText(QRectF(14, self._threads_y(), self.pw - 28, 16), Qt.AlignRight | Qt.AlignVCenter,
-                   f"{queued} waiting to speak" if queued else "click to open")
+                   f"{queued} waiting to speak" if queued else limits or "click to open")
         labels = {"speaking": "speaking", "listening": "listening", "queued": "next up",
-                  "question": "asks you", "permission": "needs approval", "working": "working"}
+                  "question": "asks you", "permission": "needs approval", "working": "working",
+                  "input": "waiting for you"}
         fm = QFontMetrics(self.f_sub)
         for i, t in enumerate(threads):
             row = self._thread_row(i)
@@ -1429,6 +1590,11 @@ class VoiceWidget(QWidget):
             p.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter,
                        fm.elidedText(t["title"], Qt.ElideRight, int(text_rect.width())))
             reply = t.get("reply") or ""
+            extras = [result_label(t["result"])] if t.get("result") else []
+            if isinstance(t.get("context"), (int, float)):
+                extras.append(f"context {int(t['context'])}%")
+            if extras:
+                reply = " · ".join(extras) + ("  —  " + reply if reply else "")
             if reply:
                 # The conversation's last reply, with replay and copy at hand.
                 p.setFont(self.f_hint)
@@ -1444,6 +1610,19 @@ class VoiceWidget(QWidget):
                     p.setPen(QColor(255, 255, 255, 235 if done else int(110 + 140 * kt)))
                     p.drawText(rect, Qt.AlignCenter, ICONS["check"] if done else icon)
         p.restore()
+
+    def _limits_label(self) -> str:
+        """Claude Code's rate limits, when its status line reports them: '5h 63% · resets 15:20'."""
+        windows = (self.st.get("limits") or {}).get("claude") or {}
+        parts = []
+        for key, name in (("five_hour", "5h"), ("seven_day", "week")):
+            w = windows.get(key)
+            if w:
+                from datetime import datetime
+
+                reset = datetime.fromtimestamp(w["resets"]).strftime("%H:%M") if w.get("resets") else ""
+                parts.append(f"{name} {w['pct']}%" + (f" · resets {reset}" if reset and key == "five_hour" else ""))
+        return " · ".join(parts)
 
     def _paint_history(self, p: QPainter, progress: float) -> None:
         """The last few things you said, newest first; click one to copy it."""
@@ -1567,6 +1746,29 @@ class VoiceWidget(QWidget):
             return "Collapse" if self.expanded else "All actions"
         if key == "guide":
             return "Setup guide: every agent, step by step"
+        if key and key.startswith("pill:"):
+            pills = self._pills()
+            i = int(key.split(":", 1)[1])
+            if i < len(pills):
+                t = pills[i]
+                state = {"permission": "needs approval", "question": "asks you", "input": "waiting for you",
+                         "working": "working", "speaking": "speaking", "listening": "listening",
+                         "queued": "next up"}.get(t.get("state", ""), "done")
+                return f"{t['title']}: {state} · click to open"
+            return ""
+        if key == "result":
+            return "Open the conversation to see the changes"
+        if key and (key.startswith("need:") or key.startswith("allow:") or key.startswith("deny:")):
+            needs = self._needs()
+            i = int(key.split(":", 1)[1])
+            if i >= len(needs):
+                return ""
+            n = needs[i]
+            if key.startswith("allow:"):
+                return f"Let {n['title']} {n['text']}"
+            if key.startswith("deny:"):
+                return f"Don't let {n['title']} {n['text']}"
+            return f"{n['title']}: {n['text']}\n\nClick to open it"
         if key and key.startswith("agent:"):
             agent = key.split(":", 1)[1]
             name = AGENT_NAMES.get(agent, agent)
@@ -1646,6 +1848,23 @@ class VoiceWidget(QWidget):
             key = prim[0] if prim else ""
         if key == "chevron":
             self.toggle_expanded()
+        elif key.startswith("pill:"):
+            pills = self._pills()
+            i = int(key.split(":", 1)[1])
+            if i < len(pills):
+                _post("/open_thread", {"session": pills[i]["session"]})
+        elif key == "result":
+            _post("/open_thread", {"session": (self.st.get("result") or {}).get("session", "")})
+        elif key.startswith("allow:") or key.startswith("deny:") or key.startswith("need:"):
+            needs = self._needs()
+            i = int(key.split(":", 1)[1])
+            if i < len(needs):
+                n = needs[i]
+                if key.startswith("need:"):
+                    _post("/open_thread", {"session": n["session"]})
+                else:
+                    _post("/permission_answer", {"id": n["id"], "allow": key.startswith("allow:")})
+                    self.st["needs"] = [x for x in self.st.get("needs") or [] if x is not n]
         elif key == "start":
             threading.Thread(target=client.start_detached, daemon=True).start()
         elif key == "reply":
@@ -1717,6 +1936,51 @@ class VoiceWidget(QWidget):
             mode = key.split(":", 1)[1]
             self.st["output"] = mode  # move the indicator now
             _post("/output", {"mode": mode})
+
+    # -- drag and drop: files, screenshots or text dropped on the notch go to a conversation -----------------
+    def _drop_target(self, pos: QPointF) -> dict:
+        """The thread row under the cursor (panel open), else the conversation that spoke last."""
+        hit = self._hit(pos) or ""
+        threads = self._threads()
+        if hit.startswith("thr") and ":" in hit:
+            i = int(hit.split(":", 1)[1])
+            if i < len(threads):
+                return {"session": threads[i]["session"], "title": threads[i]["title"]}
+        last = (self.st.get("last_reply") or {}).get("session", "")
+        title = next((t["title"] for t in threads if t["session"] == last), threads[0]["title"] if threads else "")
+        return {"session": last, "title": title or "the last conversation"}
+
+    def dragEnterEvent(self, e):
+        mime = e.mimeData()
+        if mime.hasUrls() or mime.hasImage() or mime.hasText():
+            e.acceptProposedAction()
+            self._drop = self._drop_target(e.position())
+            self._reveal_until = time.time() + NOTCH_HIDE_DELAY
+
+    def dragMoveEvent(self, e):
+        self._drop = self._drop_target(e.position())
+        e.acceptProposedAction()
+
+    def dragLeaveEvent(self, _e):
+        self._drop = None
+
+    def dropEvent(self, e):
+        target = self._drop or self._drop_target(e.position())
+        self._drop = None
+        mime = e.mimeData()
+        paths = [u.toLocalFile() for u in mime.urls() if u.isLocalFile()]
+        text = ""
+        if not paths and mime.hasImage():  # a screenshot dragged from a browser or a viewer: save it first
+            folder = HOME / "drops"
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / time.strftime("drop-%Y%m%d-%H%M%S.png")
+            if mime.imageData().save(str(path), "PNG"):
+                paths = [str(path)]
+        if not paths:
+            text = mime.text() if mime.hasText() else ""
+        if paths or text.strip():
+            e.acceptProposedAction()
+            _post("/attach", {"paths": paths, "text": text, "session": target["session"]})
 
     def toggle_visible(self) -> None:
         if self.isVisible():
@@ -1874,6 +2138,8 @@ class Tray(QSystemTrayIcon):
         add("Approve permissions by voice", lambda: _post("/approvals", {"mode": "toggle"}), online,
             bool(st.get("approvals", True)))
         add("Wake word (Hey Claude)", lambda: _post("/wake", {"mode": "toggle"}), online, bool(st.get("wake")))
+        add("Read ChatGPT / Copilot notifications", lambda: _post("/apps", {"mode": "toggle"}), online,
+            bool(st.get("desktop_apps")))
         speed_menu = m.addMenu("Voice speed")
         speed_menu.setStyleSheet(MENU_STYLE)
         speed_menu.setEnabled(online)

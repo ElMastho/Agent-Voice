@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, QUrl, QVariantAnimation, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, QTimer, QUrl, QVariantAnimation, Signal
 from PySide6.QtGui import (
     QDesktopServices,
     QAction,
@@ -37,18 +37,20 @@ from agent_voice.config import HOME, load_config
 WIDTH = 320
 BAR_H = 64
 SPEEDS = (1.0, 1.25, 1.5, 1.75, 2.0)
-TILE_ROWS = 3
-SPEED_Y = BAR_H + 10 + TILE_ROWS * 58 + (TILE_ROWS - 1) * 8 + 6  # top of the speed row
 MODES = (("voice", "Voice"), ("chime", "Chimes"))
-MODE_Y = SPEED_Y + 26 + 8  # top of the mode row
-THREADS_Y = MODE_Y + 26 + 10  # top of the "Threads" list (then "Recent" under it)
 HIST_ROWS, THREAD_ROWS, ROW_H = 5, 4, 22
-EXPANDED_H = THREADS_Y + 2 * (16 + 2 * ROW_H + 8)  # a typical panel; the real one fits its content
+# Tiles that only matter when replies are spoken: hidden in chime mode.
+VOICE_ONLY = {"read", "wake", "approve", "summary", "replay"}
+# Agents the panel can connect (install.AGENT_DIRS has the same keys).
+AGENT_LABELS = (("claude", "Claude"), ("codex", "Codex"), ("gemini", "Gemini"), ("cursor", "Cursor"), ("cline", "Cline"))
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI", "cursor": "Cursor", "cline": "Cline"}
+GUIDE_URL = "https://github.com/ElMastho/agent-voice/blob/main/docs/guide.md"
 COMPACT = 56  # compact mode: just the orb
 # Notch mode: docked to the top centre of the screen like a camera notch, tucked away when idle.
 NOTCH_SCALE = 1.0
 NOTCH_W, NOTCH_H = 440, 44  # wide and short: one row of status, caption and chips
-NOTCH_RADIUS = 16
+NOTCH_RADIUS = 20
+NOTCH_EAR = 9  # concave fillets where the island meets the top edge, like a hardware notch
 NOTCH_PILL = 0.56  # tucked away, the notch is a pill this fraction of its full width
 NOTCH_PEEK = 3  # pixels left showing when tucked under the top edge: hover them to bring it down
 NOTCH_HIDE_DELAY = 3.0  # seconds it stays down after the mouse leaves or activity ends
@@ -77,6 +79,9 @@ ICONS = {
     "shield": "",
     "down": "",
     "up": "",
+    "replay": "",
+    "open": "",
+    "help": "",
 }
 
 # phase -> (accent colour, title, subtitle)
@@ -252,6 +257,163 @@ def _post(path: str, payload: dict | None = None) -> None:
 
 
 # -- the widget --------------------------------------------------------------------------
+class Banner(QWidget):
+    """Chime mode's notification: the reply drops out from under the notch, stays a few seconds, and
+    goes back up. Swipe it up to dismiss it; click it to open the conversation. Hovering keeps it."""
+
+    LINES = 4
+
+    def __init__(self):
+        super().__init__(
+            None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setMouseTracking(True)
+        self.item: dict | None = None
+        self.lines: list[str] = []
+        self.t, self.v = 0.0, 0.0  # appearance (a spring) and its velocity
+        self.until = 0.0
+        self.drag = 0.0  # how far it has been pulled up
+        self._press: QPointF | None = None
+        self._hover = False
+        self._topmost_at = 0.0
+        self.f_head = QFont("Segoe UI Variable Text", 8)
+        self.f_head.setWeight(QFont.Medium)
+        self.f_text = QFont("Segoe UI Variable Text", 9)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        _apply_windows_style(int(self.winId()), "none", notch=True)
+
+    def present(self, item: dict, width: int) -> None:
+        self.item, self.drag = item, 0.0
+        fm = QFontMetrics(self.f_text)
+        self.lines = self._wrap(item.get("text", ""), fm, width - 36)
+        self.resize(width, int(40 + len(self.lines) * fm.lineSpacing() + 14))
+        words = len(item.get("text", "").split())
+        self.until = time.time() + min(15.0, 5.0 + max(0, words - 12) * 0.25)  # ~5 s, longer for long text
+        if not self.isVisible():
+            self.t, self.v = 0.0, 0.0
+            self.show()
+
+    def _wrap(self, text: str, fm: QFontMetrics, width: float) -> list[str]:
+        lines, line = [], ""
+        words = text.split()
+        for i, word in enumerate(words):
+            candidate = f"{line} {word}".strip()
+            if fm.horizontalAdvance(candidate) <= width or not line:
+                line = candidate
+                continue
+            lines.append(line)
+            line = word
+            if len(lines) == self.LINES - 1:
+                line = " ".join(words[i:])
+                break
+        if line:
+            lines.append(fm.elidedText(line, Qt.ElideRight, int(width)) if len(lines) == self.LINES - 1 else line)
+        return lines or [""]
+
+    def dismiss(self) -> None:
+        self.until = 0.0
+
+    def step(self, anchor: QRectF) -> bool:
+        """Move with the notch (or bar); returns True while it is animating."""
+        if self.item is None:
+            return False
+        now = time.time()
+        if self._hover and self.until:
+            self.until = max(self.until, now + 1.5)  # reading it: don't take it away
+        target = 1.0 if now < self.until else 0.0
+        self.v = self.v * 0.62 + (target - self.t) * 0.14
+        self.t += self.v
+        if self._press is None and self.drag:
+            self.drag = 0.0 if abs(self.drag) < 0.5 else self.drag * 0.7  # snap back after a short pull
+        settled = abs(target - self.t) < 0.003 and abs(self.v) < 0.003 and not self.drag
+        if settled:
+            self.t, self.v = target, 0.0
+        if target == 0.0 and self.t <= 0.01:
+            self.hide()
+            self.item = None
+            return False
+        geo = QApplication.primaryScreen().geometry()
+        y = max(geo.top() + 4, anchor.bottom() + 8)
+        if y + self.height() > geo.bottom():  # a bar near the bottom: show it above instead
+            y = anchor.top() - 8 - self.height()
+        y = int(y - 18 * (1 - self.t) + min(0.0, self.drag))
+        x = int(anchor.center().x() - self.width() / 2)
+        if (x, y) != (self.x(), self.y()):
+            self.move(x, y)
+        opacity = max(0.0, min(1.0, self.t)) * (1 - min(1.0, -min(0.0, self.drag) / 60))
+        if abs(self.windowOpacity() - opacity) > 0.004:
+            self.setWindowOpacity(opacity)
+        if now - self._topmost_at > 1.0:
+            self._topmost_at = now
+            _keep_on_top(int(self.winId()))
+        if not settled:
+            self.update()
+        return not settled
+
+    def paintEvent(self, _event):
+        if not self.item:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        body = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        p.setPen(QPen(QColor(255, 255, 255, 26 + (14 if self._hover else 0)), 1))
+        p.setBrush(QColor(0, 0, 0, 245))
+        p.drawRoundedRect(body, 18, 18)
+        color = QColor(self.item.get("color") or "#94A3B8")
+        p.setPen(Qt.NoPen)
+        p.setBrush(color)
+        p.drawEllipse(QPointF(21, 20), 3, 3)
+        p.setFont(self.f_head)
+        p.setPen(QColor(255, 255, 255, 150))
+        head = QFontMetrics(self.f_head).elidedText(self.item.get("title") or "Reply", Qt.ElideRight,
+                                                     self.width() - 90)
+        p.drawText(QRectF(30, 10, self.width() - 90, 20), Qt.AlignLeft | Qt.AlignVCenter, head)
+        p.setPen(QColor(255, 255, 255, 90))
+        p.drawText(QRectF(0, 10, self.width() - 18, 20), Qt.AlignRight | Qt.AlignVCenter, "done")
+        p.setFont(self.f_text)
+        p.setPen(QColor(255, 255, 255, 228))
+        fm = QFontMetrics(self.f_text)
+        y = 34.0
+        for line in self.lines:
+            p.drawText(QPointF(18, y + fm.ascent()), line)
+            y += fm.lineSpacing()
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 45))  # a grabber: it can be swiped away
+        p.drawRoundedRect(QRectF(self.width() / 2 - 16, self.height() - 7, 32, 3), 1.5, 1.5)
+        p.end()
+
+    def enterEvent(self, _e):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, _e):
+        self._hover = False
+        self.update()
+
+    def mousePressEvent(self, e):
+        self._press = e.globalPosition()
+
+    def mouseMoveEvent(self, e):
+        if self._press is not None and e.buttons() & Qt.LeftButton:
+            self.drag = e.globalPosition().y() - self._press.y()
+            self.update()
+
+    def mouseReleaseEvent(self, e):
+        if self._press is None:
+            return
+        moved = e.globalPosition() - self._press
+        self._press = None
+        if self.drag < -18 or abs(moved.x()) > 60:
+            self.dismiss()  # swiped away
+        elif abs(moved.x()) + abs(moved.y()) < 5 and self.item:
+            _post("/open_thread", {"session": self.item.get("session", "")})
+            self.dismiss()
+
+
 class VoiceWidget(QWidget):
     def __init__(self):
         super().__init__(
@@ -286,6 +448,9 @@ class VoiceWidget(QWidget):
         self.expanded = False
         self.compact = False
         self.notch = False
+        self.banner = Banner()
+        self._banner_seen: int | None = None
+        self._banner_busy = False
         self._bar_pos: tuple[int, int] | None = None  # where the floating bar was before notch mode
         self._reveal = 1.0  # notch: 0 tucked under the top edge, 1 fully down (a spring: may overshoot)
         self._reveal_v = 0.0
@@ -312,6 +477,8 @@ class VoiceWidget(QWidget):
         self.f_notch_title = QFont("Segoe UI Variable Display", 9)
         self.f_notch_title.setWeight(QFont.DemiBold)
         self.f_notch_sub = QFont("Segoe UI Variable Text", 8)
+        self.f_notch_chip = QFont("Segoe UI Variable Text", 7)
+        self.f_notch_chip.setWeight(QFont.Medium)
         self.f_q = QFont("Segoe UI Variable Text", 9)
         self.f_q.setWeight(QFont.DemiBold)
         self.f_chip = QFont("Segoe UI Variable Text", 7)
@@ -346,13 +513,16 @@ class VoiceWidget(QWidget):
             x, y = int(pos["x"]), int(pos["y"])
             self.expanded = bool(pos.get("expanded", False))
             self.compact = bool(pos.get("compact", False))
-            self.notch = bool(pos.get("notch", False))
+            self.notch = bool(pos.get("notch", True))
             self.start_hidden = bool(pos.get("hidden", False))
         except (OSError, ValueError, KeyError):
             x, y = screen.right() - WIDTH - 16, screen.top() + 64
+            self.notch = True  # a fresh install starts as the notch
         # Keep it on a visible screen (monitors may have changed since last time).
         if not any(s.availableGeometry().adjusted(-40, -40, 40, 40).contains(x, y) for s in QApplication.screens()):
             x, y = screen.right() - WIDTH - 16, screen.top() + 64
+        if self.notch:
+            self._bar_pos = (x, y)  # where the floating bar goes if you leave notch mode
         self.move(x, y)
         self._apply_size()
 
@@ -373,6 +543,14 @@ class VoiceWidget(QWidget):
     def _is_compact(self) -> bool:
         # A question needs room: the compact orb opens into the bar until it is answered.
         return self.compact and not self.notch and not self._question()
+
+    @property
+    def pw(self) -> float:
+        """Width of the panel area: the bar, or the island's whole body (between its ears)."""
+        return NOTCH_W - 2 * NOTCH_EAR if self.notch else WIDTH
+
+    def _cols(self) -> int:
+        return 4 if self.notch else 3
 
     def _scale(self) -> float:
         return NOTCH_SCALE if self.notch else 1.0
@@ -473,6 +651,11 @@ class VoiceWidget(QWidget):
         if digest != self._shown_digest:
             self._shown_digest, self._painted_still = digest, False
         self.st = st or {}
+        banner = self.st.get("banner")
+        if banner and banner["id"] != self._banner_seen:
+            self._banner_seen = banner["id"]
+            if banner.get("age", 99) < 10:  # not an old one, after a restart
+                self.banner.present(banner, int(self.pw))
         phase = st["phase"] if st else "offline"
         if phase != self.phase:
             self.prev_title = PHASES.get(self.phase, PHASES["idle"])[1]
@@ -514,6 +697,7 @@ class VoiceWidget(QWidget):
         if time.time() - self._topmost_at > 1.0:
             self._topmost_at = time.time()
             _keep_on_top(int(self.winId()))
+        self._banner_busy = self.banner.step(QRectF(self.geometry()))
         # Discreet when nothing happens, fully visible when active or hovered (the notch is always solid).
         active = (self.phase not in ("idle", "offline", "muted") or self._hovering or self.expanded
                   or self.notch or self._question())
@@ -534,6 +718,8 @@ class VoiceWidget(QWidget):
     def _is_still(self, opacity_target: float) -> bool:
         """Nothing is animating or easing: the last frame drawn is still right."""
         if self.phase not in ("idle", "offline", "muted") or self._hovering or self.pressed or self._dragged:
+            return False
+        if self._banner_busy:
             return False
         if self._question() or self.flash > 0 or self.title_t < 1 or time.time() - self._copied_at < 1.3:
             return False
@@ -568,7 +754,7 @@ class VoiceWidget(QWidget):
         """(id, icon, label, hotkey, active)"""
         hk, st = self.hotkeys, self.st
         muted = bool(st.get("muted"))
-        return [
+        tiles = [
             ("reply", ICONS["chat"], "Reply now", hk.get("reply", ""), False),
             ("hold", ICONS["mic"], "Hold to talk", hk.get("push_to_talk", ""), self.pressed == "hold"),
             ("stop", ICONS["stop"], "Stop", hk.get("stop", ""), False),
@@ -580,17 +766,25 @@ class VoiceWidget(QWidget):
             ("summary", ICONS["list"], "Summaries" if st.get("summary", True) else "Full answers",
              "short / full", bool(st.get("summary", True))),
         ]
+        if self.notch:  # a fourth column: the last reply, on demand
+            tiles[3:3] = [("replay", ICONS["replay"], "Replay", "last reply", False)]
+            tiles[7:7] = [("copyreply", ICONS["check"] if self._copied == "copyreply" and time.time() - self._copied_at < 1.3
+                           else ICONS["copy"], "Copy reply", "to clipboard", False)]
+            tiles[11:11] = [("openchat", ICONS["open"], "Open chat", "last thread", False)]
+        if st.get("chime"):
+            tiles = [t for t in tiles if t[0] not in VOICE_ONLY]
+        return tiles
 
     def _rects(self) -> dict[str, QRectF]:
         r = self._bar_rects()
         if not self.notch:
             return r
         # Panels keep their bar layout, centred under the notch row.
-        dx, dy = (NOTCH_W - WIDTH) / 2, NOTCH_H - BAR_H
+        dx, dy = NOTCH_EAR, NOTCH_H - BAR_H
         out = {k: v.translated(dx, dy) for k, v in r.items() if k not in ("primary", "chevron")}
         if "primary" in r:
-            out["primary"] = QRectF(NOTCH_W - 66, (NOTCH_H - 28) / 2, 28, 28)
-        out["chevron"] = QRectF(NOTCH_W - 34, (NOTCH_H - 22) / 2, 22, 22)
+            out["primary"] = QRectF(NOTCH_W - NOTCH_EAR - 68, (NOTCH_H - 28) / 2, 28, 28)
+        out["chevron"] = QRectF(NOTCH_W - NOTCH_EAR - 36, (NOTCH_H - 26) / 2, 26, 26)
         return out
 
     def _bar_rects(self) -> dict[str, QRectF]:
@@ -607,14 +801,16 @@ class VoiceWidget(QWidget):
             return r
         if self._panel_h() > 40:
             pad, gap, th = 12, 8, 58
-            tw = (WIDTH - 2 * pad - 2 * gap) / 3
+            cols = self._cols()
+            tw = (self.pw - 2 * pad - (cols - 1) * gap) / cols
             for i, tile in enumerate(self._tiles()):
-                row, col = divmod(i, 3)
+                row, col = divmod(i, cols)
                 r[tile[0]] = QRectF(pad + col * (tw + gap), BAR_H + 10 + row * (th + gap), tw, th)
-            track = self._speed_track()
-            seg = track.width() / len(SPEEDS)
-            for i, x in enumerate(SPEEDS):
-                r[f"speed:{x}"] = QRectF(track.x() + i * seg, track.y(), seg, track.height())
+            if self._show_speed():
+                track = self._speed_track()
+                seg = track.width() / len(SPEEDS)
+                for i, x in enumerate(SPEEDS):
+                    r[f"speed:{x}"] = QRectF(track.x() + i * seg, track.y(), seg, track.height())
             track = self._mode_track()
             seg = track.width() / len(MODES)
             for i, (key, _label) in enumerate(MODES):
@@ -623,36 +819,60 @@ class VoiceWidget(QWidget):
                 r[f"thr:{i}"] = self._thread_row(i)
             for i in range(len(self._history())):
                 r[f"hist:{i}"] = self._history_row(i)
+            r.update(self._agent_rects())
         return r
+
+    def _show_speed(self) -> bool:
+        return not self.st.get("chime")  # chimes have no voice to speed up
+
+    def _speed_y(self) -> float:
+        rows = -(-len(self._tiles()) // self._cols())
+        return BAR_H + 10 + rows * 58 + (rows - 1) * 8 + 6
+
+    def _mode_y(self) -> float:
+        return self._speed_y() + (34 if self._show_speed() else 0)
+
+    def _threads_y(self) -> float:
+        return self._mode_y() + 36
+
+    def _agents_y(self) -> float:
+        return self._hist_y() + 16 + max(1, len(self._history())) * ROW_H + 8
+
+    def _agent_rects(self) -> dict[str, QRectF]:
+        keys = [f"agent:{a}" for a, _ in AGENT_LABELS] + ["guide"]
+        gap = 6
+        w = (self.pw - 20 - (len(keys) - 1) * gap) / len(keys)
+        y = self._agents_y() + 18
+        return {k: QRectF(10 + i * (w + gap), y, w, 24) for i, k in enumerate(keys)}
 
     def _threads(self) -> list[dict]:
         return list(self.st.get("threads") or [])[:THREAD_ROWS]
 
     def _thread_row(self, i: int) -> QRectF:
-        return QRectF(10, THREADS_Y + 16 + i * ROW_H, WIDTH - 20, ROW_H - 2)
+        return QRectF(10, self._threads_y() + 16 + i * ROW_H, self.pw - 20, ROW_H - 2)
 
     def _hist_y(self) -> float:
         n = len(self._threads())
-        return THREADS_Y + (16 + n * ROW_H + 8 if n else 0)
+        return self._threads_y() + (16 + n * ROW_H + 8 if n else 0)
 
     def _expanded_h(self) -> int:
         """The open panel fits what it shows: no empty rows."""
-        return int(self._hist_y() + 16 + max(1, len(self._history())) * ROW_H + 8)
+        return int(self._agents_y() + 18 + 24 + 12)
 
     def _question_layout(self) -> tuple[QRectF, QRectF, list[QRectF], float]:
         """(header line, question text, option rows, panel height) for the pending question."""
         q = self._question() or {"question": "", "options": []}
         fm = QFontMetrics(self.f_q)
-        text_h = fm.boundingRect(0, 0, WIDTH - 28, 400, Qt.TextWordWrap, q["question"]).height()
+        text_h = fm.boundingRect(0, 0, self.pw - 28, 400, Qt.TextWordWrap, q["question"]).height()
         text_h = min(text_h, 3 * fm.lineSpacing())
         y = BAR_H + 10
-        head = QRectF(14, y, WIDTH - 28, 15)
+        head = QRectF(14, y, self.pw - 28, 15)
         y += 21
-        text = QRectF(14, y, WIDTH - 28, text_h)
+        text = QRectF(14, y, self.pw - 28, text_h)
         y += text_h + 8
         rows = []
         for _ in q["options"][:OPTION_ROWS]:
-            rows.append(QRectF(10, y, WIDTH - 20, 28))
+            rows.append(QRectF(10, y, self.pw - 20, 28))
             y += 32
         return head, text, rows, y + 20 - BAR_H
 
@@ -660,15 +880,13 @@ class VoiceWidget(QWidget):
         return list(self.st.get("history") or [])[:HIST_ROWS]
 
     def _history_row(self, i: int) -> QRectF:
-        return QRectF(10, self._hist_y() + 16 + i * ROW_H, WIDTH - 20, ROW_H - 2)
+        return QRectF(10, self._hist_y() + 16 + i * ROW_H, self.pw - 20, ROW_H - 2)
 
-    @staticmethod
-    def _speed_track() -> QRectF:
-        return QRectF(70, SPEED_Y, WIDTH - 70 - 12, 26)
+    def _speed_track(self) -> QRectF:
+        return QRectF(70, self._speed_y(), self.pw - 70 - 12, 26)
 
-    @staticmethod
-    def _mode_track() -> QRectF:
-        return QRectF(70, MODE_Y, WIDTH - 70 - 12, 26)
+    def _mode_track(self) -> QRectF:
+        return QRectF(70, self._mode_y(), self.pw - 70 - 12, 26)
 
     def _speed_index(self) -> float:
         x = float(self.st.get("speed_x", 1.5) or 1.5)
@@ -693,17 +911,13 @@ class VoiceWidget(QWidget):
         body = QRectF(0.5, 0.5, w - 1, h - 1)
         path = QPainterPath()
         if self.notch:
-            # Square top against the screen edge, rounded bottom: a camera notch.
-            path.addRoundedRect(body, NOTCH_RADIUS, NOTCH_RADIUS)
-            top = QPainterPath()
-            top.addRect(QRectF(0.5, 0.5, w - 1, NOTCH_RADIUS))
-            path = path.united(top)
+            path = self._notch_path(w, h)
         else:
             path.addRoundedRect(body, RADIUS, RADIUS)
         p.setClipPath(path)
 
         # Glass body: tinted fill (denser when there is no real blur behind it); the notch is near-black.
-        p.fillPath(path, QColor(5, 6, 9, 250) if self.notch else QColor(14, 16, 24, 120 if self.glass else 228))
+        p.fillPath(path, QColor(0, 0, 0) if self.notch else QColor(14, 16, 24, 120 if self.glass else 228))
         if self._is_compact():
             self._paint_compact(p, path)
         elif self.notch:
@@ -720,10 +934,61 @@ class VoiceWidget(QWidget):
         p.setPen(QPen(edge, 1))
         p.setBrush(Qt.NoBrush)
         if self.notch:
-            p.drawPath(path)
+            self._paint_edge_light(p, w, h)
         else:
             p.drawRoundedRect(body, RADIUS, RADIUS)
         p.end()
+
+    @staticmethod
+    def _notch_path(w: float, h: float) -> QPainterPath:
+        """Square top flush with the screen edge, flared into it by two concave ears; round bottom."""
+        e, r = NOTCH_EAR, min(NOTCH_RADIUS, h / 2)
+        path = QPainterPath()
+        path.moveTo(0, 0)
+        path.lineTo(w, 0)
+        path.quadTo(w - e, 0, w - e, e)
+        path.lineTo(w - e, h - r)
+        path.quadTo(w - e, h, w - e - r, h)
+        path.lineTo(e + r, h)
+        path.quadTo(e, h, e, h - r)
+        path.lineTo(e, e)
+        path.quadTo(e, 0, 0, 0)
+        path.closeSubpath()
+        return path
+
+    def _edge_live(self) -> float:
+        """How strongly the edge light shows: only while the mic or the voice is live."""
+        return {"speaking": 1.0, "recording": 1.0, "waiting": 0.75, "transcribing": 0.6}.get(self.phase, 0.0)
+
+    def _paint_edge_light(self, p: QPainter, w: float, h: float) -> None:
+        """A thin band of light running around the island while it's live; nothing at rest."""
+        live = self._edge_live() * _smooth((self._reveal - 0.3) / 0.6)
+        if live < 0.02:
+            return
+        t = time.time() - self.t0
+        grad = QConicalGradient(QPointF(w / 2, h * 0.4), -t * (40 + 70 * self.energy))
+        # One colour (the phase's); the motion comes from a brighter stretch travelling around.
+        for pos, alpha in ((0.0, 255), (0.25, 120), (0.5, 70), (0.75, 120), (1.0, 255)):
+            c = QColor(self.accent)
+            c.setAlpha(int(alpha * live))
+            grad.setColorAt(pos, c)
+        e, r, k = NOTCH_EAR, min(NOTCH_RADIUS, h / 2), 0.75
+        edge = QPainterPath()  # sides and bottom only: the top belongs to the screen edge
+        edge.moveTo(e + k, e)
+        edge.lineTo(e + k, h - r)
+        edge.quadTo(e + k, h - k, e + r, h - k)
+        edge.lineTo(w - e - r, h - k)
+        edge.quadTo(w - e - k, h - k, w - e - k, h - r)
+        edge.lineTo(w - e - k, e)
+        p.setBrush(Qt.NoBrush)
+        p.setClipPath(self._notch_path(w, h))
+        bloom = QColor(self.accent)
+        bloom.setAlpha(int((30 + 40 * self.energy) * live))
+        p.setPen(_round_pen(bloom, 5.0))  # a soft inner bloom, clipped to the island
+        p.drawPath(edge)
+        p.setClipping(False)
+        p.setPen(_round_pen(grad, 1.5))
+        p.drawPath(edge)
 
     def _paint_island(self, p: QPainter, path: QPainterPath, w: float, h: float) -> None:
         """Notch: the content stays centred while the island widens, and fades in once there is room."""
@@ -735,79 +1000,62 @@ class VoiceWidget(QWidget):
             p.setOpacity(show)
             self._paint_notch_row(p)
             if h > NOTCH_H + 4:
-                p.translate((NOTCH_W - WIDTH) / 2, NOTCH_H - BAR_H)
+                p.translate(NOTCH_EAR, NOTCH_H - BAR_H)
                 self._paint_panel(p)
             p.restore()
-        # A soft light along the bottom edge, in the accent colour, that breathes with the voice.
-        glow = QLinearGradient(0, 0, w, 0)
-        c = QColor(self.accent)
-        c.setAlpha(0)
-        glow.setColorAt(0, c)
-        c.setAlpha(int(40 + 150 * self.energy * max(show, 0.35)))
-        glow.setColorAt(0.5, c)
-        c.setAlpha(0)
-        glow.setColorAt(1, c)
-        p.fillRect(QRectF(NOTCH_RADIUS, h - 2.2, w - 2 * NOTCH_RADIUS, 1.6), glow)
 
     def _paint_notch_row(self, p: QPainter) -> None:
         """One dense row: orb, status + conversation, live caption, info chips, buttons."""
         cy = NOTCH_H / 2
         st = self.st
-        amb = QRadialGradient(QPointF(22, cy), 110)
-        c = QColor(self.accent)
-        c.setAlpha(60 if self.phase not in ("idle", "offline") else 20)
-        amb.setColorAt(0, c)
-        c.setAlpha(0)
-        amb.setColorAt(1, c)
-        p.fillRect(QRectF(0, 0, NOTCH_W, NOTCH_H + 160), amb)  # past the row: no hard edge above a panel
-        self._paint_wave(p, x0=44.0, x1=NOTCH_W - 80.0, base=NOTCH_H - 4, scale=0.55)
-        self._paint_orb(p, QPointF(22, cy), 8.5)
+        self._paint_indicator(p, QPointF(NOTCH_EAR + 21, cy))
 
         # Info chips, right to left, before the buttons.
         chips = []
         if st.get("permission"):
-            chips.append("APPROVE?")
+            chips.append("Approve?")
         elif self._question():
-            chips.append("CHOOSE")
+            chips.append("Choose")
         if st.get("queued"):
-            chips.append(f"+{st['queued']} WAITING")
+            chips.append(f"+{st['queued']} waiting")
         if st.get("update"):
-            chips.append("UPDATE")
+            chips.append("Update")
         lang = st.get("speaking_lang") if self.phase == "speaking" else ""
         if lang:
             chips.append(lang.upper())
         if st.get("chime"):
-            chips.append("CHIME")
+            chips.append("Chime")
         elif st.get("hands_free"):
-            chips.append("AUTO")
+            chips.append("Auto")
         if st.get("speed_x"):
             chips.append(f"{float(st['speed_x']):g}×")
-        fm_chip = QFontMetrics(self.f_chip)
-        right = NOTCH_W - 74
+        fm_chip = QFontMetrics(self.f_notch_chip)
+        right = NOTCH_W - NOTCH_EAR - 78
         for text in chips:
-            cw = fm_chip.horizontalAdvance(text) + 10
+            cw = fm_chip.horizontalAdvance(text) + 12
             right -= cw
-            self._chip(p, right, cy - 7.5, text)
-            right -= 5
+            self._flat_chip(p, QRectF(right, cy - 8, cw, 16), text)
+            right -= 4
 
         # Status and conversation on the first line, caption (or hint) on the second.
-        x, avail = 40.0, right - 40.0 - 6
+        x = NOTCH_EAR + 38.0
+        avail = right - x - 6
         _, title, sub = PHASES.get(self.phase, PHASES["idle"])
         if self._question() and self.phase in ("idle", "waiting", "recording"):
             title = "Your choice"
         p.setFont(self.f_notch_title)
         fm = QFontMetrics(self.f_notch_title)
         p.setPen(QColor(255, 255, 255, 240))
-        p.drawText(QPointF(x, 19), fm.elidedText(title, Qt.ElideRight, int(avail)))
+        p.drawText(QPointF(x, 20), fm.elidedText(title, Qt.ElideRight, int(avail)))
         tx = x + min(fm.horizontalAdvance(title), avail) + 8
         thread = st.get("thread")
         if thread and tx < x + avail - 30:
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(thread["color"]))
-            p.drawEllipse(QPointF(tx + 3, 15), 3, 3)
+            p.drawEllipse(QPointF(tx + 3, 16), 2.5, 2.5)
             p.setFont(self.f_notch_sub)
-            p.setPen(QColor(thread["color"]).lighter(125))
-            p.drawText(QPointF(tx + 10, 19), QFontMetrics(self.f_notch_sub).elidedText(
+            p.setPen(QColor(255, 255, 255, 120))
+            p.drawText(QPointF(tx + 10, 20), QFontMetrics(self.f_notch_sub).elidedText(
                 thread["title"], Qt.ElideRight, int(x + avail - tx - 10)))
         line = st.get("caption") or ""
         if not line:
@@ -820,11 +1068,58 @@ class VoiceWidget(QWidget):
                 line = f"{_hotkey_label(self.hotkeys.get('reply', ''))} to talk"
             else:
                 line = sub
-        p.setFont(self.f_hint)
-        p.setPen(QColor(226, 232, 240, 150))
-        p.drawText(QRectF(x, 23, avail, 14), Qt.AlignLeft | Qt.AlignVCenter,
-                   QFontMetrics(self.f_hint).elidedText(line, Qt.ElideRight, int(avail)))
-        self._paint_buttons(p)
+        p.setFont(self.f_notch_sub)
+        p.setPen(QColor(255, 255, 255, 140))
+        p.drawText(QRectF(x, 23, avail, 15), Qt.AlignLeft | Qt.AlignVCenter,
+                   QFontMetrics(self.f_notch_sub).elidedText(line, Qt.ElideRight, int(avail)))
+        self._paint_notch_buttons(p)
+
+    def _paint_indicator(self, p: QPainter, c: QPointF) -> None:
+        """Flat state mark: live bars for a voice, a spinning arc while transcribing, a dot otherwise."""
+        t = time.time() - self.t0
+        acc = QColor(self.accent)
+        p.setPen(Qt.NoPen)
+        p.setBrush(acc)
+        if self.phase in ("speaking", "recording"):
+            for i in range(4):
+                if self.phase == "recording":
+                    k = 0.15 + self.level * (0.55 + 0.45 * abs(math.sin(t * 7 + i * 1.7)))
+                else:
+                    k = 0.25 + 0.75 * abs(math.sin(t * (3.1 + i * 0.6) + i * 1.3)) * self.energy
+                bh = 3 + 13 * min(1.0, k)
+                p.drawRoundedRect(QRectF(c.x() - 7.5 + i * 4.4, c.y() - bh / 2, 2.6, bh), 1.3, 1.3)
+        elif self.phase == "transcribing":
+            p.setPen(_round_pen(acc, 2.0))
+            p.setBrush(Qt.NoBrush)
+            p.drawArc(QRectF(c.x() - 6, c.y() - 6, 12, 12), int(-t * 360 * 16) % (360 * 16), 250 * 16)
+        else:
+            r = 4.0 + (0.8 * math.sin(t * 2.2) if self.phase == "waiting" else 0.0)
+            p.drawEllipse(c, r, r)
+
+    def _flat_chip(self, p: QPainter, rect: QRectF, text: str) -> None:
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 22))
+        p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+        p.setFont(self.f_notch_chip)
+        p.setPen(QColor(255, 255, 255, 200))
+        p.drawText(rect, Qt.AlignCenter, text)
+
+    def _paint_notch_buttons(self, p: QPainter) -> None:
+        """Quiet round buttons: a faint disc, brighter on hover."""
+        rects = self._rects()
+        prim = self._primary()
+        buttons = [("primary", prim[1])] if prim else []
+        buttons.append(("chevron", ICONS["up" if self.expanded else "down"]))
+        for key, icon in buttons:
+            rect = rects[key]
+            ht = self.hover_t.get(key, 0.0)
+            base = 16 if key == "primary" else 0
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, int(base + 26 * ht + (24 if self.pressed == key else 0))))
+            p.drawEllipse(rect)
+            p.setFont(self.f_icon_small)
+            p.setPen(QColor(255, 255, 255, int(175 + 80 * ht)))
+            p.drawText(rect, Qt.AlignCenter, icon)
 
     def _paint_compact(self, p: QPainter, path: QPainterPath) -> None:
         """Compact mode: only the orb, centred, with its glow and phase animation."""
@@ -1079,6 +1374,10 @@ class VoiceWidget(QWidget):
         p.fillRect(QRectF(0, 6, 3, BAR_H - 12), grad)
 
     def _chip(self, p: QPainter, x: float, y: float, text: str) -> None:
+        if self.notch:
+            text = text if len(text) <= 3 else text.capitalize()
+            self._flat_chip(p, QRectF(x, y, QFontMetrics(self.f_notch_chip).horizontalAdvance(text) + 12, 16), text)
+            return
         fm = QFontMetrics(self.f_chip)
         rect = QRectF(x, y, fm.horizontalAdvance(text) + 10, 15)
         fill = QColor(self.accent)
@@ -1155,11 +1454,11 @@ class VoiceWidget(QWidget):
         y = rows[-1].bottom() + 4 if rows else text.bottom() + 4
         hint = ("Or say “yes” or “no” · no answer in a minute: Claude asks you itself" if q.get("permission")
                 else "Or say it: “the second one”, or the option’s name")
-        p.drawText(QRectF(14, y, WIDTH - 28, 14), Qt.AlignLeft | Qt.AlignVCenter, hint)
+        p.drawText(QRectF(14, y, self.pw - 28, 14), Qt.AlignLeft | Qt.AlignVCenter, hint)
 
     def _paint_panel(self, p: QPainter) -> None:
         p.setPen(QPen(QColor(255, 255, 255, 22), 1))
-        p.drawLine(QPointF(14, BAR_H), QPointF(WIDTH - 14, BAR_H))
+        p.drawLine(QPointF(14, BAR_H), QPointF(self.pw - 14, BAR_H))
         if self._question():
             self._paint_question(p)
             return
@@ -1210,14 +1509,63 @@ class VoiceWidget(QWidget):
 
         # Speed and mode switches, then what you said recently (so you can trust or reuse it).
         speed_pos = self.speed_pos if self.speed_pos is not None else self._speed_index()
-        self._paint_segmented(p, progress, 6, self._speed_track(), "Speed",
-                              [f"speed:{x}" for x in SPEEDS], [f"{x:g}×" for x in SPEEDS], speed_pos)
+        if self._show_speed():
+            self._paint_segmented(p, progress, 6, self._speed_track(), "Speed",
+                                  [f"speed:{x}" for x in SPEEDS], [f"{x:g}×" for x in SPEEDS], speed_pos)
         mode_pos = self.mode_pos if self.mode_pos is not None else (1.0 if self.st.get("chime") else 0.0)
         self._paint_segmented(p, progress, 7, self._mode_track(), "Mode",
                               [f"mode:{k}" for k, _ in MODES], [label for _, label in MODES], mode_pos)
 
         self._paint_threads(p, progress)
         self._paint_history(p, progress)
+        self._paint_agents(p, progress)
+
+    def _agent_state(self, agent: str) -> str:
+        """'on' (hooks installed), 'off' (agent found, not connected) or 'missing' (not on this PC)."""
+        return (self.st.get("agents") or {}).get(agent, "missing")
+
+    def _paint_agents(self, p: QPainter, progress: float) -> None:
+        """Which agents speak through agent-voice; click one to connect it, or open the guide."""
+        appear = max(0.0, min(1.0, (progress - 0.6) / 0.4))
+        if appear <= 0:
+            return
+        p.save()
+        p.setOpacity(appear)
+        y = self._agents_y()
+        p.setFont(self.f_tile)
+        p.setPen(QColor(226, 232, 240, 170))
+        p.drawText(QRectF(14, y, self.pw - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, "Agents")
+        p.setFont(self.f_hint)
+        p.setPen(QColor(226, 232, 240, 105))
+        p.drawText(QRectF(14, y, self.pw - 28, 16), Qt.AlignRight | Qt.AlignVCenter, "click to connect")
+        for key, rect in self._agent_rects().items():
+            ht = self.hover_t.get(key, 0.0)
+            state = "guide" if key == "guide" else self._agent_state(key.split(":", 1)[1])
+            p.setPen(QPen(QColor(255, 255, 255, int(20 + 30 * ht)), 1))
+            p.setBrush(QColor(255, 255, 255, int((16 if state == "on" else 6) + 16 * ht)))
+            p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+            if key == "guide":
+                p.setFont(self.f_icon_small)
+                p.setPen(QColor(255, 255, 255, int(170 + 80 * ht)))
+                p.drawText(rect, Qt.AlignCenter, ICONS["help"])
+                continue
+            label = dict(AGENT_LABELS)[key.split(":", 1)[1]]
+            fm = QFontMetrics(self.f_hint)
+            tw = fm.horizontalAdvance(label)
+            x = rect.center().x() - (tw + 9) / 2
+            if state == "on":
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor("#34D399"))
+                p.drawEllipse(QPointF(x + 2.5, rect.center().y()), 2.5, 2.5)
+            elif state == "off":
+                p.setPen(QPen(QColor(255, 255, 255, 120), 1))
+                p.setBrush(Qt.NoBrush)
+                p.drawEllipse(QPointF(x + 2.5, rect.center().y()), 2.5, 2.5)
+            p.setFont(self.f_hint)
+            p.setPen(QColor(255, 255, 255, {"on": 225, "off": 170}.get(state, 70)))
+            p.drawText(QRectF(x + 9 if state != "missing" else x + 4.5, rect.y(), tw + 2, rect.height()),
+                       Qt.AlignLeft | Qt.AlignVCenter, label)
+        p.restore()
 
     def _paint_threads(self, p: QPainter, progress: float) -> None:
         """Recent conversations with what each is doing; click one to open it."""
@@ -1231,11 +1579,11 @@ class VoiceWidget(QWidget):
         p.setOpacity(appear)
         p.setFont(self.f_tile)
         p.setPen(QColor(226, 232, 240, 170))
-        p.drawText(QRectF(14, THREADS_Y, WIDTH - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, "Threads")
+        p.drawText(QRectF(14, self._threads_y(), self.pw - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, "Threads")
         p.setFont(self.f_hint)
         p.setPen(QColor(226, 232, 240, 105))
         queued = int(self.st.get("queued") or 0)
-        p.drawText(QRectF(14, THREADS_Y, WIDTH - 28, 16), Qt.AlignRight | Qt.AlignVCenter,
+        p.drawText(QRectF(14, self._threads_y(), self.pw - 28, 16), Qt.AlignRight | Qt.AlignVCenter,
                    f"{queued} waiting to speak" if queued else "click to open")
         labels = {"speaking": "speaking", "listening": "listening", "queued": "next up",
                   "question": "asks you", "permission": "needs approval"}
@@ -1277,10 +1625,10 @@ class VoiceWidget(QWidget):
         hist_y = self._hist_y()
         p.setFont(self.f_tile)
         p.setPen(QColor(226, 232, 240, 170))
-        p.drawText(QRectF(14, hist_y + dy, WIDTH - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, "You said")
+        p.drawText(QRectF(14, hist_y + dy, self.pw - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, "You said")
         p.setFont(self.f_hint)
         p.setPen(QColor(226, 232, 240, 105))
-        p.drawText(QRectF(14, hist_y + dy, WIDTH - 28, 16), Qt.AlignRight | Qt.AlignVCenter, "click to copy")
+        p.drawText(QRectF(14, hist_y + dy, self.pw - 28, 16), Qt.AlignRight | Qt.AlignVCenter, "click to copy")
         items = self._history()
         if not items:
             p.setFont(self.f_sub)
@@ -1374,7 +1722,9 @@ class VoiceWidget(QWidget):
             self.hover = hit
             tip = self._tooltip(hit)
             if tip:
-                QToolTip.showText(e.globalPosition().toPoint(), tip, self)
+                at = e.globalPosition().toPoint()
+                below = self.mapToGlobal(QPointF(0, self.height())).toPoint().y() - 8
+                QToolTip.showText(QPoint(at.x(), max(at.y(), below)), tip, self)
             else:
                 QToolTip.hideText()
 
@@ -1384,6 +1734,18 @@ class VoiceWidget(QWidget):
             return prim[2] if prim else ""
         if key == "chevron":
             return "Collapse" if self.expanded else "All actions"
+        if key == "guide":
+            return "Setup guide: every agent, step by step"
+        if key and key.startswith("agent:"):
+            agent = key.split(":", 1)[1]
+            name = AGENT_NAMES.get(agent, agent)
+            state = self._agent_state(agent)
+            if state == "on":
+                extra = " (in Cline, turn on Settings > Features > Enable Hooks)" if agent == "cline" else ""
+                return f"{name} speaks through agent-voice{extra}"
+            if state == "off":
+                return f"Connect {name}: adds agent-voice's hooks to its settings"
+            return f"{name} isn't installed on this PC"
         for tid, _icon, label, hk, _active in self._tiles():
             if tid == key:
                 return f"{label} ({_hotkey_label(hk)})" if hk else label
@@ -1458,6 +1820,23 @@ class VoiceWidget(QWidget):
             _post("/mute", {"mode": "toggle"})
         elif key == "read":
             _post("/read")
+        elif key == "replay":
+            _post("/replay")
+        elif key == "copyreply":
+            text = (self.st.get("last_reply") or {}).get("text", "")
+            if text:
+                QApplication.clipboard().setText(text)
+                self._copied, self._copied_at = key, time.time()
+        elif key.startswith("agent:"):
+            agent = key.split(":", 1)[1]
+            if self._agent_state(agent) == "off":
+                _post("/install", {"agent": agent})
+                self.st.setdefault("agents", {})[agent] = "on"
+        elif key == "guide":
+            QDesktopServices.openUrl(QUrl(GUIDE_URL))
+        elif key == "openchat":
+            session = (self.st.get("last_reply") or {}).get("session", "")
+            _post("/open_thread", {"session": session})
         elif key.startswith("speed:"):
             value = float(key.split(":", 1)[1])
             self.st["speed_x"] = value  # move the indicator now, don't wait for the next poll

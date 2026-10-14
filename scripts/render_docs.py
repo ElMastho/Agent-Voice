@@ -155,7 +155,9 @@ def render_panel() -> None:
         {"text": "Rename the config loader and update the README.", "lang": "en"},
         {"text": "Peux-tu relancer le widget ?", "lang": "fr"},
     ]
-    st = status("idle", hands_free=True, last_heard=history[0]["text"], last_heard_lang="en", history=history)
+    agents = {"claude": "on", "codex": "on", "gemini": "off", "cursor": "off", "cline": "missing"}
+    st = status("idle", hands_free=True, last_heard=history[0]["text"], last_heard_lang="en", history=history,
+                agents=agents)
     w = make_widget(st, expanded=True)
     settle(w)
     w.hover = "reply"

@@ -271,3 +271,19 @@ def test_permission_hook_waits_for_the_daemon(monkeypatch):
     out = hooks.permission_decision({"session_id": "s", "tool_name": "Bash", "tool_input": {"command": "npm test"}})
     assert out["hookSpecificOutput"]["decision"] == {"behavior": "allow"}
     assert hooks.describe_tool("Bash", {"command": "npm   test"}) == "run npm test"
+
+
+def test_agent_states(tmp_path, monkeypatch):
+    import json as _json
+
+    from agent_voice import install
+
+    monkeypatch.setattr(install.Path, "home", lambda: tmp_path)
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text(_json.dumps(
+        {"hooks": {"Stop": [{"hooks": [{"command": '"C:/x/agent-voice.exe" hook claude'}]}]}}), encoding="utf-8")
+    (tmp_path / ".gemini").mkdir()
+    states = install.agent_states()
+    assert states["claude"] == "on"
+    assert states["gemini"] == "off"
+    assert states["cursor"] == "missing"

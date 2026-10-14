@@ -170,13 +170,13 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
-AGENT_DIRS = {"claude": ".claude", "codex": ".codex", "gemini": ".gemini", "cursor": ".cursor",
-              "cline": "Documents/Cline"}
 
 
 def quickstart() -> int:
     """agent-voice.exe double-clicked: download what's needed, hook into installed agents, start."""
     from pathlib import Path
+
+    from agent_voice.install import AGENT_DIRS
 
     print("agent-voice: a local voice for your coding agents\n")
     try:

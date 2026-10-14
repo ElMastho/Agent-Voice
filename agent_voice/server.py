@@ -17,7 +17,7 @@ import time
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from agent_voice import __version__, claudeapp, winfocus
+from agent_voice import __version__, claudeapp, install, textclean, winfocus
 from agent_voice.config import HOME, LOG_DIR, load_config, load_state, save_state
 from agent_voice.tts import Speaker
 
@@ -251,6 +251,11 @@ class Daemon:
         self.last_heard_lang = ""
         # Last few transcriptions, newest first, so a reply can be copied again from the widget.
         self.history: list[dict] = list(self.state.get("history") or [])[:5]
+        self.last_reply: dict | None = None
+        self._agents: dict[str, str] = {}
+        self.banner: dict | None = None  # chime mode: the reply shown as a notification under the notch
+        self._chime_text: dict[str, str] = {}
+        self._agents_at = 0.0
         self._ptt_release = threading.Event()
         # Bumped by the show/hide hotkey; the widget toggles when it sees the number change.
         self.widget_toggles = 0
@@ -445,19 +450,57 @@ class Daemon:
             # Sounds only: progress is silent, the end of a turn rings, the mic stays closed.
             log.info("speak source=%s chime=%s final=%s", source, final, final)
             if final:
+                shown = text.strip() or self._chime_text.get(session, "")
+                self._chime_text.pop(session, None)
+                if shown:
+                    self._show_banner(shown, session, source)
                 self.play_chime("done")
+            elif text.strip():
+                self._chime_text[session] = text.strip()  # shown at the end of the turn if nothing newer comes
             return 0
         if interrupt:
             self.speaker.stop()
         if text.strip() or final:
             self._voice_session, self._voice_source = session, source  # whose voice this is, for the widget
             self._wake_cancel.set()  # never let the wake word hear our own voice
+        if text.strip():
+            self.last_reply = {"text": text, "lang": lang, "voice": voice, "session": session}
         n = self.speaker.speak(text, lang, voice) if text.strip() else 0
         log.info("speak source=%s sentences=%d final=%s", source, n, final)
         if final and self.config["auto_listen"].get("enabled") and self.transcriber is not None:
             self._reply_session = session
             self._listen_armed = True
         return n
+
+    def _show_banner(self, text: str, session: str, source: str) -> None:
+        """Chime mode: what would have been said, as a notification (summary or full text, as set)."""
+        title = self._title(session, source)
+        self.banner = {"id": (self.banner or {}).get("id", 0) + 1, "text": textclean.clean(text)[:800],
+                       "title": title, "color": thread_color(session or title), "session": session,
+                       "at": time.time()}
+
+    def agent_states(self) -> dict[str, str]:
+        """Which agents are connected; re-read every 30 s at most (status is polled 8 times a second)."""
+        if time.time() - self._agents_at > 30:
+            self._agents, self._agents_at = install.agent_states(), time.time()
+        return self._agents
+
+    def install_agent(self, agent: str) -> None:
+        """Connect an agent from the widget (same as `agent-voice install <agent>`)."""
+        try:
+            log.info("install %s: %s", agent, install.INSTALLERS[agent]())
+        except Exception:  # a malformed settings file must not take the daemon down
+            log.exception("install %s failed", agent)
+        self._agents_at = 0.0
+
+    def replay(self) -> None:
+        """Say the last reply again (it doesn't reopen the mic)."""
+        r = self.last_reply
+        if r and not self.muted:
+            self.speaker.stop()
+            self._wake_cancel.set()
+            self._voice_session = r["session"]
+            self.speaker.speak(r["text"], r["lang"], r["voice"])
 
     def stop(self) -> None:
         self.speaker.stop()
@@ -898,6 +941,11 @@ class Daemon:
             "last_heard": self.last_heard[-160:],
             "last_heard_lang": self.last_heard_lang,
             "history": self.history,
+            "agents": self.agent_states(),
+            "banner": {**self.banner, "age": round(time.time() - self.banner["at"], 1)}
+            if self.banner and time.time() - self.banner["at"] < 60 else None,
+            "last_reply": {"text": self.last_reply["text"][:4000], "session": self.last_reply["session"]}
+            if self.last_reply else None,
             "question": self._question_status(),
             "thread": self._thread_status(),
             "threads": self._threads_status(),
@@ -1104,6 +1152,15 @@ def _handler(daemon: Daemon):
                     daemon.ptt_stop()
                 else:
                     daemon.ptt_start()
+                return self._json(200, {"ok": True})
+            if self.path == "/install":
+                agent = str(data.get("agent") or "")
+                if agent not in install.AGENT_DIRS:
+                    return self._json(400, {"error": "unknown agent"})
+                threading.Thread(target=daemon.install_agent, args=(agent,), daemon=True).start()
+                return self._json(200, {"ok": True})
+            if self.path == "/replay":
+                daemon.jobs.put(daemon.replay)
                 return self._json(200, {"ok": True})
             if self.path == "/read":
                 threading.Thread(target=daemon._read_selection, daemon=True).start()

@@ -202,6 +202,38 @@ def antigravity(remove: bool = False) -> str:  # noqa: ARG001
 INSTALLERS = {"claude": claude, "codex": codex, "gemini": gemini, "cursor": cursor, "cline": cline,
               "antigravity": antigravity}
 
+# Where each agent keeps its settings: the folder existing means the agent is installed.
+AGENT_DIRS = {"claude": ".claude", "codex": ".codex", "gemini": ".gemini", "cursor": ".cursor",
+              "cline": "Documents/Cline"}
+
+
+def _config_file(agent: str) -> Path:
+    home = Path.home()
+    if agent == "codex":
+        return Path(os.environ.get("CODEX_HOME", home / ".codex")) / "config.toml"
+    return {"claude": home / ".claude" / "settings.json", "gemini": home / ".gemini" / "settings.json",
+            "cursor": home / ".cursor" / "hooks.json"}[agent]
+
+
+def is_installed(agent: str) -> bool:
+    """Our hook is in the agent's settings."""
+    try:
+        if agent == "cline":
+            folder = Path.home() / "Documents" / "Cline" / "Hooks"
+            return any(CLINE_MARKER in p.read_text(encoding="utf-8", errors="replace")
+                       for p in folder.glob("*") if p.is_file())
+        path = _config_file(agent)
+        # JSON escapes the quotes around the exe path; the markers are written unescaped.
+        return path.exists() and _ours(path.read_text(encoding="utf-8", errors="replace").replace('\\"', '"'))
+    except OSError:
+        return False
+
+
+def agent_states() -> dict[str, str]:
+    """For each agent: 'on' (connected), 'off' (installed, not connected) or 'missing'."""
+    return {agent: "on" if is_installed(agent) else "off" if (Path.home() / folder).is_dir() else "missing"
+            for agent, folder in AGENT_DIRS.items()}
+
 
 # -- Windows autostart ---------------------------------------------------------------------
 def _startup_file() -> Path:

@@ -86,6 +86,9 @@ DEFAULTS: dict = {
     "read_along": True,
     # Back after a while (no input for `away_minutes`, or a call ending): what finished and who needs you.
     "catch_up": {"enabled": True, "away_minutes": 5},
+    # Desktop AI apps without hooks: their notifications ("ChatGPT: here's your answer...") read out.
+    # Off until you turn it on (`agent-voice apps on`); only these apps' notifications are ever read.
+    "desktop_apps": {"enabled": False, "apps": {"chatgpt": "chatgpt", "copilot": "copilot", "perplexity": "perplexity"}},
     # Each conversation speaks a little lower or higher than the others, so you can tell them apart.
     "thread_voices": True,
     # Chime mode sounds (0.0-1.0). Kept low so they don't disturb people around you.

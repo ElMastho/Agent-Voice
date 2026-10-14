@@ -368,6 +368,7 @@ class Daemon:
             threading.Thread(target=self._check_update, name="update", daemon=True).start()
             threading.Thread(target=self._call_watch, name="calls", daemon=True).start()
             threading.Thread(target=self._away_watch, name="away", daemon=True).start()
+            threading.Thread(target=self._apps_watch, name="apps", daemon=True).start()
 
     def _job_loop(self) -> None:
         while True:
@@ -735,6 +736,45 @@ class Daemon:
         if not self.quiet:
             self._wake_cancel.set()
             self.speaker.speak(said, "en")
+
+    # -- desktop apps -----------------------------------------------------------
+    @property
+    def desktop_apps(self) -> bool:
+        if "desktop_apps" in self.state:
+            return bool(self.state["desktop_apps"])
+        return bool(self.config.get("desktop_apps", {}).get("enabled", False))
+
+    def set_desktop_apps(self, on: bool) -> None:
+        self.state["desktop_apps"] = on
+        save_state(self.state)
+        log.info("desktop_apps=%s", on)
+        self._confirm("Desktop apps on." if on else "Desktop apps off.")
+
+    def _apps_watch(self) -> None:
+        """ChatGPT, Copilot... have no hooks: their notifications are their replies (opt-in)."""
+        from agent_voice import apps
+
+        watcher = None
+        while True:
+            time.sleep(3)
+            if not self.desktop_apps or not apps.available():
+                watcher = None
+                continue
+            try:
+                if watcher is None:
+                    watcher = apps.Watcher(self.config.get("desktop_apps", {}).get("apps"))
+                for toast in watcher.poll():
+                    self._app_reply(toast)
+            except Exception:
+                log.exception("desktop apps check failed")
+                time.sleep(60)
+
+    def _app_reply(self, toast: dict) -> None:
+        app = toast["app"]
+        label = AGENT_TITLES.get(app, app.capitalize())
+        log.info("%s notification (%d chars)", label, len(toast["text"]))
+        hwnd = winfocus.find_window(label)
+        self.jobs.put(lambda: self.speak(toast["text"], source=app, final=True, session=f"app-{app}", hwnd=hwnd))
 
     # -- usage ------------------------------------------------------------------
     def set_usage(self, data: dict) -> None:
@@ -1523,6 +1563,7 @@ class Daemon:
             "permission": self._permission_status(),
             "update": self.update,
             "wake": self.wake,
+            "desktop_apps": self.desktop_apps,
             "approvals": self.approvals,
             "muted": self.muted,
             "hands_free": self.hands_free,
@@ -1849,6 +1890,10 @@ def _handler(daemon: Daemon):
                 mode = data.get("mode", "toggle")
                 daemon.set_approvals(not daemon.approvals if mode == "toggle" else mode == "on")
                 return self._json(200, {"approvals": daemon.approvals})
+            if self.path == "/apps":
+                mode = data.get("mode", "toggle")
+                daemon.set_desktop_apps(not daemon.desktop_apps if mode == "toggle" else mode == "on")
+                return self._json(200, {"desktop_apps": daemon.desktop_apps})
             if self.path == "/wake":
                 mode = data.get("mode", "toggle")
                 daemon.set_wake(not daemon.wake if mode == "toggle" else mode == "on")

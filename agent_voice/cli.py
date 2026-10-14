@@ -37,6 +37,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
     p = sub.add_parser("wake", help='"Hey Claude, ..." while idle sends a new prompt (default: toggle)')
     p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
+    p = sub.add_parser("apps", help="read out ChatGPT / Copilot / Perplexity desktop notifications (default: toggle)")
+    p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
     p = sub.add_parser("chime", help="chime mode: no voice, a soft sound when the agent is done or needs you (default: toggle)")
     p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
 
@@ -140,6 +142,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "wake":
         result = client.request("/wake", {"mode": args.mode})
         print("not running" if result is None else f"wake word {'on' if result['wake'] else 'off'}")
+        return 0 if result else 1
+    if args.cmd == "apps":
+        result = client.request("/apps", {"mode": args.mode})
+        print("not running" if result is None else f"desktop apps {'on' if result['desktop_apps'] else 'off'}")
         return 0 if result else 1
     if args.cmd == "chime":
         result = client.request("/chime", {"mode": args.mode})

@@ -148,6 +148,20 @@ if sys.platform == "win32":
                 return front if front in windows[p] else windows[p][0]
         return 0
 
+    def find_window(text: str) -> int:
+        """A visible top-level window whose title contains `text` (case-insensitive), 0 if none."""
+        found: list[int] = []
+        want = text.lower()
+
+        def check(hwnd, _lparam):
+            if _user32.IsWindowVisible(hwnd) and not _user32.GetWindow(hwnd, 4) and want in title(hwnd).lower():
+                found.append(int(hwnd))
+                return False
+            return True
+
+        _user32.EnumWindows(_EnumProc(check), 0)
+        return found[0] if found else 0
+
     def _bring_forward(hwnd: int, attach: bool) -> None:
         # Windows only lets the process that received the last input steal focus;
         # a synthetic Alt press satisfies that rule.
@@ -194,4 +208,7 @@ else:
         return 0
 
     def app_window(pid: int) -> int:  # noqa: ARG001
+        return 0
+
+    def find_window(text: str) -> int:  # noqa: ARG001
         return 0

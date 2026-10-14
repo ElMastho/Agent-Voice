@@ -658,3 +658,29 @@ def test_watch_tracks_a_terminal_agent():
     t.tick()
     assert posts[-2] == ("/notify", {"kind": "input", "session": t.session, "agent": "aider",
                                      "text": "Apply these edits? (y/n)"})
+
+
+def test_desktop_app_notifications_only_from_listed_apps(tmp_path):
+    import sqlite3
+
+    from agent_voice import apps
+
+    db = tmp_path / "wpndatabase.db"
+    con = sqlite3.connect(db)
+    con.executescript("""
+        CREATE TABLE NotificationHandler (RecordId INTEGER PRIMARY KEY, PrimaryId TEXT);
+        CREATE TABLE Notification (Id INTEGER PRIMARY KEY, HandlerId INTEGER, Type TEXT, Payload BLOB);
+        INSERT INTO NotificationHandler VALUES (1, 'OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0!ChatGPT'), (2, 'Microsoft.Outlook');
+        INSERT INTO Notification VALUES (1, 1, 'toast', '<toast><visual><binding><text>old</text></binding></visual></toast>');
+    """)
+    con.commit()
+    w = apps.Watcher(db=db)
+    assert w.poll() == []  # what was already there isn't news
+    toast = ("<toast><visual><binding template='ToastGeneric'><text>ChatGPT</text>"
+             "<text>Here is the plan: three steps.</text></binding></visual></toast>")
+    con.execute("INSERT INTO Notification VALUES (2, 2, 'toast', ?)", ("<toast><text>Meeting</text><text>secret</text></toast>",))
+    con.execute("INSERT INTO Notification VALUES (3, 1, 'toast', ?)", (toast.encode(),))
+    con.commit()
+    con.close()
+    assert w.poll() == [{"app": "chatgpt", "title": "ChatGPT", "text": "Here is the plan: three steps."}]
+    assert w.poll() == []  # nothing changed: not even a query

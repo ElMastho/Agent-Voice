@@ -134,6 +134,13 @@ _ORDINALS = {
 }
 
 
+# How each agent is called when a conversation has no title of its own.
+AGENT_TITLES = {"claude": "Claude Code", "cline": "Cline", "claude-desktop": "Claude Desktop", "vscode": "VS Code",
+                "chatgpt": "ChatGPT", "claude-web": "Claude", "gemini-web": "Gemini", "aistudio": "AI Studio",
+                "perplexity": "Perplexity", "copilot": "Copilot", "gemini": "Gemini", "codex": "Codex",
+                "cursor": "Cursor", "windsurf": "Windsurf", "antigravity": "Antigravity", "aider": "Aider",
+                "opencode": "OpenCode", "goose": "Goose"}
+
 # One colour per conversation, picked from its id so it never changes: you learn which is which.
 THREAD_COLORS = ("#F472B6", "#60A5FA", "#34D399", "#FBBF24", "#A78BFA", "#F87171", "#22D3EE", "#FB923C")
 
@@ -196,6 +203,52 @@ def match_command(text: str) -> str | None:
     if not plain or len(plain.split()) > 5:
         return None
     return next((name for name, rx in _COMMANDS.items() if rx.match(plain)), None)
+
+
+# "Tell Codex to run the tests": a message for another conversation, said from anywhere.
+_ROUTES = (
+    re.compile(r"^(?:please\s+)?(?:tell|ask)\s+(?P<name>.+?)\s+(?:to|that)\s+(?P<msg>.+)$", re.I | re.S),
+    re.compile(r"^(?:send|message|write)\s+(?:to\s+)?(?P<name>[^,:]+?)\s*[,:]\s*(?P<msg>.+)$", re.I | re.S),
+    re.compile(r"^(?:dis|demande)\s+(?:à|a)\s+(?P<name>.+?)\s+(?:de\s+|d'|d’|que\s+|qu'|qu’)(?P<msg>.+)$", re.I | re.S),
+)
+# Words that name nothing in particular: "approve the agent" must not pick a conversation.
+_FILLER = {"the", "a", "an", "le", "la", "les", "l", "agent", "thread", "conversation", "one", "code", "please"}
+
+
+def parse_route(text: str) -> tuple[str, str] | None:
+    """'Tell Codex to run the tests.' -> ('Codex', 'run the tests.'); None for anything else."""
+    text = text.strip()
+    for rx in _ROUTES:
+        m = rx.match(text)
+        if m and 0 < len(m["name"].split()) <= 4 and m["msg"].strip(" .!?,"):
+            msg = m["msg"].strip()
+            return m["name"].strip(" ,"), msg[:1].upper() + msg[1:]
+    return None
+
+
+def _names(label: str) -> set[str]:
+    return {w for w in _plain(label).split() if w not in _FILLER and len(w) > 1}
+
+
+def names_match(said: str, label: str) -> bool:
+    """Does `said` ("codex", "the notch one") name the conversation called `label`?"""
+    want, have = _names(said), _names(label)
+    return bool(want) and want <= have
+
+
+def _join(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def result_label(result: dict | None) -> str:
+    """{"files": 3, "tests": "passed"} -> '3 files · tests passed'."""
+    if not result:
+        return ""
+    files = int(result.get("files") or 0)
+    parts = [f"{files} file{'s' if files != 1 else ''} changed"] if files else []
+    if result.get("tests"):
+        parts.append(f"tests {result['tests']}")
+    return " · ".join(parts)
 
 
 def _version(v: str) -> tuple:
@@ -291,6 +344,21 @@ class Daemon:
         self.in_call = ""
         self._call_override = False
         self._ptt_release = threading.Event()
+        # Every permission request still waiting (several agents can ask at once); `permission` is the one shown.
+        self._perms: dict[int, dict] = {}
+        # Conversations waiting on you that we can't answer for you ("waiting for your input"): open them.
+        self.attention: dict[str, dict] = {}
+        # Answers to questions asked through the MCP server (ask_user), collected by its polling.
+        self._answers: dict[int, str] = {}
+        self._ask_seq = 0
+        # Context used per conversation, and each agent's rate limits (Claude Code's status line).
+        self.usage: dict[str, dict] = {}
+        self.limits: dict[str, dict] = {}
+        # The last finished turn's outcome (files changed, tests), shown for a while in the notch.
+        self.last_result: dict | None = None
+        # What happened recently (turns done, agents asking for you), told when you come back.
+        self._events: list[dict] = []
+        self._away_since = 0.0
         # Bumped by the show/hide hotkey; the widget toggles when it sees the number change.
         self.widget_toggles = 0
         if start_threads:
@@ -299,6 +367,7 @@ class Daemon:
             threading.Thread(target=self._wake_loop, name="wake", daemon=True).start()
             threading.Thread(target=self._check_update, name="update", daemon=True).start()
             threading.Thread(target=self._call_watch, name="calls", daemon=True).start()
+            threading.Thread(target=self._away_watch, name="away", daemon=True).start()
 
     def _job_loop(self) -> None:
         while True:
@@ -409,7 +478,20 @@ class Daemon:
         data = data or {}
         log.info("notify kind=%s chime=%s", kind, self.chime)
         options = [str(o) for o in data.get("options") or [] if str(o).strip()]
-        if kind == "question" and options:
+        if kind == "message":  # a glance, not a voice: the banner only (and a chime when chimes are on)
+            session, source = str(data.get("session") or ""), str(data.get("agent") or "")
+            if session:
+                self.threads[session] = {"source": source, "last": time.time()}
+            self._show_banner(str(data.get("text") or ""), session, source, tag="note")
+            if self.chime:
+                self.play_chime("done")
+            return
+        if kind == "input":
+            self.need_input(str(data.get("session") or ""), str(data.get("agent") or data.get("source") or ""),
+                            str(data.get("text") or ""), announce=bool(data.get("announce", True)))
+            return
+        # A question with options, or (asked through MCP, with an id to collect the answer) a free one.
+        if kind == "question" and (options or data.get("id")):
             self.question = {
                 "session": str(data.get("session") or ""),
                 "agent": str(data.get("agent") or ""),
@@ -417,8 +499,10 @@ class Daemon:
                 "header": str(data.get("header") or ""),
                 "options": options,
                 "more": int(data.get("more") or 0),
+                "id": int(data.get("id") or 0),
                 "at": time.time(),
             }
+            self._event("needs", self.question["session"], self.question["agent"], self.question["question"])
             if self.muted:
                 return
             if self.chime:
@@ -429,7 +513,7 @@ class Daemon:
                 self.speaker.speak(preface)
             self._wake_cancel.set()
             listed = " ".join(f"{i}: {o}." for i, o in enumerate(options, 1))
-            self.speaker.speak(f"{self.question['question']} {listed}")
+            self.speaker.speak(f"{self.question['question']} {listed}".strip())
             if self.config["auto_listen"].get("enabled") and self.transcriber is not None:
                 self._reply_session = self.question["session"]
                 self._listen_armed = True  # your spoken answer picks an option
@@ -454,6 +538,12 @@ class Daemon:
         if index is None:
             index = match_option(text, options)
         label = options[index] if index is not None and 0 <= index < len(options) else ""
+        if q.get("id"):  # asked through MCP: the asking agent collects the answer, nothing to type
+            self._answers[q["id"]] = label or text
+            self._answers = dict(list(self._answers.items())[-20:])
+            self.question = None
+            log.info("answer to ask #%d collected", q["id"])
+            return True
         session = q["session"]
         hwnd = self._hwnd_for(session)
         title = self._title_for(hwnd, session)
@@ -477,6 +567,196 @@ class Daemon:
                 claudeapp.select_session(hwnd, title)
         return ok
 
+    # -- agents asking for you ----------------------------------------------------
+    def ask(self, session: str, source: str, question: str, options: list[str]) -> int:
+        """A question from an MCP client (ask_user): read out and shown; its answer is collected by ask_state()."""
+        self._ask_seq += 1
+        self.notify("question", {"session": session, "agent": source, "question": question, "options": options,
+                                 "id": self._ask_seq})
+        if session:
+            self.threads[session] = {"source": source, "last": time.time()}
+        return self._ask_seq
+
+    def ask_state(self, ask_id: int, cancel: bool = False) -> dict:
+        if ask_id in self._answers:
+            return {"answer": self._answers.pop(ask_id)}
+        pending = bool(self.question and self.question.get("id") == ask_id)
+        if cancel and pending:
+            self.question = None
+            self.cancel_listen()
+            pending = False
+        return {"answer": None, "pending": pending}
+
+    def need_input(self, session: str, source: str, text: str = "", announce: bool = True) -> None:
+        """An agent waits on you for something we can't answer here: it joins the "needs you" list."""
+        title = self._title(session, source)
+        self.attention[session] = {"source": source, "text": text.strip()[:300], "at": time.time()}
+        if session:
+            self.threads[session] = {"source": source, "last": time.time()}
+        self._event("needs", session, source, text)
+        log.info("%s needs you", title)
+        if not announce or self.muted:
+            return
+        self._show_banner(text or "Waiting for you", session, source, kind="needs", tag="needs you")
+        if self.chime:
+            self.play_chime("attention")
+        else:
+            self._wake_cancel.set()
+            self.speaker.speak(f"{title} needs you." + (f" {text}" if text and len(text) < 160 else ""))
+
+    def _settled(self, session: str) -> None:
+        """The conversation moved on (it talks, works, or you wrote to it): it no longer waits on you."""
+        self.attention.pop(session, None)
+
+    def _needs_status(self) -> list[dict]:
+        """Everything waiting on you, oldest first: approvals, a question, agents waiting for input."""
+        items = []
+        for p in sorted(self._perms.values(), key=lambda p: p["at"]):
+            items.append({"kind": "permission", "id": p["id"], "session": p["session"], "source": p["source"],
+                          "text": p["summary"], "at": p["at"]})
+        q = self.question
+        if q:
+            items.append({"kind": "question", "session": q["session"], "source": q["agent"], "text": q["question"],
+                          "at": q["at"]})
+        now = time.time()
+        self.attention = {s: a for s, a in self.attention.items() if now - a["at"] < 3600}
+        for session, a in self.attention.items():
+            items.append({"kind": "input", "session": session, "source": a["source"],
+                          "text": a["text"] or "Waiting for you", "at": a["at"]})
+        for item in items:
+            item["title"] = self._title(item["session"], item.pop("source"))
+            item["color"] = thread_color(item["session"] or item["title"])
+            item["at"] = round(item["at"])
+        return items
+
+    def _labels(self, session: str) -> list[str]:
+        source = self.threads.get(session, {}).get("source", "")
+        return [self._title(session, source), source, {"claude": "claude", "codex": "codex"}.get(source, "")]
+
+    def _find_thread(self, name: str, among: set[str] | None = None) -> str | None:
+        """The most recent conversation called `name` ("Codex", "the notch redesign")."""
+        for session, _info in sorted(self.threads.items(), key=lambda kv: -kv[1]["last"]):
+            if among is not None and session not in among:
+                continue
+            if any(label and names_match(name, label) for label in self._labels(session)):
+                return session
+        return None
+
+    def _mentioned(self, text: str, among: set[str]) -> str | None:
+        """A conversation named somewhere in `text` ("approve Codex", "deny the notch one")."""
+        words = _names(text)
+        for session in among:
+            for label in self._labels(session):
+                if label and _names(label) and _names(label) <= words:
+                    return session
+        return None
+
+    def _voice_approval(self, text: str) -> bool:
+        """'Yes' / 'approve Codex' / 'deny the notch one' while approvals wait: answer the one named, else the one shown."""
+        if not self._perms:
+            return False
+        allow = match_yes_no(text)
+        if allow is None:
+            return False
+        named = self._mentioned(text, {p["session"] for p in self._perms.values()})
+        perm = next((p for p in self._perms.values() if p["session"] == named), None) if named else self.permission
+        if perm is None:
+            return False
+        self.answer_permission(perm["id"], allow)
+        return True
+
+    def _routed(self, text: str) -> tuple[str, str] | None:
+        """'Tell Codex to run the tests' -> (Codex's session, 'Run the tests'), when we know that conversation."""
+        parsed = parse_route(text)
+        if not parsed:
+            return None
+        session = self._find_thread(parsed[0])
+        return (session, parsed[1]) if session is not None else None
+
+    def _send_to(self, session: str, message: str, lang: str) -> None:
+        """Type a message into a conversation's own window (and send it), then come back."""
+        hwnd = self._session_hwnd.get(session, 0)
+        title = self._title(session, self.threads.get(session, {}).get("source", ""))
+        if not (hwnd and winfocus.is_window(hwnd)):
+            log.info("no window known for %r: message not sent", title)
+            self._show_banner(f"I don't know where {title} is yet: send it one message from its window first.",
+                              session, "", kind="you", tag="not sent")
+            _beep(300, 150)
+            return
+        self._heard(message, lang, session, tag="sent")
+        self._paste(message, hwnd, submit=True, session=session)
+
+    # -- away -------------------------------------------------------------------
+    def _event(self, kind: str, session: str, source: str, text: str = "") -> None:
+        self._events = [*self._events[-49:], {"kind": kind, "session": session, "source": source,
+                                              "text": " ".join(text.split())[:200], "at": time.time()}]
+
+    def _away_watch(self) -> None:
+        """Every few seconds: have you been away (no input, or in a call)? Tell you what happened when you're back."""
+        while True:
+            time.sleep(5)
+            try:
+                self._check_away(winfocus.idle_seconds(), time.time())
+            except Exception:
+                log.exception("away check failed")
+
+    def _check_away(self, idle: float, now: float) -> None:
+        cfg = self.config.get("catch_up", {})
+        if not cfg.get("enabled", True):
+            return
+        away = idle >= 60 * float(cfg.get("away_minutes", 5)) or bool(self.in_call)
+        if away and not self._away_since:
+            self._away_since = now - (0 if self.in_call and idle < 60 else idle)
+        elif not away and self._away_since:
+            since, self._away_since = self._away_since, 0.0
+            self._catch_up([e for e in self._events if e["at"] >= since])
+
+    def _catch_up(self, events: list[dict]) -> None:
+        """'While you were away: Notch redesign finished; Codex needs you.' Once, as you come back."""
+        if not events:
+            return
+        waiting = {item["session"] for item in self._needs_status()}
+        done, needs, lines = [], [], []
+        for e in events:
+            title = self._title(e["session"], e["source"])
+            if e["kind"] == "done" and title not in done:
+                done.append(title)
+                if e["text"]:
+                    lines.append(f"{title}: {e['text']}")
+            elif e["kind"] == "needs" and e["session"] in waiting and title not in needs:
+                needs.append(title)
+        parts = ([f"{_join(done)} finished"] if done else []) + (
+            [f"{_join(needs)} need{'s' if len(needs) == 1 else ''} you"] if needs else [])
+        if not parts:
+            return
+        said = f"While you were away: {'; '.join(parts)}."
+        log.info("catch-up: %s", said)
+        self._show_banner("\n".join([said, *lines[-3:]]), "", "", kind="catchup", tag="while you were away")
+        if not self.quiet:
+            self._wake_cancel.set()
+            self.speaker.speak(said, "en")
+
+    # -- usage ------------------------------------------------------------------
+    def set_usage(self, data: dict) -> None:
+        """Context used by a conversation, and its agent's rate limits (from Claude Code's status line)."""
+        session, source = str(data.get("session") or ""), str(data.get("source") or "claude")
+        context = data.get("context")
+        if session and isinstance(context, (int, float)):
+            self.usage[session] = {"context": max(0, min(100, round(float(context)))), "at": time.time()}
+            self.usage = dict(list(self.usage.items())[-50:])
+        limits = {}
+        for window in ("five_hour", "seven_day"):
+            w = data.get(window)
+            if isinstance(w, dict) and isinstance(w.get("pct"), (int, float)):
+                limits[window] = {"pct": round(float(w["pct"])), "resets": int(w.get("resets") or 0)}
+        if limits:
+            self.limits[source] = limits
+
+    def _limits_status(self) -> dict:
+        now = time.time()
+        return {source: {k: v for k, v in windows.items() if not v["resets"] or v["resets"] > now}
+                for source, windows in self.limits.items()}
+
     def set_muted(self, muted: bool) -> None:
         self.state["muted"] = muted
         save_state(self.state)
@@ -495,22 +775,33 @@ class Daemon:
         final: bool = False,
         voice: str | None = None,
         session: str = "",
+        hwnd: int = 0,
+        result: dict | None = None,
     ) -> int:
-        """Queue text; `final` marks the end of an agent's turn and arms auto-listen."""
-        if session and self.question and self.question["session"] == session:
+        """Queue text; `final` marks the end of an agent's turn and arms auto-listen.
+
+        `hwnd`: the agent's window when its hook knows it (a terminal), so replies and messages can reach it.
+        `result`: what the turn changed ({"files": 3, "tests": "passed"}), shown in the notch.
+        """
+        if session and self.question and self.question["session"] == session and not self.question.get("id"):
             self.question = None  # the agent moved on: the question was answered
         if session:
             self.threads[session] = {"source": source, "last": time.time()}
+            if text.strip() or final:
+                self._settled(session)
+            if hwnd and not self._session_hwnd.get(session):
+                self._remember_hwnd(session, hwnd)
         with self._lock:
             if session and self._voice_session and session != self._voice_session and not interrupt and (
                     self.speaker.busy or self._listen_armed or self._listening):
                 # Another thread is talking (or waiting for your reply): this one waits its turn.
-                self._queue.append((text, lang, source, interrupt, final, voice, session))
+                self._queue.append((text, lang, source, interrupt, final, voice, session, 0, result))
                 log.info("queued speech from another thread (%d waiting)", len(self._queue))
                 return 0
         self._record_turn(session, source, text, lang, voice, final)
         if final:
             self.activity.pop(session, None)  # the agent is done working
+            self._finished(session, source, text, result)
         if self.quiet:
             # Chimes or silent: no voice and no open mic; the end of a turn shows as a banner.
             log.info("speak source=%s output=%s final=%s", source, self.output, final)
@@ -518,7 +809,7 @@ class Daemon:
                 turn = self._turn_text(session)
                 shown = text.strip() if self.summary and text.strip() else turn or text.strip()
                 if shown:
-                    self._show_banner(shown, session, source)
+                    self._show_banner(shown, session, source, tag=result_label(result))
                 self.play_chime("done")  # silent: no sound either
             return 0
         if interrupt:
@@ -550,6 +841,25 @@ class Daemon:
             self._last_session = session
         if final:
             turn["done"] = True
+
+    def _finished(self, session: str, source: str, text: str, result: dict | None) -> None:
+        """A turn ended: keep its outcome for the notch, and note it for when you come back."""
+        turn = self._turns.get(session)
+        if turn is not None and result:
+            turn["result"] = result
+        summary = text.strip() or self._turn_text(session)
+        self._event("done", session, source, textclean.clean(summary) if summary else "")
+        if result and (result.get("files") or result.get("tests")):
+            title = self._title(session, source)
+            self.last_result = {"session": session, "title": title, "color": thread_color(session or title),
+                                "files": int(result.get("files") or 0), "tests": result.get("tests") or "",
+                                "at": round(time.time())}
+
+    def _remember_hwnd(self, session: str, hwnd: int) -> None:
+        self._session_hwnd[session] = hwnd
+        self._session_hwnd = dict(list(self._session_hwnd.items())[-50:])
+        self.state["session_hwnds"] = self._session_hwnd
+        save_state(self.state)
 
     def _turn_text(self, session: str) -> str:
         return "\n\n".join((self._turns.get(session) or {}).get("texts") or [])
@@ -662,10 +972,8 @@ class Daemon:
             source = source or self.threads.get(session, {}).get("source", "")
             self.threads[session] = {"source": source, "last": time.time()}
             if hwnd and self._session_hwnd.get(session) != hwnd:
-                self._session_hwnd[session] = hwnd
-                self._session_hwnd = dict(list(self._session_hwnd.items())[-50:])
-                self.state["session_hwnds"] = self._session_hwnd
-                save_state(self.state)
+                self._remember_hwnd(session, hwnd)
+            self._settled(session)
             if session in self._turns:
                 self._turns[session]["done"] = True  # what comes next is a new turn
             now = time.time()
@@ -685,9 +993,14 @@ class Daemon:
             act = {"source": source, "started": now, "steps": 0}
             self.activity[session] = act
         act.update(last=now, label=label[:80], steps=act["steps"] + 1)
+        self._settled(session)
         if session:
             self.threads[session] = {"source": source or self.threads.get(session, {}).get("source", ""),
                                      "last": now}
+
+    def activity_done(self, session: str) -> None:
+        """An agent says it finished working (MCP set_status done): no reply to speak, just stop the timer."""
+        self.activity.pop(session, None)
 
     def _activity_status(self) -> dict | None:
         """The busiest-looking conversation's live activity (the most recent), and how many others work."""
@@ -700,7 +1013,7 @@ class Daemon:
         title = self._title(session, act["source"])
         return {"session": session, "title": title, "color": thread_color(session or title),
                 "label": act.get("label", ""), "steps": act["steps"], "elapsed": int(now - act["started"]),
-                "others": len(live) - 1}
+                "others": len(live) - 1, "context": (self.usage.get(session) or {}).get("context")}
 
     def _call_watch(self) -> None:
         """Every few seconds: is another app on the mic? Then chimes until the call ends."""
@@ -820,16 +1133,17 @@ class Daemon:
                 return
             answering = (permission is not None and permission is self.permission) or (
                 question is not None and question is self.question)
+            routed = None if answering or match_command(text) else self._routed(text)
+            if routed and routed[0] != session:
+                self._send_to(routed[0], routed[1], lang)  # "Tell Codex to ...": goes to Codex, not here
+                return
             tag = ("answer" if answering else "command" if match_command(text)
                    else "sent" if self.hands_free or force_submit else "typed")
             self._heard(text, lang, session, tag=tag)
             if permission is not None and permission is self.permission:
-                allow = match_yes_no(text)
-                if allow is None:
+                if not self._voice_approval(text):
                     log.info("permission answer unclear: %r", text)
                     _beep(300, 150)
-                else:
-                    self.answer_permission(permission["id"], allow)
             elif question is not None and question is self.question:
                 self.answer(text=text)
             elif match_command(text):
@@ -918,13 +1232,13 @@ class Daemon:
             if session not in self._file_titles:  # app session files: read once per session, not per poll
                 self._file_titles[session] = claudeapp.session_title(session)
             title = self._file_titles[session]
-        return title or {"claude": "Claude Code", "cline": "Cline"}.get(source, source.capitalize())
+        return title or AGENT_TITLES.get(source, source.capitalize())
 
     def _thread_status(self) -> dict | None:
         """The conversation the voice (or the open mic) belongs to: its title and a colour of its own."""
         q, perm = self.question, self.permission
         if perm:
-            session, source = perm["session"], "claude"
+            session, source = perm["session"], perm["source"]
         elif q:
             session, source = q["session"], q["agent"]
         elif self._mic_phase:
@@ -941,12 +1255,15 @@ class Daemon:
     def _threads_status(self) -> list[dict]:
         """The last few conversations heard from, newest first, with what each is doing."""
         queued = {job[6] for job in self._queue}
+        asking = {p["session"] for p in self._perms.values()}
         out = []
         for session, info in sorted(self.threads.items(), key=lambda kv: -kv[1]["last"])[:4]:
-            if session == (self.permission or {}).get("session"):
+            if session in asking:
                 state = "permission"
             elif session == (self.question or {}).get("session"):
                 state = "question"
+            elif session in self.attention:
+                state = "input"
             elif session == self._voice_session and self.speaker.busy:
                 state = "speaking"
             elif session == self._reply_session and self._mic_phase:
@@ -959,10 +1276,24 @@ class Daemon:
             if not state and session in self.activity:
                 state = "working"
             reply = self._turn_text(session)
+            turn = self._turns.get(session) or {}
             out.append({"session": session, "title": title, "color": thread_color(session or title),
                         "state": state, "ago": int(time.time() - info["last"]),
-                        "reply": " ".join(reply.split())[-160:]})
+                        "reply": " ".join(reply.split())[-160:],
+                        "context": (self.usage.get(session) or {}).get("context"),
+                        "result": turn.get("result") if turn.get("done") else None})
         return out
+
+    def attach(self, paths: list[str], text: str = "", session: str = "") -> None:
+        """Files (or text) dropped on the notch: typed into the conversation's input, not sent, so you can add to it."""
+        session = session or self._last_session
+        quoted = " ".join(f'"{p}"' if " " in p else p for p in paths)
+        message = " ".join(x for x in (quoted, text.strip()) if x)
+        if not message:
+            return
+        hwnd = self._hwnd_for(session)
+        log.info("dropped %d file(s) into %r", len(paths), self._title(session))
+        self._paste(message + " ", hwnd, submit=False, session=session)
 
     def open_thread(self, session: str) -> None:
         """Bring a conversation to the front (widget thread list)."""
@@ -974,44 +1305,67 @@ class Daemon:
                 claudeapp.select_session(hwnd, title)
 
     # -- permissions ------------------------------------------------------------
-    def request_permission(self, session: str, tool: str, summary: str) -> int:
-        """Claude wants to use a tool: ask out loud and in the widget; the hook polls the answer."""
+    def request_permission(self, session: str, tool: str, summary: str, source: str = "claude") -> int:
+        """An agent wants to use a tool: ask out loud and in the widget; the hook polls the answer.
+
+        Several can wait at once (parallel agents): the first is asked, the others queue in "needs you".
+        """
         self._perm_seq += 1
-        self.permission = {"id": self._perm_seq, "session": session, "tool": tool, "summary": summary,
-                           "at": time.time()}
+        perm = {"id": self._perm_seq, "session": session, "tool": tool, "summary": summary, "source": source,
+                "at": time.time()}
+        self._perms[perm["id"]] = perm
         if session:
-            self.threads[session] = {"source": "claude", "last": time.time()}
-        log.info("permission #%d: %s", self._perm_seq, summary)
-        if not self.muted:
-            if self.chime:
-                self.play_chime("attention")
-            else:
-                self.speaker.stop()
-                self._wake_cancel.set()
-                self.speaker.speak(f"{self._title(session, 'claude')} wants to {summary}. Allow?", "en")
-                if self.transcriber is not None:
-                    self._reply_session = session
-                    self._listen_armed = True
+            self.threads[session] = {"source": source, "last": time.time()}
+        self._event("needs", session, source, summary)
+        log.info("permission #%d: %s (%d waiting)", self._perm_seq, summary, len(self._perms))
+        if self.permission is None:
+            self._present_permission(perm)
+        elif self.chime:
+            self.play_chime("attention")
         return self._perm_seq
 
-    def answer_permission(self, perm_id: int, allow: bool) -> None:
+    def _present_permission(self, perm: dict) -> None:
+        self.permission = perm
+        if self.muted:
+            return
+        if self.chime:
+            self.play_chime("attention")
+            return
+        self.speaker.stop()
+        self._wake_cancel.set()
+        self.speaker.speak(f"{self._title(perm['session'], perm['source'])} wants to {perm['summary']}. Allow?", "en")
+        if self.transcriber is not None:
+            self._reply_session = perm["session"]
+            self._listen_armed = True
+
+    def _drop_permission(self, perm_id: int) -> None:
+        """Answered or given up: the next waiting request (if any) is asked."""
+        self._perms.pop(perm_id, None)
         if self.permission and self.permission["id"] == perm_id:
             self.permission = None
+            waiting = sorted(self._perms.values(), key=lambda p: p["at"])
+            if waiting:
+                self._present_permission(waiting[0])
+
+    def answer_permission(self, perm_id: int, allow: bool) -> None:
         self._perm_decisions[perm_id] = "allow" if allow else "deny"
         log.info("permission #%d: %s", perm_id, "allowed" if allow else "denied")
         _beep(880 if allow else 440, 80)
+        self._drop_permission(perm_id)
 
     def permission_state(self, perm_id: int, cancel: bool = False) -> str:
         """The decision for a request ("" while pending). `cancel`: the hook gave up waiting."""
-        if cancel and self.permission and self.permission["id"] == perm_id:
-            self.permission = None
-            self.cancel_listen()
+        if cancel and perm_id in self._perms:
+            if self.permission and self.permission["id"] == perm_id:
+                self.cancel_listen()
+            self._drop_permission(perm_id)
         return self._perm_decisions.pop(perm_id, "")
 
     def _permission_status(self) -> dict | None:
+        for perm_id, p in list(self._perms.items()):
+            if time.time() - p["at"] > 900:  # the hook stopped asking long ago
+                self._drop_permission(perm_id)
         p = self.permission
-        if p and time.time() - p["at"] > 900:
-            self.permission = p = None
         return {k: p[k] for k in ("id", "tool", "summary")} if p else None
 
     # -- updates ----------------------------------------------------------------
@@ -1071,8 +1425,9 @@ class Daemon:
             time.sleep(0.3)
             if not self.wake or self.muted or self.chime or self.transcriber is None:
                 continue
+            # Approvals waiting don't stop it: "Hey Claude, approve Codex" answers them once the reply mic closed.
             if (self.speaker.busy or self._listening or self._listen_armed or self._ptt_active
-                    or self.question or self.permission or self._queue):
+                    or self.question or self._queue):
                 continue
             try:
                 if listener is None:
@@ -1112,6 +1467,13 @@ class Daemon:
                 continue
             log.info("wake word heard (%d chars follow)", len(command))
             session = self._voice_session or self._reply_session
+            if self._perms and self._voice_approval(command):  # "Hey Claude, approve Codex"
+                self._heard(command, lang, "", tag="answer")
+                continue
+            routed = self._routed(command)
+            if routed:  # "Hey Claude, tell the notch redesign to run the tests"
+                self._send_to(routed[0], routed[1], lang)
+                continue
             if len(command.split()) >= 3:
                 self._heard(command, lang, session, tag="sent")
                 _beep(880, 60)
@@ -1152,6 +1514,9 @@ class Daemon:
             if self.banner and time.time() - self.banner["at"] < 60 else None,
             "last_reply": {"session": self._last_session} if self._turn_text(self._last_session) else None,
             "question": self._question_status(),
+            "needs": self._needs_status(),
+            "limits": self._limits_status(),
+            "result": self.last_result if self.last_result and time.time() - self.last_result["at"] < 120 else None,
             "thread": self._thread_status(),
             "threads": self._threads_status(),
             "queued": len(self._queue),
@@ -1298,6 +1663,13 @@ def status_tag(st: dict) -> str:
     return f"{zlib.crc32(json.dumps(shown, sort_keys=True, default=str).encode()):08x}"
 
 
+def _int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _handler(daemon: Daemon):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # silence default stderr logging
@@ -1372,9 +1744,26 @@ def _handler(daemon: Daemon):
                     bool(data.get("final")),
                     data.get("voice"),
                     str(data.get("session") or ""),
+                    _int(data.get("hwnd")),
+                    data.get("result") if isinstance(data.get("result"), dict) else None,
                 )
                 daemon.jobs.put(lambda: daemon.speak(*args))
                 return self._json(200, {"queued": True, "muted": daemon.muted})
+            if self.path == "/ask":
+                options = [str(o) for o in data.get("options") or [] if str(o).strip()][:8]
+                ask_id = daemon.ask(str(data.get("session") or ""), str(data.get("source") or ""),
+                                    str(data.get("question") or "")[:500], options)
+                return self._json(200, {"id": ask_id})
+            if self.path == "/ask_state":
+                return self._json(200, daemon.ask_state(_int(data.get("id")), cancel=bool(data.get("cancel"))))
+            if self.path == "/usage":
+                daemon.set_usage(data)
+                return self._json(200, {"ok": True})
+            if self.path == "/attach":
+                paths = [str(p) for p in data.get("paths") or []][:20]
+                args = (paths, str(data.get("text") or "")[:20000], str(data.get("session") or ""))
+                threading.Thread(target=daemon.attach, args=args, daemon=True).start()
+                return self._json(200, {"ok": True})
             if self.path == "/reply":
                 daemon.reply_now()
                 return self._json(200, {"ok": True})
@@ -1402,8 +1791,11 @@ def _handler(daemon: Daemon):
                                         str(data.get("source") or ""))
                 return self._json(200, {"ok": True})
             if self.path == "/activity":
-                daemon.tool_used(str(data.get("session") or ""), str(data.get("source") or ""),
-                                 str(data.get("label") or ""))
+                if data.get("done"):
+                    daemon.activity_done(str(data.get("session") or ""))
+                else:
+                    daemon.tool_used(str(data.get("session") or ""), str(data.get("source") or ""),
+                                     str(data.get("label") or ""))
                 return self._json(200, {"ok": True})
             if self.path == "/output":
                 mode = str(data.get("mode") or "")
@@ -1441,7 +1833,8 @@ def _handler(daemon: Daemon):
                 return self._json(200, {"ok": True})
             if self.path == "/permission":
                 perm_id = daemon.request_permission(str(data.get("session") or ""), str(data.get("tool") or ""),
-                                                    str(data.get("summary") or "use a tool"))
+                                                    str(data.get("summary") or "use a tool"),
+                                                    str(data.get("source") or "claude"))
                 return self._json(200, {"id": perm_id})
             if self.path == "/permission_state":
                 decision = daemon.permission_state(int(data.get("id") or 0), cancel=bool(data.get("cancel")))

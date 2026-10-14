@@ -44,10 +44,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("agent", help="claude | codex | gemini | cursor | generic")
     p.add_argument("rest", nargs=argparse.REMAINDER)
 
+    p = sub.add_parser("mcp", help="MCP server (stdio): speak, notify, ask_user and set_status for any MCP app")
+    p.add_argument("--client", default="", help="the app's name, when it doesn't say it itself")
+    p.add_argument("--hooks", action="store_true", help="the app already speaks through hooks (no speak tool)")
+
+    p = sub.add_parser("watch", help="run a terminal agent (aider, opencode...) and announce when it waits for you")
+    p.add_argument("command", nargs=argparse.REMAINDER)
+
+    p = sub.add_parser("native-host", help=argparse.SUPPRESS)  # browser extension bridge (Chrome native messaging)
+    p.add_argument("origin", nargs="*")
+
     p = sub.add_parser("install", help="register hooks for agents")
     p.add_argument("agents", nargs="*", default=["all"])
     p = sub.add_parser("uninstall", help="remove hooks for agents")
     p.add_argument("agents", nargs="*", default=["all"])
+
+    p = sub.add_parser("usage", help="show Claude Code's rate limits in the notch (adds a status line)")
+    p.add_argument("mode", nargs="?", default="on", choices=["on", "off"])
 
     p = sub.add_parser("autostart", help="start the daemon at Windows login")
     p.add_argument("mode", nargs="?", default="on", choices=["on", "off"])
@@ -63,6 +76,19 @@ def main(argv: list[str] | None = None) -> int:
         from agent_voice.hooks import run
 
         return run(args.agent, args.rest)
+
+    if args.cmd == "mcp":
+        from agent_voice.mcp import run
+
+        return run(args.client, args.hooks)
+    if args.cmd == "watch":
+        from agent_voice.watch import run
+
+        return run(args.command)
+    if args.cmd == "native-host":
+        from agent_voice.native_host import run
+
+        return run()
 
     if args.cmd == "widget":
         from agent_voice.widget import run
@@ -145,6 +171,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{name}: {INSTALLERS[name](remove=args.cmd == 'uninstall')}")
             except Exception as exc:
                 print(f"{name}: failed: {exc}")
+        return 0
+    if args.cmd == "usage":
+        from agent_voice.install import usage_line
+
+        print(usage_line(args.mode == "on"))
         return 0
     if args.cmd == "autostart":
         from agent_voice.install import autostart

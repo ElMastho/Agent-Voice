@@ -124,13 +124,10 @@ def _is_real_user_prompt(entry: dict) -> bool:
 
 def claude_turn_texts(transcript: Path) -> list[str]:
     """Assistant text blocks of the current turn (since the last real user prompt), main thread only."""
-    entries = []
-    with transcript.open(encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            try:
-                entries.append(json.loads(line))
-            except ValueError:
-                continue
+    return turn_texts(_read_entries(transcript))
+
+
+def turn_texts(entries: list[dict]) -> list[str]:
     start = 0
     for i, entry in enumerate(entries):
         if _is_real_user_prompt(entry):
@@ -140,6 +137,73 @@ def claude_turn_texts(transcript: Path) -> list[str]:
         if entry.get("type") == "assistant" and not entry.get("isSidechain"):
             texts.extend(t for t in _text_blocks(entry.get("message") or {}) if t.strip())
     return texts
+
+
+def _read_entries(transcript: Path) -> list[dict]:
+    entries = []
+    with transcript.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                entries.append(json.loads(line))
+            except ValueError:
+                continue
+    return entries
+
+
+EDIT_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit"}
+# Commands that run a test suite; their last run in the turn says "tests passed" or "failed".
+_TEST_RUN = re.compile(r"\b(pytest|py\.test|unittest|tox|nox|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test|jest|vitest|"
+                       r"mocha|cargo\s+test|go\s+test|mvn\s+(?:\S+\s+)*test|gradlew?\s+test|dotnet\s+test|rspec|"
+                       r"phpunit|ctest|make\s+(?:check|test))\b")
+_TEST_FAILED = re.compile(r"\b[1-9]\d*\s+(?:failed|failing|errors?)\b|\bFAILED\b|\bFAIL\b|Tests?\s+failed|"
+                          r"test result: FAILED|^FAIL\b", re.M)
+
+
+def _tool_output(block: dict) -> str:
+    content = block.get("content")
+    if isinstance(content, list):
+        return "\n".join(str(b.get("text", "")) for b in content if isinstance(b, dict))
+    return str(content or "")
+
+
+def claude_turn_result(entries: list[dict]) -> dict:
+    """What the current turn did: files edited, and whether its last test run passed."""
+    start = 0
+    for i, entry in enumerate(entries):
+        if _is_real_user_prompt(entry):
+            start = i + 1
+    files, tests, runs = set(), "", {}
+    for entry in entries[start:]:
+        content = (entry.get("message") or {}).get("content")
+        if not isinstance(content, list) or entry.get("isSidechain"):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                args = block.get("input") or {}
+                if block.get("name") in EDIT_TOOLS:
+                    path = args.get("file_path") or args.get("notebook_path")
+                    if path:
+                        files.add(str(path))
+                elif block.get("name") == "Bash" and _TEST_RUN.search(str(args.get("command", ""))):
+                    runs[block.get("id")] = True
+            elif block.get("type") == "tool_result" and block.get("tool_use_id") in runs:
+                failed = block.get("is_error") or _TEST_FAILED.search(_tool_output(block))
+                tests = "failed" if failed else "passed"
+    return {"files": len(files), "tests": tests}
+
+
+def claude_context(entries: list[dict]) -> float | None:
+    """Context used by the last request, in percent (what Claude Code's status line calls used_percentage)."""
+    for entry in reversed(entries):
+        usage = (entry.get("message") or {}).get("usage") if entry.get("type") == "assistant" else None
+        if isinstance(usage, dict) and not entry.get("isSidechain"):
+            used = sum(int(usage.get(k) or 0) for k in
+                       ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+            window = 1_000_000 if used > 200_000 else 200_000  # past 200k it can only be a 1M-context model
+            return round(100 * used / window, 1)
+    return None
 
 
 def _digest(text: str) -> str:
@@ -285,9 +349,14 @@ def hook_claude(raw: str) -> None:
             sys.stdout.write(json.dumps(out))
         return
     if event == "Notification":
-        # Permission prompts and "waiting for your input"; the daemon only rings in chime mode.
-        if "permission" in str(data.get("message", "")).lower():
+        # Permission prompts ring in chime mode; "waiting for your input" puts the session in "needs you".
+        message = str(data.get("message", ""))
+        if "permission" in message.lower():
             client.request("/notify", {"kind": "attention"}, timeout=1.0)
+        elif "waiting for your input" in message.lower():
+            client.request("/notify", {"kind": "input", "session": str(data.get("session_id", "")),
+                                       "agent": "claude", "text": "Waiting for your input", "announce": False},
+                           timeout=1.0)
         return
     if event == "PreToolUse" and data.get("tool_name") != "AskUserQuestion":
         # Live activity in the notch: what it's doing now (this hook is async: the tool doesn't wait).
@@ -300,9 +369,17 @@ def hook_claude(raw: str) -> None:
     if event == "PreToolUse" and not asking and not load_config().get("speak_progress", True):
         return
     texts: list[str] = []
+    result = None
     transcript = data.get("transcript_path")
     if transcript and Path(transcript).exists():
-        texts = claude_turn_texts(Path(transcript))
+        entries = _read_entries(Path(transcript))
+        texts = turn_texts(entries)
+        if event == "Stop":
+            result = claude_turn_result(entries)
+            context = claude_context(entries)
+            if context is not None:
+                client.request("/usage", {"session": str(data.get("session_id", "")), "source": "claude",
+                                          "context": context}, timeout=1.0)
     last = data.get("last_assistant_message") or ""
     if event == "Stop" and last.strip() and not _covered(last, texts):
         # Only a fallback for when the transcript isn't flushed yet: its formatting can differ
@@ -332,7 +409,7 @@ def hook_claude(raw: str) -> None:
     # On Stop, call even with nothing new to say: it marks the end of the turn (arms auto-listen).
     if text.strip() or final:
         # The session id lets the daemon type your spoken reply into this conversation (desktop app).
-        client.speak(text, source="claude", final=final, session=str(data.get("session_id", "")))
+        client.speak(text, source="claude", final=final, session=str(data.get("session_id", "")), result=result)
 
 
 def notify_question(session: str, agent: str, question: str, options: list[str], header: str = "",
@@ -389,15 +466,35 @@ def hook_cline(raw: str) -> dict:
 
 
 # -- Generic JSON payloads (Codex, Gemini CLI, Cursor, anything else) -----------------
+# Where agents put their conversation id (Codex: thread-id, Gemini CLI: session_id, Cursor: conversation_id).
+SESSION_KEYS = ("session_id", "thread-id", "thread_id", "conversation_id", "sessionId", "conversationId")
+
+
+def _session_of(agent: str, payload) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    found = next((str(payload[k]) for k in SESSION_KEYS if payload.get(k)), "")
+    return f"{agent}-{found}" if found else ""
+
+
 def hook_payload(agent: str, raw: str) -> None:
     _log_payload(agent, raw)
     try:
         payload = json.loads(raw)
     except ValueError:
         payload = raw
+    from agent_voice import winfocus
+
+    session = _session_of(agent, payload)
     if isinstance(payload, dict):
         kind = payload.get("type")
         if agent == "codex" and kind and kind != "agent-turn-complete":
+            return
+        if payload.get("hook_event_name") == "Notification":
+            # Gemini CLI waits on a tool confirmation: it goes to "needs you" (answered in its terminal).
+            client.request("/notify", {"kind": "input", "session": session, "agent": agent,
+                                       "text": str(payload.get("message") or "Waiting for your confirmation")},
+                           timeout=1.0)
             return
     text = extract_text(payload)
     if text.strip():
@@ -405,7 +502,30 @@ def hook_payload(agent: str, raw: str) -> None:
             text = summarize(text, int(load_config().get("summary", {}).get("max_chars", 280)))
         else:
             text = strip_summary(text)
-        client.speak(text, source=agent, final=True)
+        # The terminal the agent runs in: messages you send it by name ("tell Codex to...") are typed there.
+        client.speak(text, source=agent, final=True, session=session, hwnd=winfocus.console_window())
+
+
+def statusline(raw: str) -> str:
+    """Claude Code's status line: report context and rate limits to the notch, and print a short line."""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return ""
+    ctx = data.get("context_window") or {}
+    limits = data.get("rate_limits") or {}
+    usage = {"session": str(data.get("session_id", "")), "source": "claude", "context": ctx.get("used_percentage")}
+    for window in ("five_hour", "seven_day"):
+        w = limits.get(window) or {}
+        if isinstance(w.get("used_percentage"), (int, float)):
+            usage[window] = {"pct": w["used_percentage"], "resets": w.get("resets_at") or 0}
+    client.request("/usage", usage, timeout=0.5)
+    parts = [str((data.get("model") or {}).get("display_name") or "")]
+    if isinstance(ctx.get("used_percentage"), (int, float)):
+        parts.append(f"context {round(ctx['used_percentage'])}%")
+    if "five_hour" in usage:
+        parts.append(f"5h {round(usage['five_hour']['pct'])}%")
+    return " · ".join(p for p in parts if p)
 
 
 def run(agent: str, argv: list[str]) -> int:
@@ -416,7 +536,9 @@ def run(agent: str, argv: list[str]) -> int:
         else:
             # Hook payloads are UTF-8 JSON whatever the console code page.
             raw = sys.stdin.buffer.read().decode("utf-8", "replace").lstrip("﻿") if not sys.stdin.isatty() else ""
-        if agent == "claude":
+        if agent == "statusline":
+            sys.stdout.write(statusline(raw))
+        elif agent == "claude":
             hook_claude(raw)
         elif agent == "cline":
             reply = hook_cline(raw)

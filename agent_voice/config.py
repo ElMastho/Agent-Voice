@@ -84,6 +84,8 @@ DEFAULTS: dict = {
     "auto_chime_in_calls": True,
     # While a reply is read out, show its text under the notch (gone when the voice stops).
     "read_along": True,
+    # Back after a while (no input for `away_minutes`, or a call ending): what finished and who needs you.
+    "catch_up": {"enabled": True, "away_minutes": 5},
     # Each conversation speaks a little lower or higher than the others, so you can tell them apart.
     "thread_voices": True,
     # Chime mode sounds (0.0-1.0). Kept low so they don't disturb people around you.

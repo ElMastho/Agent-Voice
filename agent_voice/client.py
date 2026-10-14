@@ -118,9 +118,11 @@ def speak(
     voice: str | None = None,
     autostart: bool = True,
     session: str = "",
+    hwnd: int = 0,
+    result: dict | None = None,
 ) -> dict | None:
     payload = {"text": text, "source": source, "lang": lang, "interrupt": interrupt, "final": final, "voice": voice,
-               "session": session}
+               "session": session, "hwnd": hwnd, "result": result}
     result = request("/speak", payload)
     if result is None and autostart and start_detached():
         result = request("/speak", payload)

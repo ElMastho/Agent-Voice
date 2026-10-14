@@ -6,12 +6,14 @@ import json
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 
 from agent_voice.client import self_command
 
 # How our hook commands look, from source (python -m agent_voice hook) or from the release exe.
-MARKERS = ("agent_voice hook", 'agent_voice", "hook', 'agent-voice.exe" hook', 'agent-voice.exe", "hook')
+MARKERS = ("agent_voice hook", 'agent_voice", "hook', 'agent-voice.exe" hook', 'agent-voice.exe", "hook',
+           "agent_voice mcp", 'agent_voice", "mcp', 'agent-voice.exe" mcp', 'agent-voice.exe", "mcp')
 AGENTS = ("claude", "codex", "gemini", "cursor", "cline", "antigravity")
 
 
@@ -81,8 +83,29 @@ def claude(remove: bool = False) -> str:
             del hooks[event]
     if not hooks:
         del settings["hooks"]
+    if remove and _ours(str((settings.get("statusLine") or {}).get("command", ""))):
+        settings.pop("statusLine")
     _write_json(path, settings)
     return f"{'removed from' if remove else 'installed in'} {path}"
+
+
+def usage_line(enable: bool = True) -> str:
+    """Claude Code's status line, fed to the notch: rate limits (5-hour, weekly) next to your threads.
+
+    Opt-in: a custom status line replaces some of Claude Code's footer hints. Never replaces your own.
+    """
+    path = Path.home() / ".claude" / "settings.json"
+    settings = _read_json(path)
+    line = settings.get("statusLine") or {}
+    if line and not _ours(str(line.get("command", ""))):
+        return f"skipped: {path} already has your own status line"
+    _backup(path)
+    if enable:
+        settings["statusLine"] = {"type": "command", "command": hook_command("statusline")}
+    else:
+        settings.pop("statusLine", None)
+    _write_json(path, settings)
+    return f"usage {'on' if enable else 'off'} ({path})"
 
 
 # -- Gemini CLI: ~/.gemini/settings.json --------------------------------------------------
@@ -91,15 +114,24 @@ def gemini(remove: bool = False) -> str:
     settings = _read_json(path)
     _backup(path)
     hooks = settings.setdefault("hooks", {})
-    hooks["AfterAgent"] = _strip_ours(hooks.get("AfterAgent", []))
-    if not remove:
-        hooks["AfterAgent"].append(
-            {"matcher": "*", "hooks": [{"type": "command", "command": hook_command("gemini"), "timeout": 20000}]}
-        )
-    if not hooks["AfterAgent"]:
-        del hooks["AfterAgent"]
+    # AfterAgent: the reply. Notification: a tool waits for your confirmation ("needs you").
+    for event in ("AfterAgent", "Notification"):
+        hooks[event] = _strip_ours(hooks.get(event, []))
+        if not remove:
+            hooks[event].append(
+                {"matcher": "*", "hooks": [{"type": "command", "command": hook_command("gemini"), "timeout": 20000}]}
+            )
+        if not hooks[event]:
+            del hooks[event]
     if not hooks:
         del settings["hooks"]
+    servers = settings.setdefault("mcpServers", {})
+    for name in [n for n, s in servers.items() if _our_server(s)]:
+        del servers[name]
+    if not remove:
+        servers["agent-voice"] = mcp_entry("gemini", hooked=True)  # live status and questions
+    if not servers:
+        del settings["mcpServers"]
     _write_json(path, settings)
     return f"{'removed from' if remove else 'installed in'} {path}"
 
@@ -118,7 +150,9 @@ def cursor(remove: bool = False) -> str:
     if not entries:
         del hooks["afterAgentResponse"]
     _write_json(path, data)
-    return f"{'removed from' if remove else 'installed in'} {path}"
+    # The MCP server too: live status and questions (the replies come from the hook).
+    mcp = _mcp_json(Path.home() / ".cursor" / "mcp.json", "cursor", remove, hooked=True)
+    return f"{'removed from' if remove else 'installed in'} {path}; MCP {mcp}"
 
 
 # -- Codex CLI: ~/.codex/config.toml (top-level `notify`) ----------------------------------
@@ -137,6 +171,7 @@ def codex(remove: bool = False) -> str:
         line = "notify = " + json.dumps(_hook_argv("codex"))
         # Must be top-level, i.e. before the first [table].
         text = f"{line}\n{text}"
+    text = _codex_mcp(text, remove)  # live status and questions through MCP
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return f"{'removed from' if remove else 'installed in'} {path}"
@@ -195,34 +230,133 @@ def cline(remove: bool = False) -> str:
     return msg
 
 
-def antigravity(remove: bool = False) -> str:  # noqa: ARG001
-    return "no hook API: select the agent's reply and press the read-selection hotkey (default ctrl+alt+r)"
+# -- MCP: apps without hooks (Antigravity, Claude Desktop, Windsurf, VS Code) --------------------
+def _app_data() -> Path:
+    """Where desktop apps keep their settings: %APPDATA% on Windows, Application Support on macOS."""
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support"
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+
+
+def mcp_entry(client: str, hooked: bool = False) -> dict:
+    exe, *rest = self_command("mcp", "--client", client, *(["--hooks"] if hooked else []), windowed=False)
+    return {"command": Path(exe).as_posix(), "args": rest}
+
+
+def _our_server(entry) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    command = " ".join([str(entry.get("command", "")), *map(str, entry.get("args") or [])])
+    return _ours(command.replace(".exe ", '.exe" '))
+
+
+def _mcp_servers(path: Path, key: str = "mcpServers") -> dict:
+    try:
+        servers = _read_json(path).get(key)
+    except (OSError, ValueError):
+        return {}
+    return servers if isinstance(servers, dict) else {}
+
+
+def _mcp_json(path: Path, client: str, remove: bool, key: str = "mcpServers", hooked: bool = False,
+              extra: dict | None = None) -> str:
+    """Add (or remove) our server in an app's MCP config; other servers stay as they are."""
+    settings = _read_json(path)
+    _backup(path)
+    servers = settings.setdefault(key, {})
+    for name in [n for n, s in servers.items() if _our_server(s)]:
+        del servers[name]
+    if not remove:
+        servers["agent-voice"] = {**(extra or {}), **mcp_entry(client, hooked)}
+    if not servers:
+        del settings[key]
+    _write_json(path, settings)
+    return f"{'removed from' if remove else 'installed in'} {path}"
+
+
+def _antigravity_configs() -> list[Path]:
+    """Antigravity's MCP config: the older place, the newer one, or both when both exist."""
+    places = [Path.home() / ".gemini" / "antigravity" / "mcp_config.json",
+              Path.home() / ".gemini" / "config" / "mcp_config.json"]
+    found = [p for p in places if p.exists()]
+    return found or places[:1]
+
+
+def antigravity(remove: bool = False) -> str:
+    return "; ".join(_mcp_json(p, "antigravity", remove) for p in _antigravity_configs())
+
+
+def claude_desktop(remove: bool = False) -> str:
+    return _mcp_json(_app_data() / "Claude" / "claude_desktop_config.json", "claude-desktop", remove)
+
+
+def windsurf(remove: bool = False) -> str:
+    return _mcp_json(Path.home() / ".codeium" / "windsurf" / "mcp_config.json", "windsurf", remove)
+
+
+def vscode(remove: bool = False) -> str:
+    return _mcp_json(_app_data() / "Code" / "User" / "mcp.json", "vscode", remove, key="servers",
+                     extra={"type": "stdio"})
+
+
+_CODEX_MCP = re.compile(r"\n*^\[mcp_servers\.agent-voice\]\n(?:^(?!\[).*\n?)*", re.M)
+
+
+def _codex_mcp(text: str, remove: bool) -> str:
+    """Codex reads MCP servers from [mcp_servers.<name>] tables (at the end: after every top-level key)."""
+    text = _CODEX_MCP.sub("", text).rstrip("\n")
+    if remove:
+        return text + "\n" if text else ""
+    entry = mcp_entry("codex", hooked=True)
+    block = f"[mcp_servers.agent-voice]\ncommand = {json.dumps(entry['command'])}\nargs = {json.dumps(entry['args'])}\n"
+    return f"{text}\n\n{block}" if text else block
 
 
 INSTALLERS = {"claude": claude, "codex": codex, "gemini": gemini, "cursor": cursor, "cline": cline,
-              "antigravity": antigravity}
+              "antigravity": antigravity, "claude-desktop": claude_desktop, "windsurf": windsurf, "vscode": vscode}
 
-# Where each agent keeps its settings: the folder existing means the agent is installed.
+# Where each agent keeps its settings (relative to home): the folder existing means the agent is installed.
 AGENT_DIRS = {"claude": ".claude", "codex": ".codex", "gemini": ".gemini", "cursor": ".cursor",
-              "cline": "Documents/Cline"}
+              "cline": "Documents/Cline", "antigravity": ".gemini/antigravity", "windsurf": ".codeium/windsurf"}
+
+
+def _agent_dir(agent: str) -> Path:
+    if agent == "claude-desktop":
+        return _app_data() / "Claude"
+    if agent == "vscode":
+        return _app_data() / "Code" / "User"
+    return Path.home() / AGENT_DIRS[agent]
+
+
+AGENT_KEYS = (*AGENT_DIRS, "claude-desktop", "vscode")
+MCP_ONLY = {"antigravity", "claude-desktop", "windsurf", "vscode"}
 
 
 def _config_file(agent: str) -> Path:
     home = Path.home()
     if agent == "codex":
         return Path(os.environ.get("CODEX_HOME", home / ".codex")) / "config.toml"
+    if agent == "antigravity":
+        return _antigravity_configs()[0]
     return {"claude": home / ".claude" / "settings.json", "gemini": home / ".gemini" / "settings.json",
-            "cursor": home / ".cursor" / "hooks.json"}[agent]
+            "cursor": home / ".cursor" / "hooks.json", "windsurf": home / ".codeium" / "windsurf" / "mcp_config.json",
+            "claude-desktop": _app_data() / "Claude" / "claude_desktop_config.json",
+            "vscode": _app_data() / "Code" / "User" / "mcp.json"}[agent]
 
 
 def is_installed(agent: str) -> bool:
-    """Our hook is in the agent's settings."""
+    """Our hook (or MCP server) is in the agent's settings."""
     try:
         if agent == "cline":
             folder = Path.home() / "Documents" / "Cline" / "Hooks"
             return any(CLINE_MARKER in p.read_text(encoding="utf-8", errors="replace")
                        for p in folder.glob("*") if p.is_file())
         path = _config_file(agent)
+        if agent in MCP_ONLY:
+            return any(_our_server(s) for s in _mcp_servers(path, "servers" if agent == "vscode" else "mcpServers")
+                       .values())
         # JSON escapes the quotes around the exe path; the markers are written unescaped.
         return path.exists() and _ours(path.read_text(encoding="utf-8", errors="replace").replace('\\"', '"'))
     except OSError:
@@ -231,8 +365,8 @@ def is_installed(agent: str) -> bool:
 
 def agent_states() -> dict[str, str]:
     """For each agent: 'on' (connected), 'off' (installed, not connected) or 'missing'."""
-    return {agent: "on" if is_installed(agent) else "off" if (Path.home() / folder).is_dir() else "missing"
-            for agent, folder in AGENT_DIRS.items()}
+    return {agent: "on" if is_installed(agent) else "off" if _agent_dir(agent).is_dir() else "missing"
+            for agent in AGENT_KEYS}
 
 
 # -- Windows autostart ---------------------------------------------------------------------

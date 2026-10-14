@@ -140,7 +140,7 @@ def test_claude_hooks_ring_when_attention_is_needed(monkeypatch, tmp_path):
     hooks.hook_claude(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion",
                                   "session_id": "t", "tool_input": ask}))
     hooks.hook_claude(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "session_id": "t"}))
-    assert sent == [("/notify", "attention"), ("/notify", "question"), ("/activity", None)]
+    assert sent == [("/notify", "attention"), ("/notify", "input"), ("/notify", "question"), ("/activity", None)]
     assert spoken == []  # the question itself is read out by the daemon, with its options
 
 
@@ -447,3 +447,185 @@ def test_call_watch_switches_to_chimes_and_back(daemon, monkeypatch):
         daemon._call_watch()
     # (in_call, chime) seen before each check: idle, in the Zoom call (chimes), still in it, back to voice
     assert seen == [("", False), ("Zoom", True), ("Zoom", True), ("", False)]
+
+
+def test_several_approvals_wait_and_are_answered_by_name(daemon):
+    daemon.threads["c"] = {"source": "codex", "last": 1}
+    first = daemon.request_permission("a", "Bash", "run npm test")
+    second = daemon.request_permission("c", "Bash", "run cargo build", source="codex")
+    assert daemon.permission["id"] == first  # the first is asked, the second waits in "needs you"
+    assert [n["kind"] for n in daemon.status()["needs"]] == ["permission", "permission"]
+    assert daemon._voice_approval("approve codex")  # named: that one, not the one being asked
+    assert daemon.permission_state(second) == "allow" and daemon.permission["id"] == first
+    assert daemon._voice_approval("no")
+    assert daemon.permission_state(first) == "deny" and daemon.permission is None
+    assert daemon.status()["needs"] == []
+
+
+def test_waiting_for_input_joins_needs_until_the_agent_moves_on(daemon):
+    daemon.need_input("g", "gemini", "Allow shell command?", announce=False)
+    needs = daemon.status()["needs"]
+    assert needs[0]["kind"] == "input" and needs[0]["title"] == "Gemini"
+    assert daemon.status()["threads"][0]["state"] == "input"
+    daemon.speak("Done.", source="gemini", final=True, session="g")
+    assert daemon.status()["needs"] == []
+
+
+def test_messages_go_to_the_conversation_named(daemon, monkeypatch):
+    from agent_voice import server
+
+    assert server.parse_route("Tell Codex to run the tests.") == ("Codex", "Run the tests.")
+    assert server.parse_route("dis à codex de lancer les tests") == ("codex", "Lancer les tests")
+    assert server.parse_route("I told him to stop") is None
+    daemon.threads.update({"c": {"source": "codex", "last": 2}, "a": {"source": "claude", "last": 1}})
+    daemon._session_hwnd["c"] = 42
+    pasted = []
+    monkeypatch.setattr(daemon, "_paste", lambda text, hwnd=0, submit=False, session="": pasted.append((text, hwnd, submit)))
+    daemon._send_to(*daemon._routed("tell codex to run the tests"), "en")
+    assert pasted == [("Run the tests", 42, True)]
+    assert daemon._routed("tell gemini to stop") is None  # no such conversation: not a message
+
+
+def test_mcp_questions_collect_the_answer(daemon):
+    ask_id = daemon.ask("m", "antigravity", "Deploy to staging or prod?", ["Staging", "Prod"])
+    assert daemon.ask_state(ask_id) == {"answer": None, "pending": True}
+    assert daemon.answer(text="prod please")
+    assert daemon.ask_state(ask_id) == {"answer": "Prod"}
+    free = daemon.ask("m", "antigravity", "What should the release be called?", [])
+    daemon.answer(text="Aurora")
+    assert daemon.ask_state(free) == {"answer": "Aurora"}
+
+
+def test_catch_up_after_being_away(daemon):
+    daemon.config["catch_up"] = {"enabled": True, "away_minutes": 5}
+    daemon._check_away(idle=400, now=1000)  # away since t=600
+    daemon._events = [{"kind": "done", "session": "a", "source": "claude", "text": "All tests pass.", "at": 700}]
+    daemon.need_input("g", "gemini", "Allow?", announce=False)
+    daemon._events[-1]["at"] = 800
+    daemon._check_away(idle=1, now=1500)
+    assert daemon.banner["kind"] == "catchup"
+    assert daemon.banner["text"].startswith("While you were away: Claude Code finished; Gemini needs you.")
+    assert daemon.speaker.said[-1][0] == "While you were away: Claude Code finished; Gemini needs you."
+
+
+def test_turn_result_and_context_from_the_transcript():
+    rows = [
+        {"type": "user", "message": {"content": "fix it"}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "1", "name": "Edit", "input": {"file_path": "a.py"}},
+            {"type": "tool_use", "id": "2", "name": "Write", "input": {"file_path": "b.py"}},
+            {"type": "tool_use", "id": "3", "name": "Bash", "input": {"command": "python -m pytest -q"}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "3", "content": "1 failed"}]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "4", "name": "Bash", "input": {"command": "python -m pytest -q"}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "4", "content": "9 passed"}]}},
+        {"type": "assistant", "message": {"usage": {"input_tokens": 10, "cache_read_input_tokens": 49990},
+                                          "content": [{"type": "text", "text": "Done."}]}},
+    ]
+    assert hooks.claude_turn_result(rows) == {"files": 2, "tests": "passed"}
+    assert hooks.claude_context(rows) == 25.0
+
+
+def test_turn_result_shows_in_the_notch(daemon):
+    from agent_voice.server import result_label
+
+    daemon.speak("Fixed.", source="claude", final=True, session="a", result={"files": 2, "tests": "passed"})
+    st = daemon.status()
+    assert st["result"]["files"] == 2 and st["threads"][0]["result"]["tests"] == "passed"
+    assert result_label(st["result"]) == "2 files changed · tests passed"
+    daemon.set_usage({"session": "a", "source": "claude", "context": 81.4,
+                      "five_hour": {"pct": 40, "resets": 4102444800}})
+    st = daemon.status()
+    assert st["threads"][0]["context"] == 81 and st["limits"]["claude"]["five_hour"]["pct"] == 40
+
+
+def test_mcp_installers_are_idempotent_and_reversible(tmp_path, monkeypatch):
+    from agent_voice import install
+
+    monkeypatch.setattr(install.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(install, "_app_data", lambda: tmp_path / "AppData")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    vs = tmp_path / "AppData" / "Code" / "User" / "mcp.json"
+    vs.parent.mkdir(parents=True)
+    vs.write_text(json.dumps({"servers": {"github": {"command": "gh-mcp"}}}), encoding="utf-8")
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text('model = "o4"\n\n[profiles.x]\nmodel = "o3"\n', encoding="utf-8")
+    for _ in range(2):
+        install.vscode()
+        install.antigravity()
+        install.codex()
+    servers = json.loads(vs.read_text(encoding="utf-8"))["servers"]
+    assert set(servers) == {"github", "agent-voice"} and servers["agent-voice"]["type"] == "stdio"
+    assert "mcp" in servers["agent-voice"]["args"] and install.is_installed("vscode")
+    assert install.is_installed("antigravity")
+    toml = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
+    assert toml.count("[mcp_servers.agent-voice]") == 1 and toml.startswith("notify = ")
+    assert toml.index("[profiles.x]") < toml.index("[mcp_servers.agent-voice]")
+    install.vscode(remove=True)
+    install.codex(remove=True)
+    assert json.loads(vs.read_text(encoding="utf-8")) == {"servers": {"github": {"command": "gh-mcp"}}}
+    assert (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8") == 'model = "o4"\n\n[profiles.x]\nmodel = "o3"\n'
+    assert not install.is_installed("vscode")
+
+
+def test_mcp_server_speaks_and_asks(monkeypatch):
+    from agent_voice import mcp
+
+    sent = []
+
+    def fake_request(path, payload=None, timeout=2.0):
+        sent.append((path, payload))
+        if path == "/ask":
+            return {"id": 7}
+        if path == "/ask_state":
+            return {"answer": "Staging"}
+        return {"ok": True}
+
+    monkeypatch.setattr(mcp.client, "request", fake_request)
+    monkeypatch.setattr(mcp.client, "speak", lambda text, **k: sent.append(("/speak", {"text": text, **k})) or {})
+    monkeypatch.setattr(mcp.Server, "_window", lambda self: 0)
+    server = mcp.Server()
+    init = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                          "params": {"protocolVersion": "2025-06-18", "clientInfo": {"name": "Antigravity"}}})
+    assert init["result"]["protocolVersion"] == "2025-06-18" and server.source == "antigravity"
+    assert server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+    names = [t["name"] for t in server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]]
+    assert names == ["speak", "notify", "ask_user", "set_status"]
+    out = server.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                         "params": {"name": "speak", "arguments": {"text": "Deployed."}}})
+    assert out["result"]["content"][0]["text"] == "Said to the user."
+    assert sent[-1][1]["final"] is True and sent[-1][1]["session"].startswith("mcp-antigravity-")
+    out = server.handle({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                         "params": {"name": "ask_user", "arguments": {"question": "Where?", "options": ["Staging", "Prod"]}}})
+    assert out["result"]["content"][0]["text"] == "The user answered: Staging"
+    assert server.handle({"jsonrpc": "2.0", "id": 5, "method": "nope"})["error"]["code"] == -32601
+    hooked = mcp.Server("codex", hooked=True)
+    assert "speak" not in [t["name"] for t in hooked.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]]
+
+
+def test_generic_hooks_pass_the_session_and_the_terminal(monkeypatch):
+    calls = []
+    monkeypatch.setattr(hooks.client, "speak", lambda text, **k: calls.append(("speak", text, k)))
+    monkeypatch.setattr(hooks.client, "request", lambda path, payload=None, timeout=2.0: calls.append((path, payload)))
+    monkeypatch.setattr(hooks, "_log_payload", lambda agent, raw: None)
+    monkeypatch.setattr(hooks, "summary_enabled", lambda: False)
+    from agent_voice import winfocus
+
+    monkeypatch.setattr(winfocus, "console_window", lambda: 99)
+    hooks.hook_payload("codex", json.dumps({"type": "agent-turn-complete", "thread-id": "t1",
+                                            "last-assistant-message": "Done."}))
+    assert calls[-1][2]["session"] == "codex-t1" and calls[-1][2]["hwnd"] == 99
+    hooks.hook_payload("gemini", json.dumps({"hook_event_name": "Notification", "session_id": "g",
+                                             "message": "Allow rm -rf build?"}))
+    assert calls[-1] == ("/notify", {"kind": "input", "session": "gemini-g", "agent": "gemini",
+                                     "text": "Allow rm -rf build?"})
+
+
+def test_statusline_reports_usage(monkeypatch):
+    sent = []
+    monkeypatch.setattr(hooks.client, "request", lambda path, payload=None, timeout=2.0: sent.append(payload))
+    line = hooks.statusline(json.dumps({"session_id": "s", "model": {"display_name": "Opus"},
+                                        "context_window": {"used_percentage": 42.4},
+                                        "rate_limits": {"five_hour": {"used_percentage": 63, "resets_at": 99}}}))
+    assert line == "Opus · context 42% · 5h 63%"
+    assert sent == [{"session": "s", "source": "claude", "context": 42.4, "five_hour": {"pct": 63, "resets": 99}}]

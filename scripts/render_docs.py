@@ -285,14 +285,23 @@ def render_you_said() -> None:
 
 
 def render_bar() -> None:
-    """The floating glass bar, the other way to show it (right-click > Notch to switch)."""
-    wd = make_widget(status("speaking", speaking_lang="en"))
-    settle(wd, 2.0)
-    shot = frame(wd)
-    k = scale_of(wd, shot)
-    pad = int(30 * k)
-    img = backdrop(shot.width + 2 * pad, shot.height + 2 * pad, seed=11)
-    glass_composite(img, shot, pad, pad).convert("RGB").save(OUT / "bar.jpg", quality=90, optimize=True)
+    """Floating: the same island, free to sit anywhere, and the compact orb."""
+    fl = make_widget(status("speaking", speaking_lang="en", caption="I updated the widget and all the tests pass.",
+                            thread={"title": "Notch redesign", "color": "#F59E0B"}))
+    settle(fl, 2.0)
+    shot = frame(fl)
+    k = scale_of(fl, shot)
+    orb_w = make_widget(status("recording", level=0.04))
+    orb_w.compact = True
+    orb_w._apply_size()
+    settle(orb_w, 1.0)
+    orb = frame(orb_w)
+    pad, gap = int(30 * k), int(24 * k)
+    w_ = shot.width + gap + orb.width + 2 * pad
+    h_ = max(shot.height, orb.height) + 2 * pad
+    img = drop(backdrop(w_, h_, seed=11), shot, pad, (h_ - shot.height) // 2)
+    img = drop(img, orb, pad + shot.width + gap, (h_ - orb.height) // 2)
+    img.convert("RGB").save(OUT / "bar.jpg", quality=90, optimize=True)
 
 
 def render_gif() -> None:

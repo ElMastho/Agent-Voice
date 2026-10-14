@@ -136,13 +136,13 @@ The notch **never takes keyboard focus**, so your dictated reply still lands in 
 
 <br clear="right">
 
-### Prefer a floating bar?
+### Prefer it floating?
 
 <p align="center">
-  <img src="docs/images/bar.jpg" alt="The floating glass bar" width="420">
+  <img src="docs/images/bar.jpg" alt="The same black island floating, and the compact orb" width="560">
 </p>
 
-Right-click the notch → *Notch* to switch to a floating acrylic bar you can drag anywhere (it snaps to edges and remembers its place), or *Compact* for just the animated orb. `Ctrl+Alt+W` or a click on the tray icon shows / hides it.
+Right-click the notch → *Float the widget again*: the same black island, rounded all round, that you drag anywhere (it snaps to edges and remembers its place), with the same edge light, read-along, banners and panel. *Compact* shrinks it to a black orb with the same state mark; a click on it talks, cancels or skips. `Ctrl+Alt+W` or a click on the tray icon shows / hides it.
 
 ## 💬 Talking to your agents
 
@@ -250,7 +250,7 @@ sequenceDiagram
 | `update_check` | `true` | Look for a newer release on GitHub at start |
 | `chime.volume` | `0.35` | Chime loudness (0 to 1) |
 | `stt.model` | `small` | Whisper size: `base` is faster, `small` is better in French |
-| `widget` | `enabled: true`, `blur: "acrylic"` | `blur` (floating bar only): `acrylic` / `blur` / `none` |
+| `widget.enabled` | `true` | Start the notch and tray icon with the service |
 | `hotkeys.*` | see above | Any [keyboard](https://github.com/boppreh/keyboard) combination |
 
 Restart after editing: `agent-voice shutdown && agent-voice start`.

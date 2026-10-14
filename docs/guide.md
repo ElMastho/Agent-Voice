@@ -111,7 +111,7 @@ Select text in any application and press **`Ctrl+Alt+R`**: it is read in the rig
 | See every action | Click the chevron ⌄: actions, speed, mode, threads, what you said, agents |
 | Read what's being said | It hangs under the notch while it's spoken; swipe it up to hide it (`read_along: false` turns it off) |
 | Connect another agent | Expand the notch and click it in the **Agents** row (a green dot means connected); **?** opens this guide |
-| Use a floating bar instead | Right-click → *Notch* switches to a draggable glass bar (it snaps to screen edges and remembers its position); *Compact* shrinks it to an orb |
+| Have it floating instead | Right-click → *Float the widget again*: the same island, draggable (it snaps to screen edges and remembers its position); *Compact* shrinks it to a black orb |
 | Hide / show it | `Ctrl+Alt+W`, click the tray icon, or right-click → *Hide widget* |
 | Reach actions without the widget | Right-click the tray icon |
 | Start/stop the service | Tray menu, or the ⏻ button when the widget says *Offline* |
@@ -186,7 +186,6 @@ File: `~/.agent-voice/config.json`. Only put the keys you want to change; they'r
 | `auto_listen.silence_seconds` | `1.5` | Pause that ends your reply |
 | `auto_listen.max_seconds` | `600` | Hard limit |
 | `widget.enabled` | `true` | Launch the widget with the service |
-| `widget.blur` | `"acrylic"` | Floating bar only: `"blur"` or `"none"` if acrylic misbehaves |
 
 Runtime state (mode, auto-send, summary, speed, wake word, approvals) lives in `~/.agent-voice/state.json`, and the notch/bar choice and position in `~/.agent-voice/widget.json`.
 
@@ -204,7 +203,6 @@ Runtime state (mode, auto-send, summary, speed, wake word, approvals) lives in `
 | **Notch missing** | Touch the top edge of the screen; else `Ctrl+Alt+W`, the tray icon, or `agent-voice widget`. |
 | **Notch stays down / says "Working"** | It shows live activity until the agent's turn ends (or 15 minutes without a step). |
 | **It went quiet during a meeting** | That's call detection: another app is using the mic. The notch says *In a call*; pick *Voice* to override, or set `auto_chime_in_calls` to `false`. |
-| **Floating bar looks wrong / black** | Set `"widget": {"blur": "blur"}` or `"none"`. |
 | **Anything else** | `agent-voice serve` runs in the foreground with logs; the full log is `~/.agent-voice/logs/server.log`. |
 
 ## 9. Uninstall

@@ -772,7 +772,7 @@ def test_browser_bridge_registration(tmp_path, monkeypatch):
     manifest = json.loads((tmp_path / "native-host" / "com.agentvoice.bridge.json").read_text(encoding="utf-8"))
     assert manifest["allowed_origins"] == ["chrome-extension://bmkeeojeabngjnlndcnopnddhlimlkak/"]
     assert "native-host" in (tmp_path / "native-host" / "agent-voice-host.cmd").read_text(encoding="utf-8")
-    assert set(keys) == {f"{k}\com.agentvoice.bridge" for k in install._HOST_KEYS}
+    assert set(keys) == {rf"{k}\com.agentvoice.bridge" for k in install._HOST_KEYS}
     assert install.is_installed("browser")
     install.browser(remove=True)
     assert keys == {} and not install.is_installed("browser")

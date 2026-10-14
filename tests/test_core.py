@@ -427,3 +427,23 @@ def test_what_you_said_shows_as_yours(daemon):
     daemon._heard("Yes, ship it.", "en", "a", tag="sent")
     assert daemon.banner["kind"] == "you" and daemon.banner["tag"] == "sent"
     assert daemon.banner["text"] == "Yes, ship it." and daemon.history[0]["text"] == "Yes, ship it."
+
+
+def test_call_watch_switches_to_chimes_and_back(daemon, monkeypatch):
+    from agent_voice import server
+
+    apps = [["C:#Program Files#Zoom#bin#Zoom.exe"], ["C:#Program Files#Zoom#bin#Zoom.exe"], [], None]
+
+    def fake_apps():
+        nxt = apps.pop(0)
+        if nxt is None:
+            raise SystemExit  # end the watch loop
+        return nxt
+
+    seen = []
+    monkeypatch.setattr(server.calls, "apps_using_mic", fake_apps)
+    monkeypatch.setattr(server.time, "sleep", lambda s: seen.append((daemon.in_call, daemon.chime)))
+    with pytest.raises(SystemExit):
+        daemon._call_watch()
+    # (in_call, chime) seen before each check: idle, in the Zoom call (chimes), still in it, back to voice
+    assert seen == [("", False), ("Zoom", True), ("Zoom", True), ("", False)]

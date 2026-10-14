@@ -18,7 +18,7 @@ import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from agent_voice import __version__, calls, claudeapp, install, textclean, winfocus
+from agent_voice import __version__, calls, claudeapp, install, keys, textclean, winfocus
 from agent_voice.config import HOME, LOG_DIR, load_config, load_state, save_state
 from agent_voice.tts import Speaker
 
@@ -1224,7 +1224,6 @@ class Daemon:
             _beep(400, 60)
 
     def _paste(self, text: str, hwnd: int = 0, submit: bool = False, session: str = "") -> None:
-        import keyboard
         import pyperclip
 
         self._wait_modifiers_released()
@@ -1256,10 +1255,10 @@ class Daemon:
         # The text stays on the clipboard afterwards, so a reply that landed in the wrong place
         # can always be pasted again by hand.
         pyperclip.copy(text)
-        keyboard.send("ctrl+v")
+        keys.paste()
         time.sleep(0.3)
         if submit:
-            keyboard.send("enter")
+            keys.enter()
         if submit and switched and came_from:
             time.sleep(0.2)  # let the agent window register the Enter
             if was_minimized:
@@ -1586,51 +1585,45 @@ class Daemon:
 
     # -- hotkeys ----------------------------------------------------------------
     def start_hotkeys(self) -> None:
-        try:
-            import keyboard
-        except ImportError:
-            log.warning("keyboard module missing: hotkeys disabled")
-            return
         hk = self.config["hotkeys"]
-        if hk.get("stop"):
-            keyboard.add_hotkey(hk["stop"], self.stop)
-        if hk.get("reply"):
-            keyboard.add_hotkey(hk["reply"], self.reply_now)
-        if hk.get("widget"):
-            keyboard.add_hotkey(hk["widget"], lambda: setattr(self, "widget_toggles", self.widget_toggles + 1))
-        if hk.get("hands_free"):
-            keyboard.add_hotkey(hk["hands_free"], lambda: self.set_hands_free(not self.hands_free))
-        if hk.get("mute"):
-            keyboard.add_hotkey(hk["mute"], lambda: self.set_muted(not self.muted))
-        if hk.get("chime"):
-            keyboard.add_hotkey(hk["chime"], lambda: self.set_chime(not self.chime))
-        if hk.get("read_selection"):
-            keyboard.add_hotkey(hk["read_selection"], lambda: threading.Thread(target=self._read_selection, daemon=True).start())
         if hk.get("push_to_talk") and self.config["stt"].get("enabled"):
             from agent_voice.stt import Transcriber
 
             self.transcriber = Transcriber(self.config)
             threading.Thread(target=self.transcriber.warm_up, daemon=True).start()
-            keyboard.add_hotkey(hk["push_to_talk"], self._ptt_pressed)
+        actions = {
+            "stop": self.stop,
+            "reply": self.reply_now,
+            "widget": lambda: setattr(self, "widget_toggles", self.widget_toggles + 1),
+            "hands_free": lambda: self.set_hands_free(not self.hands_free),
+            "mute": lambda: self.set_muted(not self.muted),
+            "chime": lambda: self.set_chime(not self.chime),
+            "read_selection": lambda: threading.Thread(target=self._read_selection, daemon=True).start(),
+            "push_to_talk": self._ptt_pressed if self.transcriber is not None else None,
+        }
+        try:
+            for name, action in actions.items():
+                if hk.get(name) and action is not None:
+                    keys.add_hotkey(hk[name], action)
+        except Exception:  # no `keyboard` / pynput, or macOS without the Accessibility permission
+            log.exception("global hotkeys unavailable")
+            return
         log.info("hotkeys registered: %s", hk)
 
     @staticmethod
     def _wait_modifiers_released(timeout: float = 3.0) -> None:
-        import keyboard
-
         end = time.time() + timeout
-        while time.time() < end and any(keyboard.is_pressed(k) for k in ("ctrl", "alt", "shift", "windows")):
+        while time.time() < end and keys.modifiers_down():
             time.sleep(0.02)
 
     def _read_selection(self) -> None:
         """Speak the selected text (any app, e.g. Antigravity), or the clipboard if nothing is selected."""
-        import keyboard
         import pyperclip
 
         self._wait_modifiers_released()
         previous = pyperclip.paste()
         pyperclip.copy("")
-        keyboard.send("ctrl+c")
+        keys.copy()
         time.sleep(0.2)
         selected = pyperclip.paste()
         pyperclip.copy(previous)
@@ -1644,12 +1637,10 @@ class Daemon:
         """Hotkey: record while the key is held."""
         if not self.ptt_start():  # key auto-repeat
             return
-        import keyboard
-
         trigger = self.config["hotkeys"]["push_to_talk"].split("+")[-1].strip()
 
         def watch_release():
-            while keyboard.is_pressed(trigger):
+            while keys.is_pressed(trigger):
                 time.sleep(0.02)
             self.ptt_stop()
 
@@ -1974,9 +1965,7 @@ def serve(foreground: bool = True) -> int:
     finally:
         httpd.server_close()
         try:
-            import keyboard
-
-            keyboard.unhook_all()
+            keys.unhook_all()
         except Exception:
             pass
         lock.release()

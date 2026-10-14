@@ -1,4 +1,4 @@
-"""Remember and restore the window to type into (Windows only; no-ops elsewhere)."""
+"""Remember and restore the window to type into: Win32 on Windows, System Events on macOS, no-ops elsewhere."""
 
 from __future__ import annotations
 
@@ -180,6 +180,85 @@ if sys.platform == "win32":
         finally:
             if attached:
                 _user32.AttachThreadInput(me, fg, False)
+
+elif sys.platform == "darwin":
+    # macOS: a "window" is the app's process id (System Events brings apps forward, not windows).
+    import os
+    import re
+    import subprocess
+
+    def _osa(script: str) -> str:
+        try:
+            out = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return out.stdout.strip()
+
+    def foreground() -> int:
+        pid = _osa('tell application "System Events" to get unix id of first process whose frontmost is true')
+        return int(pid) if pid.isdigit() else 0
+
+    def title(hwnd: int) -> str:
+        return _osa(f'tell application "System Events" to get name of first process whose unix id is {int(hwnd)}')
+
+    def is_window(hwnd: int) -> bool:
+        if not hwnd:
+            return False
+        try:
+            os.kill(hwnd, 0)
+        except OSError:
+            return False
+        return True
+
+    def is_minimized(hwnd: int) -> bool:  # noqa: ARG001
+        return False
+
+    def minimize(hwnd: int) -> None:  # noqa: ARG001
+        pass
+
+    def focus(hwnd: int, timeout: float = 1.5) -> bool:
+        if not is_window(hwnd):
+            return False
+        _osa(f'tell application "System Events" to set frontmost of (first process whose unix id is {int(hwnd)}) to true')
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if foreground() == hwnd:
+                return True
+            time.sleep(0.1)
+        return False
+
+    def idle_seconds() -> float:
+        try:
+            out = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True, timeout=3).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return 0.0
+        m = re.search(r'"HIDIdleTime" = (\d+)', out)
+        return int(m.group(1)) / 1e9 if m else 0.0
+
+    def app_window(pid: int) -> int:
+        """The app (Terminal, iTerm, VS Code...) a helper process runs under: its first GUI ancestor."""
+        gui = set(_osa('tell application "System Events" to get unix id of every process whose background only '
+                       'is false').replace(" ", "").split(","))
+        p = pid
+        for _ in range(12):
+            try:
+                p = int(subprocess.run(["ps", "-o", "ppid=", "-p", str(p)], capture_output=True, text=True,
+                                       timeout=2).stdout.strip() or 0)
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                return 0
+            if p <= 1:
+                return 0
+            if str(p) in gui:
+                return p
+        return 0
+
+    def console_window() -> int:
+        return app_window(os.getpid())
+
+    def find_window(text: str) -> int:
+        pid = _osa('tell application "System Events" to get unix id of first process whose name contains '
+                   f'"{text.replace(chr(34), "")}"')
+        return int(pid) if pid.isdigit() else 0
 
 else:
 

@@ -463,12 +463,30 @@ def agent_states() -> dict[str, str]:
 
 # -- Windows autostart ---------------------------------------------------------------------
 def _startup_file() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "LaunchAgents" / "com.agentvoice.daemon.plist"
     return Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "agent-voice.vbs"
 
 
+def _launch_agent(path: Path, enable: bool) -> str:
+    """macOS: a LaunchAgent starts the daemon at login."""
+    if not enable:
+        path.unlink(missing_ok=True)
+        return f"removed {path}"
+    args = "".join(f"<string>{a}</string>" for a in self_command("serve", "--background"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+                    '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>'
+                    f"<key>Label</key><string>com.agentvoice.daemon</string><key>ProgramArguments</key><array>{args}"
+                    "</array><key>RunAtLoad</key><true/></dict></plist>\n", encoding="utf-8")
+    return f"created {path}"
+
+
 def autostart(enable: bool = True) -> str:
+    if sys.platform == "darwin":
+        return _launch_agent(_startup_file(), enable)
     if os.name != "nt":
-        return "autostart is only automated on Windows; run `agent-voice start` from your login scripts"
+        return "autostart is automated on Windows and macOS; run `agent-voice start` from your login scripts"
     path = _startup_file()
     if not enable:
         path.unlink(missing_ok=True)

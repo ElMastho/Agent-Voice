@@ -777,3 +777,10 @@ def test_browser_bridge_registration(tmp_path, monkeypatch):
     install.browser(remove=True)
     assert keys == {} and not install.is_installed("browser")
     assert (install.extension_dir() / "manifest.json").exists()
+
+
+def test_hotkeys_in_pynput_notation():
+    from agent_voice import keys
+
+    assert keys.pynput_combo("ctrl+alt+space") == "<ctrl>+<alt>+<space>"
+    assert keys.pynput_combo("Ctrl+Alt+S") == "<ctrl>+<alt>+s"

@@ -78,7 +78,18 @@ OPTION_ROWS = 5  # question options shown in the panel
 RADIUS = 8
 POS_FILE = HOME / "widget.json"
 
-ICON_FONT = "Segoe Fluent Icons"
+MAC = sys.platform == "darwin"
+if sys.platform == "win32":
+    FONT_TEXT, FONT_DISPLAY, ICON_FONT = "Segoe UI Variable Text", "Segoe UI Variable Display", "Segoe Fluent Icons"
+else:  # the system UI font; icons fall back to plain symbols (Segoe Fluent Icons is Windows-only)
+    FONT_TEXT = FONT_DISPLAY = ICON_FONT = ".AppleSystemUIFont" if MAC else "sans-serif"
+
+
+def _font(family: str, size: int) -> QFont:
+    """Sizes are Windows points (96 dpi); macOS counts 72 to the inch, so the same text needs a third more."""
+    return QFont(family, round(size * 4 / 3) if MAC else size)
+
+
 ICONS = {
     "mic": "",
     "stop": "",
@@ -101,6 +112,11 @@ ICONS = {
     "open": "",
     "help": "",
 }
+
+if sys.platform != "win32":
+    ICONS.update({"mic": "●", "stop": "■", "skip": "⏭", "chat": "✎", "send": "➤", "volume": "♪", "mute": "✕",
+                  "read": "☰", "power": "⏻", "bell": "♫", "copy": "⧉", "check": "✓", "bolt": "ϟ", "list": "≡",
+                  "shield": "✓", "down": "⌄", "up": "⌃", "replay": "↻", "open": "↗", "help": "?"})
 
 # phase -> (accent colour, title, subtitle)
 PHASES = {
@@ -245,7 +261,7 @@ def orb_icon(color: QColor, glyph: str, size: int = 64) -> QIcon:
     p.setPen(Qt.NoPen)
     p.setBrush(core)
     p.drawEllipse(c, r, r)
-    p.setFont(QFont(ICON_FONT, int(size * 0.3)))
+    p.setFont(_font(ICON_FONT, int(size * 0.3)))
     p.setPen(QColor(255, 255, 255, 240))
     p.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, glyph)
     p.end()
@@ -294,6 +310,7 @@ class Banner(QWidget):
             None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_MacAlwaysShowToolWindow)  # macOS hides tool windows when another app is active
         self.setMouseTracking(True)
         self.item: dict | None = None
         self.holding = False  # reading along with the voice
@@ -305,9 +322,9 @@ class Banner(QWidget):
         self._press: QPointF | None = None
         self._hover = False
         self._topmost_at = 0.0
-        self.f_head = QFont("Segoe UI Variable Text", 8)
+        self.f_head = _font(FONT_TEXT, 8)
         self.f_head.setWeight(QFont.Medium)
-        self.f_text = QFont("Segoe UI Variable Text", 9)
+        self.f_text = _font(FONT_TEXT, 9)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -471,6 +488,7 @@ class VoiceWidget(QWidget):
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_MacAlwaysShowToolWindow)
         self.setMouseTracking(True)
         self.setWindowTitle("agent-voice")
 
@@ -520,23 +538,23 @@ class VoiceWidget(QWidget):
         self._drop: dict | None = None  # files being dragged over: where they'd go
         self.setAcceptDrops(True)
 
-        self.f_title = QFont("Segoe UI Variable Display", 10)
+        self.f_title = _font(FONT_DISPLAY, 10)
         self.f_title.setWeight(QFont.DemiBold)
-        self.f_sub = QFont("Segoe UI Variable Text", 8)
-        self.f_tile = QFont("Segoe UI Variable Text", 8)
+        self.f_sub = _font(FONT_TEXT, 8)
+        self.f_tile = _font(FONT_TEXT, 8)
         self.f_tile.setWeight(QFont.Medium)
-        self.f_hint = QFont("Segoe UI Variable Text", 7)
-        self.f_notch_title = QFont("Segoe UI Variable Display", 9)
+        self.f_hint = _font(FONT_TEXT, 7)
+        self.f_notch_title = _font(FONT_DISPLAY, 9)
         self.f_notch_title.setWeight(QFont.DemiBold)
-        self.f_notch_sub = QFont("Segoe UI Variable Text", 8)
-        self.f_notch_chip = QFont("Segoe UI Variable Text", 7)
+        self.f_notch_sub = _font(FONT_TEXT, 8)
+        self.f_notch_chip = _font(FONT_TEXT, 7)
         self.f_notch_chip.setWeight(QFont.Medium)
-        self.f_q = QFont("Segoe UI Variable Text", 9)
+        self.f_q = _font(FONT_TEXT, 9)
         self.f_q.setWeight(QFont.DemiBold)
-        self.f_chip = QFont("Segoe UI Variable Text", 7)
+        self.f_chip = _font(FONT_TEXT, 7)
         self.f_chip.setWeight(QFont.Bold)
-        self.f_icon = QFont(ICON_FONT, 11)
-        self.f_icon_small = QFont(ICON_FONT, 9)
+        self.f_icon = _font(ICON_FONT, 11)
+        self.f_icon_small = _font(ICON_FONT, 9)
 
         self.resize(WIDTH, BAR_H)
         self._restore_position()
@@ -2155,7 +2173,7 @@ class Tray(QSystemTrayIcon):
             add("Stop voice service", lambda: _post("/shutdown"))
         else:
             add("Start voice service", lambda: threading.Thread(target=client.start_detached, daemon=True).start())
-        add("Start with Windows", self._toggle_autostart, checked=_autostart_enabled())
+        add("Start with macOS" if MAC else "Start with Windows", self._toggle_autostart, checked=_autostart_enabled())
         m.addSeparator()
         add("Quit widget", QApplication.quit)
 
@@ -2167,7 +2185,7 @@ class Tray(QSystemTrayIcon):
 
 
 def _autostart_enabled() -> bool:
-    if sys.platform != "win32":
+    if sys.platform not in ("win32", "darwin"):
         return False
     from agent_voice.install import _startup_file
 

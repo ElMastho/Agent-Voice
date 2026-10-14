@@ -420,3 +420,10 @@ def test_read_along_follows_the_voice(daemon):
     daemon.state["chime"] = True
     daemon.speaker.busy = True
     assert daemon.status()["reading"] is None  # no voice in chime mode: the end-of-turn banner instead
+
+
+def test_what_you_said_shows_as_yours(daemon):
+    daemon.threads["a"] = {"source": "claude", "last": 0}
+    daemon._heard("Yes, ship it.", "en", "a", tag="sent")
+    assert daemon.banner["kind"] == "you" and daemon.banner["tag"] == "sent"
+    assert daemon.banner["text"] == "Yes, ship it." and daemon.history[0]["text"] == "Yes, ship it."

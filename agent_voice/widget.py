@@ -378,22 +378,29 @@ class Banner(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
-        body = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
-        p.setPen(QPen(QColor(255, 255, 255, 26 + (14 if self._hover else 0)), 1))
+        yours = self.item.get("kind") == "you"
+        body = QRectF(1, 1, self.width() - 2, self.height() - 2)
+        if yours:
+            # Your words get the listening colour around them: never mistaken for the agent's.
+            p.setPen(QPen(QColor(16, 224, 160, 210 if self._hover else 170), 1.6))
+        else:
+            p.setPen(QPen(QColor(255, 255, 255, 26 + (14 if self._hover else 0)), 1))
         p.setBrush(QColor(0, 0, 0, 245))
         p.drawRoundedRect(body, 18, 18)
-        color = QColor(self.item.get("color") or "#94A3B8")
+        color = QColor("#10E0A0" if yours else self.item.get("color") or "#94A3B8")
         p.setPen(Qt.NoPen)
         p.setBrush(color)
         p.drawEllipse(QPointF(21, 20), 3, 3)
         p.setFont(self.f_head)
         p.setPen(QColor(255, 255, 255, 150))
-        head = QFontMetrics(self.f_head).elidedText(self.item.get("title") or "Reply", Qt.ElideRight,
-                                                     self.width() - 90)
+        title = self.item.get("title") or ""
+        if yours:
+            title = f"You  →  {title}" if title else "You said"
+        head = QFontMetrics(self.f_head).elidedText(title or "Reply", Qt.ElideRight, self.width() - 90)
         p.drawText(QRectF(30, 10, self.width() - 90, 20), Qt.AlignLeft | Qt.AlignVCenter, head)
         p.setPen(QColor(255, 255, 255, 90))
         p.drawText(QRectF(0, 10, self.width() - 18, 20), Qt.AlignRight | Qt.AlignVCenter,
-                   "speaking" if self.holding else "done")
+                   "speaking" if self.holding else self.item.get("tag") or "done")
         p.setFont(self.f_text)
         p.setPen(QColor(255, 255, 255, 228))
         fm = QFontMetrics(self.f_text)
@@ -1129,7 +1136,9 @@ class VoiceWidget(QWidget):
             line = ""  # the text is in the banner below: the hint instead of the same sentence twice
         if not line and act:
             steps = act["steps"]
-            line = f"{act.get('label') or 'Thinking'} · {steps} step{'s' if steps != 1 else ''}"
+            line = act.get("label") or "Thinking"
+            if steps:
+                line += f" · {steps} step{'s' if steps != 1 else ''}"
         if not line:
             q = self._question()
             if q:

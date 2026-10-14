@@ -268,6 +268,22 @@ def render_read_along() -> None:
     img.convert("RGB").save(OUT / "read-along.jpg", quality=90, optimize=True)
 
 
+def render_you_said() -> None:
+    """What you said, framed in the listening colour, as it goes to the conversation."""
+    w, shot, k = notch_shot(status("idle", activity={"session": "a", "title": "Notch redesign", "color": "#F59E0B",
+                                                     "label": "Thinking", "steps": 0, "elapsed": 1, "others": 0}))
+    b = W.Banner()
+    b.present({"id": 2, "kind": "you", "tag": "sent", "title": "Notch redesign", "color": "#F59E0B",
+               "session": "a", "text": "Yes, ship it, and bump the version to 0.4.0 while you're at it."},
+              int(w.pw))
+    b.t = 1.0
+    banner = to_pil(b.grab().toImage())
+    w_, h_ = shot.width + int(120 * k), shot.height + banner.height + int(40 * k)
+    img = drop(backdrop(w_, h_, seed=17), shot, (w_ - shot.width) // 2, 0)
+    img = drop(img, banner, (w_ - banner.width) // 2, shot.height + int(8 * k))
+    img.convert("RGB").save(OUT / "you-said.jpg", quality=90, optimize=True)
+
+
 def render_bar() -> None:
     """The floating glass bar, the other way to show it (right-click > Notch to switch)."""
     wd = make_widget(status("speaking", speaking_lang="en"))
@@ -345,6 +361,7 @@ def main() -> None:
     render_panel()
     render_banner()
     render_read_along()
+    render_you_said()
     render_bar()
     render_gif()
     for f in sorted(OUT.iterdir()):

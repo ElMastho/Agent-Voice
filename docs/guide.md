@@ -53,7 +53,8 @@ You should hear nothing yet. At the top centre of the screen there's a thin blac
 4. When the voice stops, a **short beep** plays and the notch turns green: **Listening**.
 5. Talk. It switches to **Hearing you** and follows your voice. Pause for 1.5 s to finish.
 6. A second beep, **Transcribing**, and your words appear in that conversation's prompt box.
-7. Press **Enter** to send, or turn on **auto-send** so it's sent for you.
+7. What you said also drops down under the notch, framed in green, with where it went (*sent* or *typed*).
+8. Press **Enter** to send, or turn on **auto-send** so it's sent for you.
 
 If you say nothing for 15 s, a low beep closes the mic. Nothing is typed.
 

@@ -104,6 +104,14 @@ The edge light only shows while the voice or the mic is live: it doubles as a "m
 
 While a reply is read out, its text hangs under the notch, starting at the sentence you're hearing, and disappears when the voice stops. Swipe it up to hide it for this reply; click it to open the conversation. (`read_along: false` turns it off.)
 
+### What you said, before it goes
+
+<p align="center">
+  <img src="docs/images/you-said.jpg" alt="What you said, framed in green, as it is sent to the conversation" width="640">
+</p>
+
+Once your reply is transcribed, it drops down under the notch framed in green, the colour of your voice, so it's never mistaken for the agent's text: who it goes to, and whether it was **sent** (auto-send), **typed** into the prompt for you to check, taken as an **answer** to a question or approval, or as a **command**.
+
 ### Chimes and Silent: the reply as a banner
 
 <p align="center">

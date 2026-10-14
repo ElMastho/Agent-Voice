@@ -579,12 +579,12 @@ class Daemon:
         return {"text": textclean.clean(self._reading)[:1500], "title": title,
                 "color": thread_color(session or title), "session": session}
 
-    def _show_banner(self, text: str, session: str, source: str) -> None:
-        """Chime mode: what would have been said, as a notification (summary or full text, as set)."""
-        title = self._title(session, source)
+    def _show_banner(self, text: str, session: str, source: str, kind: str = "reply", tag: str = "") -> None:
+        """A notification under the notch: a reply in chime/silent mode, or ("you") what you just said."""
+        title = self._title(session, source) if session or source else ""
         self.banner = {"id": (self.banner or {}).get("id", 0) + 1, "text": textclean.clean(text)[:800],
                        "title": title, "color": thread_color(session or title), "session": session,
-                       "at": time.time()}
+                       "kind": kind, "tag": tag, "at": time.time()}
 
     def agent_states(self) -> dict[str, str]:
         """Which agents are connected; re-read every 30 s at most (status is polled 8 times a second)."""
@@ -638,8 +638,12 @@ class Daemon:
     def _set_level(self, value: float) -> None:
         self.level = value
 
-    def _heard(self, text: str, lang: str) -> None:
+    def _heard(self, text: str, lang: str, session: str | None = None, tag: str = "typed") -> None:
+        """You said something: keep it, and show it under the notch, marked as yours, before it goes out."""
         self.last_heard, self.last_heard_lang = text, lang
+        session = self._reply_session if session is None else session
+        self._show_banner(text, session, self.threads.get(session, {}).get("source", "") if session else "",
+                          kind="you", tag=tag)
         self.history = [{"text": text, "lang": lang, "at": round(time.time())}, *self.history][:5]
         self.state["history"] = self.history
         save_state(self.state)
@@ -814,7 +818,11 @@ class Daemon:
             log.info("auto-listen lang=%s chars=%d", lang, len(text))
             if self._listen_cancel.is_set() or is_hallucination(text):
                 return
-            self._heard(text, lang)
+            answering = (permission is not None and permission is self.permission) or (
+                question is not None and question is self.question)
+            tag = ("answer" if answering else "command" if match_command(text)
+                   else "sent" if self.hands_free or force_submit else "typed")
+            self._heard(text, lang, session, tag=tag)
             if permission is not None and permission is self.permission:
                 allow = match_yes_no(text)
                 if allow is None:
@@ -1105,7 +1113,7 @@ class Daemon:
             log.info("wake word heard (%d chars follow)", len(command))
             session = self._voice_session or self._reply_session
             if len(command.split()) >= 3:
-                self._heard(command, lang)
+                self._heard(command, lang, session, tag="sent")
                 _beep(880, 60)
                 self._paste(command, self._hwnd_for(session), submit=True, session=session)
             else:
@@ -1266,8 +1274,9 @@ class Daemon:
             log.info("dictation lang=%s chars=%d", lang, len(text))
             if not text:
                 return
-            self._heard(text, lang)
-            self._paste(text, submit=self.hands_free or bool(self.config["stt"].get("auto_submit")))
+            submit = self.hands_free or bool(self.config["stt"].get("auto_submit"))
+            self._heard(text, lang, "", tag="sent" if submit else "typed")  # push-to-talk goes to the focused window
+            self._paste(text, submit=submit)
         except Exception:
             log.exception("push-to-talk failed")
         finally:

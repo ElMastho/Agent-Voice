@@ -31,7 +31,6 @@ TEXT_KEYS = (
 
 SESSIONS_DIR = HOME / "sessions"
 
-SUMMARY_MARKER = "Voice summary:"
 SUMMARY_INSTRUCTION = (
     "[agent-voice] The user hears your replies through text-to-speech. End the final reply of this turn "
     "with one last line formatted exactly as `Voice summary: <one short sentence, at most 25 words, in the "
@@ -122,12 +121,8 @@ def _is_real_user_prompt(entry: dict) -> bool:
     return isinstance(content, list) and not any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
 
 
-def claude_turn_texts(transcript: Path) -> list[str]:
-    """Assistant text blocks of the current turn (since the last real user prompt), main thread only."""
-    return turn_texts(_read_entries(transcript))
-
-
 def turn_texts(entries: list[dict]) -> list[str]:
+    """Assistant text blocks of the current turn (since the last real user prompt), main thread only."""
     start = 0
     for i, entry in enumerate(entries):
         if _is_real_user_prompt(entry):

@@ -93,7 +93,7 @@ The daemon and widget run as `pythonw` in the background. **Code changes need a 
 - **macOS**: `Qt.Tool` windows hide when another app is active unless `WA_MacAlwaysShowToolWindow` is set; fonts are counted at 72 dpi (`widget._font` scales them); Segoe Fluent Icons doesn't exist (plain symbols instead).
 - **PySide6 `QPen` rejects keyword args** (`cap=`, `join=`): use `widget._round_pen()`.
 - **ctypes handles must be typed.** Set `restype`/`argtypes` to `wintypes.HWND`/`HRGN` etc., or 64-bit handles are truncated.
-- **No acrylic any more**: the notch, the floating island and the compact orb draw their own black shape (`_body_path`) with DWM rounding off. If acrylic ever comes back: **it only clips to DWM's native rounding.** `SetWindowRgn` does not clip the acrylic accent, so `RADIUS` must stay equal to Windows 11's `DWMWCP_ROUND` (8 px), with the system border hidden (`DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE`).
+- **No acrylic**: the notch, the floating island and the compact orb draw their own black shape (`_body_path`) with DWM rounding off and the system border hidden. If acrylic ever comes back: it only clips to DWM's native rounding (8 px); `SetWindowRgn` does not clip the acrylic accent.
 - **`sounddevice` can hang on a broken audio driver**: playback polls with a deadline instead of `sd.wait()`. Closing the mic stream can take ~1 s, so `cancel_listen()` updates the phase immediately.
 - **Claude `async` hooks may be killed on `Stop`**: only `PreToolUse` is async; `Stop` stays synchronous.
 - **Whisper hallucinates on silence** ("Thank you." and its French equivalent): filtered by `stt.is_hallucination`.

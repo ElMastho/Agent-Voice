@@ -56,7 +56,7 @@ DEFAULTS: dict = {
         # Press Enter after pasting the transcription.
         "auto_submit": False,
     },
-    # Floating status widget (glass panel, draggable, always on top).
+    # The notch (or floating island) and the tray icon, started with the service.
     "widget": {"enabled": True},
     # After an agent finishes speaking its final answer, open the mic so you can just reply.
     "auto_listen": {

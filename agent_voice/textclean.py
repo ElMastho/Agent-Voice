@@ -81,3 +81,15 @@ def truncate(text: str, max_chars: int) -> str:
     cut = text[:max_chars]
     end = max(cut.rfind(". "), cut.rfind("\n"), cut.rfind("! "), cut.rfind("? "))
     return cut[: end + 1] if end > max_chars // 2 else cut
+
+
+
+def result_label(result: dict | None) -> str:
+    """{"files": 3, "tests": "passed"} -> '3 files changed · tests passed'."""
+    if not result:
+        return ""
+    files = int(result.get("files") or 0)
+    parts = [f"{files} file{'s' if files != 1 else ''} changed"] if files else []
+    if result.get("tests"):
+        parts.append(f"tests {result['tests']}")
+    return " · ".join(parts)

@@ -3,7 +3,7 @@
     python scripts/render_docs.py          # writes docs/images/*.png|gif
 
 Frames are drawn offscreen with a controlled clock, then composited over a soft wallpaper: the notch
-hangs from its top edge; the floating bar gets a blurred backdrop to mimic the Windows acrylic glass.
+hangs from its top edge, banners drop under it.
 Needs Pillow (dev only).
 """
 
@@ -18,7 +18,7 @@ from pathlib import Path
 os.environ.setdefault("QT_SCALE_FACTOR", "2")  # crisp 2x renders
 
 import numpy as np  # noqa: E402
-from PIL import Image, ImageDraw, ImageFilter, ImageFont  # noqa: E402
+from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 from PySide6.QtGui import QImage  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -27,9 +27,6 @@ sys.path.insert(0, str(ROOT))
 OUT = ROOT / "docs" / "images"
 
 from agent_voice import widget as W  # noqa: E402
-
-S = 2  # scale factor (matches QT_SCALE_FACTOR)
-
 
 class Clock:
     """Stands in for the `time` module inside the widget: animation time is driven frame by frame."""
@@ -51,7 +48,7 @@ W.time = CLOCK  # the widget animates from time.time(); drive it frame by frame
 
 
 def backdrop(w: int, h: int, seed: int = 7) -> Image.Image:
-    """A soft, colourful abstract wallpaper so the glass has something to blur."""
+    """A soft, colourful abstract wallpaper behind the black island."""
     rnd = random.Random(seed)
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     img = np.zeros((h, w, 3), np.float32)
@@ -78,26 +75,9 @@ def rounded_mask(size, radius) -> Image.Image:
     return m
 
 
-def glass_composite(bg: Image.Image, widget_img: Image.Image, x: int, y: int) -> Image.Image:
-    """Shadow + blurred, tinted backdrop (acrylic) + the widget's own translucent painting."""
-    out = bg.convert("RGBA")
-    w, h = widget_img.size
-    radius = W.RADIUS * S
-    shadow = Image.new("RGBA", out.size, (0, 0, 0, 0))
-    ImageDraw.Draw(shadow).rounded_rectangle((x, y + 10, x + w, y + h + 10), radius=radius + 6, fill=(0, 0, 0, 120))
-    out = Image.alpha_composite(out, shadow.filter(ImageFilter.GaussianBlur(18)))
-    under = bg.crop((x - 40, y - 40, x + w + 40, y + h + 40)).filter(ImageFilter.GaussianBlur(26))
-    under = under.crop((40, 40, 40 + w, 40 + h)).convert("RGBA")
-    under = Image.alpha_composite(under, Image.new("RGBA", (w, h), (18, 24, 32, 102)))  # acrylic tint
-    panel = Image.alpha_composite(under, widget_img)
-    out.paste(panel, (x, y), rounded_mask((w, h), radius))
-    return out
-
-
 def make_widget(st: dict | None, expanded: bool = False, notch: bool = False) -> W.VoiceWidget:
     w = W.VoiceWidget()
     w.poller.status.disconnect()
-    w.glass = True
     # The mode is set here, whatever mode the widget on this machine was left in.
     w.notch, w.compact = notch, False
     w.expanded = expanded
@@ -112,7 +92,6 @@ def settle(w: W.VoiceWidget, seconds: float = 1.2) -> None:
     for _ in range(int(seconds / 0.033)):
         CLOCK.now += 0.033
         w._tick()
-    w.title_t, w.flash = 1.0, 0.0
 
 
 def status(phase: str, **kw) -> dict:

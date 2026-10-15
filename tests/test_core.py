@@ -42,7 +42,7 @@ def test_extract_text_known_payloads():
     assert hooks.extract_text({"content": [{"type": "text", "text": "blocks"}]}) == "blocks"
 
 
-def test_claude_turn_texts(tmp_path):
+def test_turn_texts(tmp_path):
     rows = [
         {"type": "user", "message": {"content": "old"}},
         {"type": "assistant", "message": {"content": [{"type": "text", "text": "old answer"}]}},
@@ -54,7 +54,7 @@ def test_claude_turn_texts(tmp_path):
     ]
     path = tmp_path / "t.jsonl"
     path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
-    assert hooks.claude_turn_texts(path) == ["working", "done"]
+    assert hooks.turn_texts(hooks._read_entries(path)) == ["working", "done"]
 
 
 def test_unspoken_dedupes(tmp_path, monkeypatch):
@@ -700,9 +700,7 @@ def test_browser_extension_reply_detection():
                           str(root / "agent_voice" / "browser" / "sites.js")], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     manifest = json.loads((root / "agent_voice" / "browser" / "manifest.json").read_text(encoding="utf-8"))
-    from agent_voice import install, native_host
-
-    assert native_host.EXTENSION_ID == install.EXTENSION_ID
+    from agent_voice import install
     import base64
     import hashlib
 

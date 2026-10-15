@@ -17,8 +17,6 @@ from agent_voice import client, winfocus
 from agent_voice.hooks import strip_summary, summarize, summary_enabled
 from agent_voice.config import load_config
 
-NAME = "com.agentvoice.bridge"
-EXTENSION_ID = "bmkeeojeabngjnlndcnopnddhlimlkak"  # pinned by the "key" in agent_voice/browser/manifest.json
 SITES = {"chatgpt", "claude-web", "gemini-web", "aistudio", "perplexity", "copilot", "mistral", "deepseek"}
 
 

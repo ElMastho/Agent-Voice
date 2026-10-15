@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 
 from agent_voice import __version__, calls, claudeapp, install, keys, textclean, winfocus
 from agent_voice.config import HOME, LOG_DIR, load_config, load_state, save_state
+from agent_voice.textclean import result_label
 from agent_voice.tts import Speaker
 
 log = logging.getLogger("agent_voice.server")
@@ -238,17 +239,6 @@ def names_match(said: str, label: str) -> bool:
 
 def _join(items: list[str]) -> str:
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
-
-
-def result_label(result: dict | None) -> str:
-    """{"files": 3, "tests": "passed"} -> '3 files · tests passed'."""
-    if not result:
-        return ""
-    files = int(result.get("files") or 0)
-    parts = [f"{files} file{'s' if files != 1 else ''} changed"] if files else []
-    if result.get("tests"):
-        parts.append(f"tests {result['tests']}")
-    return " · ".join(parts)
 
 
 def _version(v: str) -> tuple:
@@ -631,8 +621,9 @@ class Daemon:
         return items
 
     def _labels(self, session: str) -> list[str]:
+        """What a conversation can be called: its title, or its agent's name."""
         source = self.threads.get(session, {}).get("source", "")
-        return [self._title(session, source), source, {"claude": "claude", "codex": "codex"}.get(source, "")]
+        return [self._title(session, source), source]
 
     def _find_thread(self, name: str, among: set[str] | None = None) -> str | None:
         """The most recent conversation called `name` ("Codex", "the notch redesign")."""

@@ -1,4 +1,4 @@
-"""Floating glass status widget: shows what the voice is doing and gives one-click access to every action.
+"""The notch (or floating island): what every agent is doing, what needs you, and one-click access to every action.
 
 It is a separate process that polls the daemon (`/status`) and calls its endpoints, so the daemon stays headless.
 The window never takes keyboard focus (WS_EX_NOACTIVATE): clicking it leaves your agent window focused,
@@ -23,7 +23,6 @@ from PySide6.QtGui import (
     QConicalGradient,
     QFont,
     QFontMetrics,
-    QLinearGradient,
     QPainter,
     QPainterPath,
     QPen,
@@ -33,15 +32,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QToolTip, QW
 
 from agent_voice import client
 from agent_voice.config import HOME, load_config
-
-
-def result_label(result: dict) -> str:
-    """{"files": 3, "tests": "passed"} -> '3 files changed · tests passed' (as the daemon writes it)."""
-    files = int(result.get("files") or 0)
-    parts = [f"{files} file{'s' if files != 1 else ''} changed"] if files else []
-    if result.get("tests"):
-        parts.append(f"tests {result['tests']}")
-    return " · ".join(parts)
+from agent_voice.textclean import result_label
 
 WIDTH = 320
 BAR_H = 64
@@ -65,7 +56,6 @@ BANNER_KINDS = {"you": ("#10E0A0", ""), "needs": ("#FBBF24", ""), "catchup": ("#
 GUIDE_URL = "https://github.com/ElMastho/agent-voice/blob/main/docs/guide.md"
 COMPACT = 56  # compact mode: just the orb
 # Notch mode: docked to the top centre of the screen like a camera notch, tucked away when idle.
-NOTCH_SCALE = 1.0
 NOTCH_W, NOTCH_H = 440, 44  # wide and short: one row of status, caption and chips
 NOTCH_RADIUS = 20
 NOTCH_EAR = 9  # concave fillets where the island meets the top edge, like a hardware notch
@@ -73,9 +63,6 @@ NOTCH_PILL = 0.56  # tucked away, the notch is a pill this fraction of its full 
 NOTCH_PEEK = 3  # pixels left showing when tucked under the top edge: hover them to bring it down
 NOTCH_HIDE_DELAY = 3.0  # seconds it stays down after the mouse leaves or activity ends
 OPTION_ROWS = 5  # question options shown in the panel
-# Matches Windows 11's native window rounding (DWMWCP_ROUND = 8 px), the only rounding that
-# also clips the acrylic blur; any other radius leaves blurred square corners showing.
-RADIUS = 8
 POS_FILE = HOME / "widget.json"
 
 MAC = sys.platform == "darwin"
@@ -130,16 +117,6 @@ PHASES = {
 }
 
 
-SECONDARY = {
-    "idle": "#6366F1",
-    "speaking": "#22D3EE",
-    "waiting": "#A3E635",
-    "recording": "#22D3EE",
-    "transcribing": "#F472B6",
-    "muted": "#FB7185",
-    "offline": "#475569",
-}
-
 
 def _round_pen(brush, width: float) -> QPen:
     pen = QPen(brush, width)
@@ -170,7 +147,7 @@ def _hotkey_label(combo: str) -> str:
     return "+".join(part.strip().capitalize() for part in combo.split("+")) if combo else ""
 
 
-# -- Windows glass ---------------------------------------------------------------------
+# -- Windows window styles ---------------------------------------------------------------
 def _keep_on_top(hwnd: int) -> None:
     """Put the window back at the top of the always-on-top band, without activating it.
 
@@ -191,13 +168,10 @@ def _keep_on_top(hwnd: int) -> None:
                         SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER)
 
 
-def _apply_windows_style(hwnd: int, blur: str, notch: bool = False) -> bool:
-    """Acrylic blur behind the window, rounded corners, no focus stealing, no taskbar entry.
-
-    Notch mode draws its own shape (square top, rounded bottom): no system rounding and no blur.
-    """
+def _apply_windows_style(hwnd: int) -> None:
+    """No focus stealing, no taskbar entry, always on top; no system rounding or border (we draw our shape)."""
     if sys.platform != "win32":
-        return False
+        return
     import ctypes
     from ctypes import wintypes
 
@@ -212,28 +186,12 @@ def _apply_windows_style(hwnd: int, blur: str, notch: bool = False) -> bool:
     style = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
     user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST)
 
-    # Native Windows 11 rounding: it clips the acrylic too (a window region does not). RADIUS matches it.
-    corner = ctypes.c_int(1 if notch else 2)  # DWMWCP_DONOTROUND / DWMWCP_ROUND
+    corner = ctypes.c_int(1)  # DWMWCP_DONOTROUND: the island draws its own rounded shape
     dwm.DwmSetWindowAttribute(wintypes.HWND(hwnd), 33, ctypes.byref(corner), ctypes.sizeof(corner))
-    # Hide the grey system border; we draw our own hairline.
+    # Hide the grey system border.
     no_border = ctypes.c_uint(0xFFFFFFFE)  # DWMWA_COLOR_NONE
     dwm.DwmSetWindowAttribute(wintypes.HWND(hwnd), 34, ctypes.byref(no_border), ctypes.sizeof(no_border))
 
-    class AccentPolicy(ctypes.Structure):
-        _fields_ = [("AccentState", ctypes.c_int), ("AccentFlags", ctypes.c_int),
-                    ("GradientColor", ctypes.c_uint), ("AnimationId", ctypes.c_int)]
-
-    class WinCompAttrData(ctypes.Structure):
-        _fields_ = [("Attribute", ctypes.c_int), ("Data", ctypes.POINTER(AccentPolicy)), ("SizeOfData", ctypes.c_size_t)]
-
-    # 4 = acrylic, 3 = plain blur, 0 = none. Tint is AABBGGRR: a dark, slightly blue glass.
-    state = 0 if notch or blur == "none" else 4 if blur == "acrylic" else 3
-    accent = AccentPolicy(state, 2, 0x66201812, 0)
-    data = WinCompAttrData(19, ctypes.pointer(accent), ctypes.sizeof(accent))  # WCA_ACCENT_POLICY
-    try:
-        return bool(user32.SetWindowCompositionAttribute(wintypes.HWND(hwnd), ctypes.byref(data))) and state != 0
-    except AttributeError:
-        return False
 
 
 MENU_STYLE = (
@@ -328,7 +286,7 @@ class Banner(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        _apply_windows_style(int(self.winId()), "none", notch=True)
+        _apply_windows_style(int(self.winId()))
 
     def present(self, item: dict, width: int, hold: bool = False) -> None:
         """Show `item`; `hold` keeps it until release() (read along: as long as the voice plays)."""
@@ -494,24 +452,17 @@ class VoiceWidget(QWidget):
 
         cfg = load_config()
         self.hotkeys = cfg["hotkeys"]
-        self.blur_mode = cfg.get("widget", {}).get("blur", "acrylic")
-        self.glass = False
 
         self.st: dict = {}
         self.phase = "offline"
         self.accent = QColor(PHASES["offline"][0])
         self._accent_target = QColor(self.accent)
-        self.second = QColor(SECONDARY["offline"])
-        self._second_target = QColor(self.second)
         self.level = 0.0
         self.t0 = time.time()
-        self.energy = 0.0  # how lively the waveform/aurora are, eased per phase
-        self.flash = 0.0  # ripple when the phase changes
+        self.energy = 0.0  # how lively the bars and the edge light are, eased per phase
         self.hover_t: dict[str, float] = {}  # eased hover amount per button
         self.speed_pos: float | None = None  # animated index of the speed indicator
         self.mode_pos: float | None = None  # same for the voice/chime switch
-        self.prev_title = ""
-        self.title_t = 1.0  # title crossfade progress
         self.expanded = False
         self.compact = False
         self.notch = False
@@ -574,7 +525,7 @@ class VoiceWidget(QWidget):
         super().showEvent(event)
         if not getattr(self, "_styled", False):
             self._styled = True
-            self.glass = _apply_windows_style(int(self.winId()), self.blur_mode, notch=True)
+            _apply_windows_style(int(self.winId()))
 
     def _restore_position(self) -> None:
         screen = QApplication.primaryScreen().availableGeometry()
@@ -626,13 +577,6 @@ class VoiceWidget(QWidget):
 
     def _cols(self) -> int:
         return 4 if self.island else 3
-
-    def _scale(self) -> float:
-        return NOTCH_SCALE if self.notch else 1.0
-
-    def _logical_h(self) -> float:
-        """Window height in layout units (the notch is drawn scaled up)."""
-        return self.height() / self._scale()
 
     def _to_layout(self, pos: QPointF) -> QPointF:
         """Notch: window coordinates -> notch-row coordinates (the island is centred while it widens)."""
@@ -734,10 +678,6 @@ class VoiceWidget(QWidget):
             if banner.get("age", 99) < 10:  # not an old one, after a restart
                 self.banner.present(banner, int(self.pw))
         phase = st["phase"] if st else "offline"
-        if phase != self.phase:
-            self.prev_title = PHASES.get(self.phase, PHASES["idle"])[1]
-            self.title_t = 0.0
-            self.flash = 1.0
         self.phase = phase
         self._accent_target = QColor(PHASES.get(phase, PHASES["idle"])[0])
         # Show/hide hotkey (handled by the daemon, which owns the global hotkeys).
@@ -748,7 +688,6 @@ class VoiceWidget(QWidget):
             self._toggles_seen = toggles
         if self.tray:
             self.tray.refresh()
-        self._second_target = QColor(SECONDARY.get(phase, SECONDARY["idle"]))
 
     def _read_along(self, reading: dict | None) -> None:
         """Voice mode: the text being spoken, under the notch, from the sentence being read onwards."""
@@ -772,18 +711,15 @@ class VoiceWidget(QWidget):
     def _tick(self) -> None:
         # Ease colour and mic level so transitions glide instead of jumping.
         self.accent = _mix(self.accent, self._accent_target, 0.18)
-        self.second = _mix(self.second, self._second_target, 0.18)
         target = min(1.0, float(self.st.get("level", 0.0)) * 14.0)
         self.level += (target - self.level) * (0.45 if target > self.level else 0.12)
         want_energy = {"speaking": 1.0, "recording": 0.35 + 0.65 * self.level, "waiting": 0.45,
                        "transcribing": 0.6}.get(self.phase, 0.12)
         self.energy = _ease(self.energy, want_energy, 0.08)
-        self.flash = max(0.0, self.flash - 0.022)
         target_idx = self._speed_index()
         self.speed_pos = target_idx if self.speed_pos is None else _ease(self.speed_pos, target_idx, 0.22)
         mode_idx = float([k for k, _ in MODES].index(self._output()))
         self.mode_pos = mode_idx if self.mode_pos is None else _ease(self.mode_pos, mode_idx, 0.22)
-        self.title_t = min(1.0, self.title_t + 0.09)
         for key in set(self.hover_t) | ({self.hover} if self.hover else set()):
             self.hover_t[key] = _ease(self.hover_t.get(key, 0.0), 1.0 if key == self.hover else 0.0, 0.25)
 
@@ -819,7 +755,7 @@ class VoiceWidget(QWidget):
             return False
         if self._banner_busy:
             return False
-        if self._question() or self.flash > 0 or self.title_t < 1 or time.time() - self._copied_at < 1.3:
+        if self._question() or time.time() - self._copied_at < 1.3:
             return False
         settled = [
             abs(self.energy - 0.12) < 0.01,
@@ -828,7 +764,6 @@ class VoiceWidget(QWidget):
             all(v < 0.02 or v > 0.98 for v in self.hover_t.values()),
             self.speed_pos is None or abs(self.speed_pos - self._speed_index()) < 0.01,
             sum(abs(a - b) for a, b in zip(self.accent.getRgb(), self._accent_target.getRgb())) < 4,
-            sum(abs(a - b) for a, b in zip(self.second.getRgb(), self._second_target.getRgb())) < 4,
         ]
         if self.notch:
             settled.append(abs(self._reveal - round(self._reveal)) < 0.003 and abs(self._reveal_v) < 0.003)
@@ -1067,11 +1002,7 @@ class VoiceWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
-        s = self._scale()
-        if s != 1.0:
-            p.scale(s, s)
-        w, h = self.width() / s, self.height() / s
-        body = QRectF(0.5, 0.5, w - 1, h - 1)
+        w, h = self.width(), self.height()
         path = self._body_path(w, h)
         p.setClipPath(path)
         p.fillPath(path, QColor(0, 0, 0))  # pure black, like a hardware notch
@@ -1418,7 +1349,6 @@ class VoiceWidget(QWidget):
             p.setOpacity(appear)
             ht = self.hover_t.get(tid, 0.0)
             rect = rect.translated(0, 10 * (1 - appear) - 1.5 * ht)
-            hot = ht > 0.5
             if active:
                 fill = QColor(self.accent if tid == "hold" else "#8B7CFF")
                 if tid == "mute":
@@ -2033,7 +1963,7 @@ class VoiceWidget(QWidget):
             if self._bar_pos:
                 self.move(*self._bar_pos)
         self._apply_size()
-        self.glass = _apply_windows_style(int(self.winId()), self.blur_mode, notch=True)
+        _apply_windows_style(int(self.winId()))
         self._save_position()
 
     def toggle_expanded(self) -> None:

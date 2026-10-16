@@ -4,7 +4,7 @@ Guidance for AI coding agents (and humans) working on **agent-voice**: local tex
 
 ## What this project is
 
-A Windows-first Python app (macOS in beta) with three cooperating processes, plus short-lived bridges for the agents that have no hooks:
+A Windows-first Python app (macOS and Linux in beta) with three cooperating processes, plus short-lived bridges for the agents that have no hooks:
 
 | Process | Entry point | Role |
 |---|---|---|
@@ -44,6 +44,7 @@ agent_voice/
   usage.py      Claude's usage from its transcripts (Ledger) and the estimate between real readings (Estimator)
   ntfy.py       phone notifications (opt-in): ntfy messages, batching, sending
   outputs.py    headphones or speakers: the default playback device's form factor (pycaw)
+  pulse.py      Linux sound through pactl (PulseAudio / PipeWire): streams, recording apps, the output's kind, players
   ducking.py    other apps' volume under the voice / while you reply, media pause (Windows mixer, pycaw)
   schedule.py   scheduled prompts: "14:00", "in 20 minutes", "demain à 9h", repeats
   apps.py       desktop AI apps' Windows notifications (wpndatabase.db, read-only, filtered in SQL)
@@ -66,7 +67,7 @@ py -3.13 -m venv .venv && .venv/Scripts/pip install -e ".[dev]"
 .venv/Scripts/python packaging/prepare.py && .venv/Scripts/python -m PyInstaller packaging/agent-voice.spec   # Windows exe
 ```
 
-CI: `.github/workflows/tests-macos.yml` runs the suite on macOS on every push.
+CI: `.github/workflows/tests-macos.yml` runs the suite on macOS on every push; `tests-linux.yml` on Ubuntu, then `scripts/linux_smoke.py` against a real PulseAudio server and the notch under Xvfb.
 Releases: `.github/workflows/release.yml` builds the exe on every push and publishes `agent-voice-windows-x64.zip` when a `v*` tag is pushed. The exe calls itself through `client.self_command()` (never `python -m agent_voice` directly): `agent-voice.exe` for hooks/CLI, `agent-voice-w.exe` (no console) for the daemon, widget and autostart. Keep the zip small (lingua is excluded; voices and Whisper are downloaded at first run).
 
 The daemon and widget run as `pythonw` in the background. **Code changes need a restart**: `agent-voice restart` (or the tray's *Restart agent-voice*). The widget relaunches itself when it sees the service's `boot` change, so it picks up new code too. Hooks are re-executed per event, so `hooks.py` changes apply immediately.
@@ -99,6 +100,7 @@ The daemon and widget run as `pythonw` in the background. **Code changes need a 
 - **A custom Claude Code status line hides some of its footer hints**: `agent-voice usage on` is opt-in for that reason; context % also comes from the transcript in the `Stop` hook.
 - **Heredocs mangle backslashes** in this repo's agent shells (`\n` in a Python string written through `cat <<EOF` came out as a real newline): write code with an editor or a script file.
 
+- **Linux**: windows are X11 window ids (`xdotool`); under Wayland the widget forces `QT_QPA_PLATFORM=xcb` (XWayland), since Wayland won't let a window place itself or stay on top. Keystrokes and hotkeys go through pynput (`keyboard` needs root there). Every Linux tool (`pactl`, `xdotool`, `xclip`, `playerctl`, `import`) is optional: missing, its feature is off, nothing breaks.
 - **macOS**: `Qt.Tool` windows hide when another app is active unless `WA_MacAlwaysShowToolWindow` is set; fonts are counted at 72 dpi (`widget._font` scales them); Segoe Fluent Icons doesn't exist (plain symbols instead).
 - **PySide6 `QPen` rejects keyword args** (`cap=`, `join=`): use `widget._round_pen()`.
 - **ctypes handles must be typed.** Set `restype`/`argtypes` to `wintypes.HWND`/`HRGN` etc., or 64-bit handles are truncated.

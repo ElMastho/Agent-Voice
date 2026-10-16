@@ -19,7 +19,7 @@ dependencies = [
     "py3langid",
     "sherpa-onnx",
     "faster-whisper",
-    "keyboard",
+    "keyboard; sys_platform == 'win32'",
     "pyperclip",
     "comtypes; sys_platform == 'win32'",
     "PySide6-Essentials",
@@ -28,7 +28,7 @@ dependencies = [
     "pywinpty; sys_platform == 'win32'",
     "pycaw; sys_platform == 'win32'",
     "kokoro-onnx",
-    "pynput; sys_platform == 'darwin'",
+    "pynput; sys_platform != 'win32'",
 ]
 
 [project.optional-dependencies]

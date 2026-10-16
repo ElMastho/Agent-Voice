@@ -1571,3 +1571,42 @@ def test_history_keeps_and_finds_every_conversation(daemon, tmp_path):
     assert kinds["you"]["snippet"] == "Run the tests please"
     assert daemon.history_db.get(kinds["reply"]["id"])["text"] == "All 42 tests pass after the fix."  # all of it
     assert daemon.thread_detail("s")["text"] == "All 42 tests pass after the fix."
+
+
+def test_linux_sound_through_pactl(monkeypatch):
+    """Linux: what pactl (PulseAudio / PipeWire) reports, read the way the notch needs it."""
+    import os
+
+    from agent_voice import pulse
+
+    streams = [
+        {"index": 42, "corked": False, "volume": {"front-left": {"value_percent": "80%"},
+                                                  "front-right": {"value_percent": "60%"}},
+         "properties": {"application.process.binary": "firefox", "application.process.id": "1234"}},
+        {"index": 43, "corked": False, "volume": {}, "properties": {"application.process.binary": "python3",
+                                                                    "application.process.id": str(os.getpid())}},
+    ]
+    assert pulse.playing(streams) == [{"index": 42, "name": "firefox", "pid": 1234, "volume": 0.7, "running": True}]
+    recording = [{"properties": {"application.process.binary": "zoom", "application.process.id": "77"}},
+                 {"properties": {"application.name": "pavucontrol", "media.name": "Peak detect"}},
+                 {"corked": True, "properties": {"application.process.binary": "teams"}}]
+    assert pulse.recording_apps(recording) == ["zoom"]  # not a volume meter, not a paused stream
+    sinks = [{"name": "alsa_output.analog", "description": "Built-in Audio", "active_port": "analog-output-headphones",
+              "ports": [{"name": "analog-output-speaker", "type": "Speaker"},
+                        {"name": "analog-output-headphones", "type": "Headphones", "description": "Headphones"}]},
+             {"name": "bluez_output.AA", "description": "WH-1000XM4", "properties": {"device.form_factor": "headset"}}]
+    assert pulse.output_kind(sinks, "alsa_output.analog") == ("headphones", "Built-in Audio")
+    assert pulse.output_kind(sinks, "bluez_output.AA")[0] == "headphones"
+    sinks[0]["active_port"] = "analog-output-speaker"
+    assert pulse.output_kind(sinks, "alsa_output.analog")[0] == "speakers"
+
+
+def test_linux_desktop_entries(tmp_path):
+    from agent_voice import install
+
+    path = tmp_path / "agent-voice.desktop"
+    install._desktop_entry(path, ["/home/me/my venv/bin/python", "-m", "agent_voice", "open"], True)
+    text = path.read_text(encoding="utf-8")
+    assert 'Exec="/home/me/my venv/bin/python" -m agent_voice open' in text and "Type=Application" in text
+    install._desktop_entry(path, [], False)
+    assert not path.exists()

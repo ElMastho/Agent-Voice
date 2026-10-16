@@ -2325,7 +2325,7 @@ class Daemon:
 
     def _ensure_start_menu(self) -> None:
         """Once (Windows): agent-voice in the Start menu, so it can be found and started like any app."""
-        if os.name != "nt" or self.state.get("start_menu"):
+        if not (os.name == "nt" or sys.platform.startswith("linux")) or self.state.get("start_menu"):
             return
         try:
             log.info("start menu: %s", install.start_menu(True))

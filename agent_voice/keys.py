@@ -1,8 +1,9 @@
 """Keystrokes and global hotkeys, per platform.
 
-Windows (and Linux): the `keyboard` package. macOS: `keyboard` needs root there, so keystrokes go through
-System Events (AppleScript) and hotkeys through pynput, which needs the Accessibility permission
-(System Settings > Privacy & Security > Accessibility).
+Windows: the `keyboard` package. macOS and Linux: `keyboard` needs root there, so hotkeys go through pynput;
+keystrokes through System Events (AppleScript) on macOS, which needs the Accessibility permission (System Settings >
+Privacy & Security > Accessibility), and through pynput on Linux (an X11 session; under Wayland only apps running
+through XWayland receive them).
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import sys
 import threading
 
 MAC = sys.platform == "darwin"
+PYNPUT = sys.platform != "win32"  # hotkeys through pynput: macOS and Linux
 MODIFIERS = ("ctrl", "alt", "shift", "windows")
 
 
@@ -20,9 +22,24 @@ def _osa(script: str) -> str:
     return out.stdout.strip()
 
 
+def _tap(key: str, ctrl: bool = False) -> None:
+    """Linux: one keystroke through pynput (X11)."""
+    from pynput.keyboard import Controller, Key
+
+    keyboard = Controller()
+    target = getattr(Key, key) if len(key) > 1 else key
+    if ctrl:
+        with keyboard.pressed(Key.ctrl):
+            keyboard.tap(target)
+    else:
+        keyboard.tap(target)
+
+
 def paste() -> None:
     if MAC:
         _osa('tell application "System Events" to keystroke "v" using command down')
+    elif PYNPUT:
+        _tap("v", ctrl=True)
     else:
         import keyboard
 
@@ -32,6 +49,8 @@ def paste() -> None:
 def copy() -> None:
     if MAC:
         _osa('tell application "System Events" to keystroke "c" using command down')
+    elif PYNPUT:
+        _tap("c", ctrl=True)
     else:
         import keyboard
 
@@ -41,13 +60,15 @@ def copy() -> None:
 def enter() -> None:
     if MAC:
         _osa('tell application "System Events" to key code 36')
+    elif PYNPUT:
+        _tap("enter")
     else:
         import keyboard
 
         keyboard.send("enter")
 
 
-# -- macOS: one pynput listener for every hotkey, which also knows which keys are down ----------------
+# -- macOS and Linux: one pynput listener for every hotkey, which also knows which keys are down ----------
 _PYNPUT = {"ctrl": "<ctrl>", "alt": "<alt>", "shift": "<shift>", "windows": "<cmd>", "cmd": "<cmd>",
            "space": "<space>", "enter": "<enter>", "esc": "<esc>", "tab": "<tab>"}
 _hotkeys: list = []
@@ -93,7 +114,7 @@ def _start_listener() -> None:
 
 
 def add_hotkey(combo: str, callback) -> None:
-    if not MAC:
+    if not PYNPUT:
         import keyboard
 
         keyboard.add_hotkey(combo, callback)
@@ -108,7 +129,7 @@ def add_hotkey(combo: str, callback) -> None:
 
 
 def is_pressed(key: str) -> bool:
-    if MAC:
+    if PYNPUT:
         return key.lower() in _down
     import keyboard
 
@@ -121,7 +142,7 @@ def modifiers_down() -> bool:
 
 def unhook_all() -> None:
     global _listener
-    if MAC:
+    if PYNPUT:
         if _listener is not None:
             _listener.stop()
             _listener = None

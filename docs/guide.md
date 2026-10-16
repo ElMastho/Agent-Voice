@@ -17,7 +17,7 @@ For a feature overview see the [README](../README.md).
 
 ## 1. Install
 
-**Requirements:** Windows 11 (or macOS, in beta, from source), a microphone, about 1 GB of disk for the models.
+**Requirements:** Windows 11 (or macOS or Linux, in beta, from source), a microphone, about 1 GB of disk for the models.
 
 **The easy way:** download `agent-voice-windows-x64.zip` from the [latest release](https://github.com/ElMastho/agent-voice/releases/latest), extract it (e.g. `C:\Tools\agent-voice`) and double-click `agent-voice.exe`. It downloads the models, connects the agents it finds and starts. Skip to section 2.
 
@@ -32,6 +32,8 @@ py -3.13 -m venv .venv
 ```
 
 On **macOS**, use `python3.13 -m venv .venv` and `.venv/bin/...`, and allow your terminal in *System Settings → Privacy & Security → Accessibility* (global shortcuts, and typing your replies into other apps). The notch hangs from the top of the screen, around the camera notch on MacBooks.
+
+On **Linux**, use `python3 -m venv .venv` and `.venv/bin/...`, and install the system tools it calls: `sudo apt install libportaudio2 pulseaudio-utils xdotool xclip xprintidle playerctl imagemagick`. An X11 session works best: windows are found and typed into with `xdotool`. Under Wayland the notch runs through XWayland (set `QT_QPA_PLATFORM` yourself to override), and replies to native Wayland apps are left on the clipboard for you to paste. Sound goes through PulseAudio or PipeWire, so ducking, call detection and *Headphones only* work there too. `agent-voice shortcut on` puts agent-voice in your app menu, `agent-voice autostart on` starts it at login.
 
 `setup` writes `~/.agent-voice/config.json`, downloads the two default voices (~60 MB each) and the Whisper `small` speech-recognition model (~500 MB, first time only).
 
@@ -228,7 +230,7 @@ Select text in any application and press **`Ctrl+Alt+R`**: it is read in the rig
 | Hide / show it | `Ctrl+Alt+W`, click the tray icon, or right-click → *Hide widget* |
 | Reach actions without the widget | Right-click the tray icon |
 | Start/stop the service | Tray menu, or the ⏻ button when the widget says *Offline* |
-| Turn start-with-Windows on/off | Tray menu → *Start with Windows* (*Start with macOS* on a Mac) |
+| Turn start-with-Windows on/off | Tray menu → *Start with Windows* (*Start with macOS* on a Mac, *Start at login* on Linux) |
 | Hear ChatGPT / Copilot desktop apps | Tray menu → *Read ChatGPT / Copilot notifications* |
 | Get it back after *Quit widget* | `agent-voice widget` (or sign out/in) |
 

@@ -472,11 +472,40 @@ def agent_states() -> dict[str, str]:
             for agent in AGENT_KEYS}
 
 
-# -- Windows autostart ---------------------------------------------------------------------
+# -- autostart and the app menu ------------------------------------------------------------
+def _xdg(kind: str, default: Path) -> Path:
+    return Path(os.environ.get(kind) or default)
+
+
 def _startup_file() -> Path:
     if sys.platform == "darwin":
         return Path.home() / "Library" / "LaunchAgents" / "com.agentvoice.daemon.plist"
+    if sys.platform != "win32":  # Linux: the desktop's autostart folder (XDG)
+        return _xdg("XDG_CONFIG_HOME", Path.home() / ".config") / "autostart" / "agent-voice.desktop"
     return Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "agent-voice.vbs"
+
+
+def _desktop_entry(path: Path, args: list[str], enable: bool, autostart: bool = False) -> str:
+    """Linux: a .desktop file (the app menu, or autostart at login)."""
+    if not enable:
+        path.unlink(missing_ok=True)
+        return f"removed {path}"
+
+    def quote(arg: str) -> str:  # the Desktop Entry spec's quoting
+        if not any(c in arg for c in ' \t"`$\\'):
+            return arg
+        return '"' + "".join("\\" + c if c in '"`$\\' else c for c in arg) + '"'
+
+    icon = Path(__file__).resolve().parent.parent / "packaging" / "agent-voice.ico"
+    lines = ["[Desktop Entry]", "Type=Application", "Name=agent-voice", "Comment=Your AI agents, out loud",
+             f"Exec={' '.join(quote(a) for a in args)}", "Terminal=false", "Categories=Utility;"]
+    if icon.is_file():
+        lines.append(f"Icon={icon}")
+    if autostart:
+        lines.append("X-GNOME-Autostart-enabled=true")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return f"created {path}"
 
 
 def _launch_agent(path: Path, enable: bool) -> str:
@@ -496,13 +525,18 @@ def _launch_agent(path: Path, enable: bool) -> str:
 
 
 def _start_menu_file() -> Path:
+    if sys.platform.startswith("linux"):
+        return _xdg("XDG_DATA_HOME", Path.home() / ".local" / "share") / "applications" / "agent-voice.desktop"
     return Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "agent-voice.lnk"
 
 
 def start_menu(enable: bool = True) -> str:
-    """agent-voice in the Start menu: search for it, and it opens (starting the service when it isn't running)."""
+    """agent-voice in the Start menu (Linux: the app menu): search for it, and it opens (starting the service when
+    it isn't running)."""
+    if sys.platform.startswith("linux"):
+        return _desktop_entry(_start_menu_file(), self_command("open"), enable)
     if os.name != "nt":
-        return "the Start menu entry is for Windows"
+        return "the Start menu entry is for Windows and Linux"
     path = _start_menu_file()
     if not enable:
         path.unlink(missing_ok=True)
@@ -527,8 +561,10 @@ def start_menu(enable: bool = True) -> str:
 def autostart(enable: bool = True) -> str:
     if sys.platform == "darwin":
         return _launch_agent(_startup_file(), enable)
+    if sys.platform.startswith("linux"):
+        return _desktop_entry(_startup_file(), self_command("serve", "--background"), enable, autostart=True)
     if os.name != "nt":
-        return "autostart is automated on Windows and macOS; run `agent-voice start` from your login scripts"
+        return "autostart is automated on Windows, macOS and Linux; run `agent-voice start` from your login scripts"
     path = _startup_file()
     if not enable:
         path.unlink(missing_ok=True)

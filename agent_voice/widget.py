@@ -3588,7 +3588,8 @@ class Tray(QSystemTrayIcon):
         if not online:
             add("Start agent-voice", lambda: threading.Thread(target=client.start_detached, daemon=True).start())
         add("Restart agent-voice", lambda: threading.Thread(target=client.restart, daemon=True).start())
-        add("Start with macOS" if MAC else "Start with Windows", self._toggle_autostart, checked=_autostart_enabled())
+        add("Start with macOS" if MAC else "Start with Windows" if sys.platform == "win32" else "Start at login",
+            self._toggle_autostart, checked=_autostart_enabled())
         m.addSeparator()
         add("Quit agent-voice", self._quit_all)
 
@@ -3606,7 +3607,7 @@ class Tray(QSystemTrayIcon):
 
 
 def _autostart_enabled() -> bool:
-    if sys.platform not in ("win32", "darwin"):
+    if not (sys.platform in ("win32", "darwin") or sys.platform.startswith("linux")):
         return False
     from agent_voice.install import _startup_file
 
@@ -3621,6 +3622,9 @@ def run(demo: str | None = None) -> int:
 
     global _LOCK
 
+    if sys.platform.startswith("linux") and os.environ.get("WAYLAND_DISPLAY") and "QT_QPA_PLATFORM" not in os.environ:
+        # Wayland doesn't let a window place itself or stay on top: the notch runs through XWayland, where it can.
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
     app = QApplication(sys.argv)
     # Hiding the widget must not quit: the tray icon keeps running.
     app.setQuitOnLastWindowClosed(False)

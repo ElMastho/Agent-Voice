@@ -260,6 +260,83 @@ elif sys.platform == "darwin":
                    f'"{text.replace(chr(34), "")}"')
         return int(pid) if pid.isdigit() else 0
 
+elif sys.platform.startswith("linux"):
+    # Linux (X11, or apps under XWayland): windows through xdotool, idle time through xprintidle. Without them
+    # replies still work: they're left on the clipboard, and nothing is typed into the wrong window.
+    import os
+    import shutil
+    import subprocess
+
+    def _run(*args: str) -> str:
+        if not shutil.which(args[0]):
+            return ""
+        try:
+            return subprocess.run(list(args), capture_output=True, text=True, timeout=3).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    def foreground() -> int:
+        found = _run("xdotool", "getactivewindow")
+        return int(found) if found.isdigit() else 0
+
+    def title(hwnd: int) -> str:
+        return _run("xdotool", "getwindowname", str(int(hwnd))) if hwnd else ""
+
+    def is_window(hwnd: int) -> bool:
+        if not hwnd or not shutil.which("xdotool"):
+            return False
+        try:
+            return subprocess.run(["xdotool", "getwindowname", str(int(hwnd))], capture_output=True,
+                                  timeout=3).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def is_minimized(hwnd: int) -> bool:
+        return "_NET_WM_STATE_HIDDEN" in _run("xprop", "-id", str(int(hwnd)), "_NET_WM_STATE") if hwnd else False
+
+    def minimize(hwnd: int) -> None:
+        if hwnd:
+            _run("xdotool", "windowminimize", str(int(hwnd)))
+
+    def focus(hwnd: int, timeout: float = 1.5) -> bool:
+        if not is_window(hwnd):
+            return False
+        _run("xdotool", "windowactivate", str(int(hwnd)))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if foreground() == hwnd:
+                return True
+            time.sleep(0.05)
+        return False
+
+    def idle_seconds() -> float:
+        found = _run("xprintidle")  # milliseconds since the last input
+        return int(found) / 1000 if found.isdigit() else 0.0
+
+    def app_window(pid: int) -> int:
+        """The window of the terminal (or editor) a process runs in: its first ancestor that has one."""
+        p = pid
+        for _ in range(12):
+            found = _run("xdotool", "search", "--pid", str(p)).split()
+            if found and found[-1].isdigit():
+                return int(found[-1])
+            try:
+                with open(f"/proc/{p}/stat", encoding="utf-8") as fh:
+                    p = int(fh.read().rsplit(")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                return 0
+            if p <= 1:
+                return 0
+        return 0
+
+    def console_window() -> int:
+        found = os.environ.get("WINDOWID", "")  # xterm, Konsole, Alacritty... set it
+        return int(found) if found.isdigit() else app_window(os.getpid())
+
+    def find_window(text: str) -> int:
+        found = _run("xdotool", "search", "--onlyvisible", "--name", text).split()
+        return int(found[0]) if found and found[0].isdigit() else 0
+
 else:
 
     def foreground() -> int:
@@ -346,6 +423,9 @@ def clipboard_png() -> bytes:
                              timeout=5).stdout
         m = re.search(r"«data PNGf([0-9A-Fa-f]+)»", out)
         return bytes.fromhex(m.group(1)) if m else b""
+    if sys.platform.startswith("linux"):
+        return _linux_png([["wl-paste", "--no-newline", "--type", "image/png"],
+                           ["xclip", "-selection", "clipboard", "-target", "image/png", "-out"]])
     if sys.platform != "win32":
         return b""
     user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
@@ -376,7 +456,10 @@ def window_png(hwnd: int) -> bytes:
     """A picture of a window as it is on screen right now (what you're looking at), as PNG; b'' if it can't be had.
 
     Copied from the screen rather than asked of the window: browsers and GPU-drawn apps answer that with black.
+    Linux: ImageMagick's `import` (X11).
     """
+    if sys.platform.startswith("linux") and hwnd:
+        return _linux_png([["import", "-window", str(int(hwnd)), "png:-"]])
     if sys.platform != "win32" or not hwnd:
         return b""
     import struct
@@ -432,3 +515,20 @@ def window_png(hwnd: int) -> bytes:
         if before:
             user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(before))
     return dib_to_png(header + pixels.raw)
+
+
+def _linux_png(commands: list[list[str]]) -> bytes:
+    """The first of these tools that's installed and answers with a PNG."""
+    import shutil
+    import subprocess
+
+    for command in commands:
+        if not shutil.which(command[0]):
+            continue
+        try:
+            data = subprocess.run(command, capture_output=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if data.startswith(b"\x89PNG"):
+            return data
+    return b""

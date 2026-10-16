@@ -9,7 +9,7 @@
 <p align="center">
   <img alt="License: GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-8B7CFF">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-22D3EE">
-  <img alt="Windows 11 · macOS beta" src="https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20macOS%20beta-34D399">
+  <img alt="Windows 11 · macOS beta · Linux beta" src="https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20macOS%20beta%20%C2%B7%20Linux%20beta-34D399">
   <img alt="Offline" src="https://img.shields.io/badge/runs-offline%20%C2%B7%20CPU%20only-FBBF24">
   <img alt="Agents" src="https://img.shields.io/badge/agents-hooks%20%C2%B7%20MCP%20%C2%B7%20browser%20%C2%B7%20terminal-F472B6">
 </p>
@@ -88,6 +88,8 @@ New versions install themselves in one click: see [Updating](#updating).
 
 > Windows 11 · Python 3.13 recommended (some audio/ML wheels lag behind the newest Python).
 > **macOS (beta)**: the same steps with `python3.13 -m venv .venv` and `.venv/bin/...`. Give your terminal the *Accessibility* permission (global shortcuts, typing your replies). The test suite runs on macOS in CI; the app itself is less tried there than on Windows.
+
+> **Linux (beta)**: the same steps with `python3 -m venv .venv` and `.venv/bin/...`, plus a few system tools: `sudo apt install libportaudio2 pulseaudio-utils xdotool xclip xprintidle playerctl imagemagick` (Fedora: `portaudio pulseaudio-utils xdotool xclip xprintidle playerctl ImageMagick`). Sound goes through PulseAudio or PipeWire (`pactl`): other apps turn down under the voice, players pause while you reply (MPRIS), calls and headphones are detected. Windows are found and typed into with `xdotool`, so an **X11** session works best; under **Wayland** the notch runs through XWayland and replies reach apps that do too (the others get it on the clipboard). `agent-voice shortcut on` adds it to your app menu, `agent-voice autostart on` starts it at login. Not on Linux: the Claude desktop app's background send (there's no Linux app), and the one-click update (update with `git pull`). The test suite, and a smoke test against a real PulseAudio server and the notch on an X display, run on Linux in CI.
 
 ```bash
 git clone https://github.com/ElMastho/agent-voice.git
@@ -414,7 +416,7 @@ agent-voice history [words] [--clear]           search every conversation (what 
 agent-voice schedule "prompt" --at WHEN [--thread NAME | --new [--agent A] [--cwd D]] [--repeat daily|weekdays]
 agent-voice schedule --list | --cancel ID       what's scheduled
 agent-voice phone on|off|test|new|status        phone notifications (ntfy)
-agent-voice autostart on|off                    start with Windows (a LaunchAgent on macOS)
+agent-voice autostart on|off                    start at login (Windows; a LaunchAgent on macOS; XDG autostart on Linux)
 agent-voice setup                               config, voices, Whisper model
 agent-voice serve                               run in the foreground (debugging)
 ```
@@ -469,7 +471,7 @@ Architecture notes, invariants and gotchas for contributors (human or AI) are in
 | [psutil](https://github.com/giampaolo/psutil) | Which app an audio session belongs to (through pycaw) | BSD-3-Clause |
 | [ntfy](https://ntfy.sh) | Phone notifications (a service and app you choose to use; not bundled) | Apache-2.0 / GPL-2.0 |
 | [pywinpty](https://github.com/andfoy/pywinpty) | Pseudo-terminal on Windows (ConPTY) | MIT |
-| [pynput](https://github.com/moses-palmer/pynput) | Global hotkeys on macOS | LGPL-3.0 |
+| [pynput](https://github.com/moses-palmer/pynput) | Global hotkeys on macOS and Linux, keystrokes on Linux | LGPL-3.0 |
 | [comtypes](https://github.com/enthought/comtypes) | UI Automation: open the right conversation in the Claude desktop app | MIT |
 | [NumPy](https://numpy.org) | Audio buffers | BSD-3-Clause |
 | [Segoe Fluent Icons](https://learn.microsoft.com/windows/apps/design/style/segoe-fluent-icons-font) | Icons (system font, not redistributed) | Microsoft |

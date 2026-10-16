@@ -1,8 +1,8 @@
 """Where the sound comes out: headphones (only you hear it) or speakers (everyone around does).
 
-Windows only: the default playback device's form factor, as the audio settings know it (pycaw). The device id is
-read every few seconds (~1 ms); its properties only when it changes (plugging headphones in, a Bluetooth headset
-connecting).
+Windows: the default playback device's form factor, as the audio settings know it (pycaw); its id is read every few
+seconds (~1 ms), its properties only when it changes (plugging headphones in, a Bluetooth headset connecting).
+Linux: the default output's form factor or active port, from PulseAudio / PipeWire (`pactl`).
 """
 
 from __future__ import annotations
@@ -35,6 +35,16 @@ class OutputWatch:
         self.name = ""
 
     def poll(self) -> str:
+        if sys.platform.startswith("linux"):
+            from agent_voice import pulse
+
+            if not pulse.available():
+                return ""
+            kind, name = pulse.output_kind()
+            if (kind, name) != (self.kind, self.name):
+                self.kind, self.name = kind, name
+                log.info("sound output: %s (%s)", name, kind or "unknown kind")
+            return self.kind
         if sys.platform != "win32":
             return ""
         import comtypes

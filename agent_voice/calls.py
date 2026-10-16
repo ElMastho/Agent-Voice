@@ -50,7 +50,11 @@ def _apps(root) -> list[str]:
 
 
 def apps_using_mic() -> list[str]:
-    """Other apps holding the microphone right now (empty off Windows or when unknown)."""
+    """Other apps holding the microphone right now (Windows' privacy records; Linux: PulseAudio / PipeWire)."""
+    if sys.platform.startswith("linux"):
+        from agent_voice import pulse
+
+        return pulse.recording_apps() if pulse.available() else []
     if sys.platform != "win32":
         return []
     import winreg

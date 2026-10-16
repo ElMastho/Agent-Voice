@@ -1,7 +1,7 @@
 """Other apps' sound while agent-voice talks or listens: lowered under the voice, a video paused while you reply.
 
-Windows only (the per-app volumes of the audio mixer, through pycaw). Volumes are faded, never jumped, and put
-back as they were; one you change yourself in the meantime is left alone. What was lowered is saved, so a
+Windows: the per-app volumes of the audio mixer (pycaw). Linux: PulseAudio / PipeWire streams (`pactl`), and
+players paused through MPRIS (`playerctl`). Volumes are faded, never jumped, and put back as they were; one you change yourself in the meantime is left alone. What was lowered is saved, so a
 crash can't leave a video stuck at 30%: the next start puts it back.
 """
 
@@ -17,6 +17,10 @@ log = logging.getLogger(__name__)
 
 
 def available() -> bool:
+    if sys.platform.startswith("linux"):
+        from agent_voice import pulse
+
+        return pulse.available()
     if sys.platform != "win32":
         return False
     try:
@@ -26,8 +30,37 @@ def available() -> bool:
     return True
 
 
+class _Stream:
+    """A Linux playback stream with the two calls the fades use (pycaw's names)."""
+
+    def __init__(self, index: int, level: float):
+        self.index, self.level = index, level
+
+    def GetMasterVolume(self) -> float:  # noqa: N802 - pycaw's name
+        return self.level
+
+    def SetMasterVolume(self, level: float, _context=None) -> None:  # noqa: N802
+        from agent_voice import pulse
+
+        self.level = level
+        pulse.set_volume(self.index, level)
+
+
+class _Meter:
+    def __init__(self, running: bool):
+        self.running = running
+
+    def GetPeakValue(self) -> float:  # noqa: N802
+        return 1.0 if self.running else 0.0
+
+
 def _sessions():
     """(key, process name, volume control, level meter) for every app playing through the speakers but us."""
+    if sys.platform.startswith("linux"):
+        from agent_voice import pulse
+
+        return [(f"{s['name']}:{s['pid']}:{s['index']}", s["name"], _Stream(s["index"], s["volume"]),
+                 _Meter(s["running"])) for s in pulse.playing()]
     import comtypes
     from pycaw.pycaw import AudioUtilities, IAudioMeterInformation
 
@@ -42,6 +75,25 @@ def _sessions():
             meter = None
         out.append((f"{s.Process.name()}:{s.Process.pid}", s.Process.name(), s.SimpleAudioVolume, meter))
     return out
+
+
+def _pause_media() -> bool:
+    """Pause what's playing; True if something was (so it's played again after)."""
+    if sys.platform.startswith("linux"):
+        from agent_voice import pulse
+
+        return pulse.pause_players()
+    _media_key()
+    return True
+
+
+def _resume_media() -> None:
+    if sys.platform.startswith("linux"):
+        from agent_voice import pulse
+
+        pulse.resume_players()
+        return
+    _media_key()
 
 
 def _media_key() -> None:
@@ -84,15 +136,15 @@ class Ducker:
                     playing = True
             self._save()
             if pause and playing and not self._paused:
-                _media_key()  # a video playing while you reply: paused (and played again after)
-                self._paused = True
-                log.info("media paused while you speak")
+                self._paused = _pause_media()  # a video playing while you reply: paused (and played again after)
+                if self._paused:
+                    log.info("media paused while you speak")
             self._fade(sessions, level)
 
     def restore(self) -> None:
         with self._lock:
             if self._paused:
-                _media_key()
+                _resume_media()
                 self._paused = False
                 log.info("media resumed")
             if not self._original:

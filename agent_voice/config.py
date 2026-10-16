@@ -101,6 +101,10 @@ DEFAULTS: dict = {
     # Focus: in a call, presenting or with an app full screen, replies are held (approvals still come
     # through) and a catch-up follows. calls: "hold", or "chimes" to keep hearing chimes in calls.
     "focus": {"enabled": True, "full_screen": True, "calls": "hold"},
+    # Claude's limits: every this many minutes while you use Claude, agent-voice runs Claude Code's own `claude -p
+    # /usage` (a local command: no model request; your credentials stay in Claude Code) and reads what it reports.
+    # 0 turns it off; between readings the notch estimates from your transcripts.
+    "limits": {"claude_refresh_minutes": 10},
     # Out of quota: once the limit resets, send this to the thread so it picks up where it stopped (auto: without
     # asking; off: only after "resume when it resets" or a click on Resume).
     "resume": {"auto": True, "message": "Continue."},

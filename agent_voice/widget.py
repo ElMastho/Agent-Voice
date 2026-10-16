@@ -919,6 +919,11 @@ class VoiceWidget(QWidget):
         """The island's full width now: one row wide, a third of the screen with the notch's panel open."""
         return int(round(self._nw)) if self.notch else NOTCH_W
 
+    def _canvas_w(self) -> int:
+        """The notch's window width: the island at its widest (open, overshooting a little), always."""
+        widest = max(NOTCH_W, min(PANEL_MAX_W, (SCREEN_W or self._screen_w) / 3))
+        return int(widest * 1.05) + 2
+
     def _nw_target(self) -> float:
         if not (self.notch and self.expanded):
             return float(NOTCH_W)
@@ -1026,18 +1031,14 @@ class VoiceWidget(QWidget):
         self._nw = target_w if abs(self._nw - target_w) < 0.5 else _ease(self._nw, target_w, self._k(0.3))
         self._vw = self._nw * grow
         vh = self._vis_h()
-        # The window is a canvas the island is drawn in: sized once for where the animation is going (never
-        # every frame: resizing a see-through window re-uploads all of it), trimmed once it has settled.
-        end_w = target_w * (1.0 if target else NOTCH_PILL)
+        # The window is a canvas the island is drawn in (its see-through pixels let clicks through). It is as wide
+        # as the island can ever get, so it never moves sideways: a window that moves and resizes shows its old
+        # picture at the new place for a frame (a jolt). Only its height changes, downwards (nothing shifts):
+        # grown once for where an animation is going, trimmed once it has settled (never resized every frame).
         end_h = self._target_size()[1]
-        settled = abs(self._vw - end_w) < 0.5 and abs(vh - end_h) < 0.6 and not self._reveal_v
-        need_w = int(round(self._vw)) if settled else int(max(self._vw, end_w * 1.05, NOTCH_W)) + 2  # + overshoot
-        need_h = int(vh) if settled else int(max(vh, end_h)) + 2
-        cw, ch = self.width(), self.height()
-        if settled:
-            cw, ch = need_w, need_h
-        elif need_w > cw or need_h > ch:
-            cw, ch = max(cw, need_w), max(ch, need_h)
+        settled = abs(vh - end_h) < 0.6 and abs(self._nw - target_w) < 0.5
+        cw = self._canvas_w()
+        ch = int(vh) if settled else max(self.height(), int(max(vh, end_h)) + 2)
         hidden = geo.top() - vh + NOTCH_PEEK
         x = geo.center().x() - cw // 2
         y = int(round(hidden + (geo.top() - hidden) * down))
@@ -2223,7 +2224,9 @@ class VoiceWidget(QWidget):
         p.drawText(QRectF(self.rx + 14, y, self.rw - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, "Limits")
         p.setFont(self.f_hint)
         p.setPen(QColor(226, 232, 240, 105))
-        p.drawText(QRectF(self.rx + 14, y, self.rw - 28, 16), Qt.AlignRight | Qt.AlignVCenter, "used · resets")
+        estimated = any(w.get("est") for _s, windows in rows for w in windows.values())
+        p.drawText(QRectF(self.rx + 14, y, self.rw - 28, 16), Qt.AlignRight | Qt.AlignVCenter,
+                   "≈ from your transcripts · resets" if estimated else "used · resets")
         fm = QFontMetrics(self.f_hint)
         for i, (source, windows) in enumerate(rows):
             row = self._limit_row(i)
@@ -2262,15 +2265,22 @@ class VoiceWidget(QWidget):
                 p.setFont(self.f_hint)
                 p.setPen(QColor(226, 232, 240, 120))
                 p.drawText(QRectF(x, ly, 28, line), Qt.AlignLeft | Qt.AlignVCenter, label)
-                text = f"{w['pct']}%" + (f" · {_reset_text(w['resets'])}" if w.get("resets") else "") if w else "–"
-                tw = fm.horizontalAdvance("100% · 00:00") + 2  # the same for every row: the bars line up
+                pct = w.get("pct") if w else None
+                # Estimated from the transcripts: "≈"; not calibrated yet: the tokens used in the window instead.
+                amount = (f"{'≈' if w.get('est') else ''}{pct}%" if pct is not None
+                          else f"{_tokens_text(int(w.get('tokens') or 0))} tok") if w else ""
+                text = amount + (f" · {_reset_text(w['resets'])}" if w.get("resets") else "") if w else "–"
+                tw = fm.horizontalAdvance("≈100% · 00:00") + 2  # the same for every row: the bars line up
                 bar = QRectF(x + 30, ly + line / 2 - 2, max(10.0, half - 30 - tw - 6), 4)
                 p.setPen(Qt.NoPen)
                 p.setBrush(QColor(255, 255, 255, 26))
                 p.drawRoundedRect(bar, 2, 2)
-                if w:
-                    p.setBrush(_limit_color(w["pct"]))
-                    p.drawRoundedRect(QRectF(bar.x(), bar.y(), max(4.0, bar.width() * w["pct"] / 100), 4), 2, 2)
+                if pct is not None:
+                    fill = _limit_color(pct)
+                    if w.get("est"):
+                        fill.setAlpha(170)  # an estimate: a touch softer than a reading
+                    p.setBrush(fill)
+                    p.drawRoundedRect(QRectF(bar.x(), bar.y(), max(4.0, bar.width() * pct / 100), 4), 2, 2)
                 p.setPen(QColor(226, 232, 240, 200 if w else 90))
                 p.drawText(QRectF(bar.right() + 6, ly, tw, line), Qt.AlignLeft | Qt.AlignVCenter, text)
         p.restore()

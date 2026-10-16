@@ -19,7 +19,8 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from agent_voice import __version__, calls, claudeapp, install, keys, quota, textclean, updater, winfocus
+from agent_voice import (__version__, calls, claudeapp, install, keys, ntfy, quota, schedule, textclean, updater,
+                         usage, winfocus)
 from agent_voice.config import HOME, LOG_DIR, load_config, load_state, save_state
 from agent_voice.hooks import strip_summary
 from agent_voice.textclean import result_label
@@ -138,6 +139,8 @@ _ORDINALS = {
 }
 
 
+# Where a new thread can start (launch.targets), as said in the notch.
+TARGET_NAMES = {"claude-app": "Claude app", "claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI"}
 # How each agent is called when a conversation has no title of its own.
 AGENT_TITLES = {"claude": "Claude Code", "cline": "Cline", "claude-desktop": "Claude Desktop", "vscode": "VS Code",
                 "chatgpt": "ChatGPT", "claude-web": "Claude", "gemini-web": "Gemini", "aistudio": "AI Studio",
@@ -422,7 +425,15 @@ class Daemon:
         self._limited: dict[str, dict] = {k: v for k, v in (self.state.get("limited") or {}).items()
                                           if isinstance(v, dict)}
         self._fullscreen = ""  # "presenting" / "full screen" (focus)
+        # Phone notifications (ntfy, opt-in) and scheduled prompts (kept across restarts).
+        self.notifier = ntfy.Notifier(self._ntfy_settings)
+        self._schedules: list[dict] = [s for s in self.state.get("schedules") or [] if isinstance(s, dict)]
         self._limits_at: dict[str, float] = {}  # when each agent's numbers were measured (newest wins)
+        # Claude's usage from its transcripts: an estimate between real readings (the desktop app reports none).
+        self._ledger = usage.Ledger()
+        self._estimator = usage.Estimator(self._ledger, self.state.get("claude_usage"))
+        self._claude_est: dict[str, dict] = {}
+        self._claude_asked = 0.0  # the last time we ran `claude -p /usage`
         self._usage_line = ""  # Claude Code's status line: "on" (ours), "off" or "custom" (yours); cached with agents
         # The last finished turn's outcome (files changed, tests), shown for a while in the notch.
         self.last_result: dict | None = None
@@ -600,6 +611,8 @@ class Daemon:
                 "at": time.time(),
             }
             self._event("needs", self.question["session"], self.question["agent"], self.question["question"])
+            self._push("needs", self._title(self.question["session"], self.question["agent"]),
+                       self.question["question"] + (f" ({', '.join(options)})" if options else ""))
             if self.muted:
                 return
             if self.chime:
@@ -691,6 +704,7 @@ class Daemon:
         if session:
             self.threads[session] = {"source": source, "last": time.time()}
         self._event("needs", session, source, text)
+        self._push("needs", title, text or "Waiting for you")
         log.info("%s needs you", title)
         if not announce or self.muted:
             return
@@ -862,7 +876,7 @@ class Daemon:
         found = textclean.limit_reset(text) if text else None
         resets = resets or (found or 0.0)
         if not resets:
-            full = [w["resets"] for w in self._limits_status().get(source, {}).values() if w["pct"] >= 100]
+            full = [w["resets"] for w in self._limits_status().get(source, {}).values() if (w.get("pct") or 0) >= 100]
             resets = min(full) if full else 0.0
         before = self._limited.get(session) or {}
         resume = (bool(self.config.get("resume", {}).get("auto", True)) or bool(before.get("resume"))
@@ -876,6 +890,11 @@ class Daemon:
         when = _clock(self._limited[session]["resets"], "five_hour")
         log.info("%s hit its limit (resets %s%s)", title, when, ", resuming then" if resume else "")
         self._event("needs", session, source, "limit reached")
+        self._push("limit", title, f"Out of quota until {'about ' if guess else ''}{when}"
+                   + (": it gets “continue” then." if resume else "."))
+        if source == "claude" and resets and not guess:
+            window = "seven_day" if resets - time.time() > 6 * 3600 else "five_hour"
+            self._set_limits("claude", {window: {"pct": 100, "resets": int(resets)}})
         if before.get("sent") and resume:
             return  # our "continue" came too early: quietly try again at the next reset
         if resume:
@@ -917,6 +936,7 @@ class Daemon:
                 self._save_limited()
                 message = str(self.config.get("resume", {}).get("message") or "Continue.")
                 log.info("resuming %s after its limit reset", self._title(session, info["source"]))
+                self._push("resumed", self._title(session, info["source"]), f"Sent “{message}” after its limit reset.")
                 self.jobs.put(lambda s=session, m=message: self._send_to(s, m, "en"))
 
     def _not_limited(self, session: str) -> None:
@@ -926,6 +946,144 @@ class Daemon:
             self._save_limited()
             if sent:
                 log.info("%s resumed", self._title(session))
+
+    # -- phone notifications (ntfy) ----------------------------------------------------
+    def _ntfy_settings(self) -> dict | None:
+        """Where notifications go, or None while they're off (nothing is ever sent then)."""
+        phone = self.state.get("ntfy") or {}
+        if not phone.get("enabled") or not phone.get("topic"):
+            return None
+        cfg = self.config.get("ntfy", {})
+        return {"server": cfg.get("server") or ntfy.DEFAULT_SERVER, "token": cfg.get("token") or "",
+                "topic": phone["topic"], "content": cfg.get("content", "summary")}
+
+    def _push(self, kind: str, title: str, text: str = "", full: str = "", force: bool = False) -> None:
+        """Send it to the phone if that's on, this kind is wanted, and (by default) you're away from the PC."""
+        if not self._ntfy_settings():
+            return
+        cfg = self.config.get("ntfy", {})
+        group = {"permission": "needs", "resumed": "limit"}.get(kind, kind)
+        if not force and group not in (cfg.get("events") or ["needs", "done", "limit", "recap", "scheduled"]):
+            return
+        if not force and cfg.get("when", "away") == "away" and not self._away_for_phone():
+            return
+        content = cfg.get("content", "summary")
+        self.notifier.push(kind, title, full if content == "full" and full else text)
+
+    def _away_for_phone(self) -> bool:
+        idle = winfocus.idle_seconds()
+        return bool(self._away_since or self._holding()) or idle >= 60 * float(
+            self.config.get("ntfy", {}).get("away_minutes", 2))
+
+    def set_phone(self, on: bool) -> dict:
+        """Turn phone notifications on (a private topic is made the first time) or off."""
+        phone = dict(self.state.get("ntfy") or {})
+        phone["enabled"] = on
+        if on and not phone.get("topic"):
+            phone["topic"] = ntfy.new_topic()
+        self.state["ntfy"] = phone
+        save_state(self.state)
+        log.info("phone notifications %s", "on" if on else "off")
+        return self._phone_status()
+
+    def new_phone_topic(self) -> dict:
+        """A new private topic: the old QR code stops receiving anything (scan the new one)."""
+        self.state["ntfy"] = {**(self.state.get("ntfy") or {}), "topic": ntfy.new_topic()}
+        save_state(self.state)
+        return self._phone_status()
+
+    def phone_test(self) -> bool:
+        cfg = self._ntfy_settings()
+        return bool(cfg) and self.notifier.send(ntfy.message("test", "agent-voice", "", "titles"), cfg)
+
+    def _phone_status(self) -> dict:
+        cfg = self._ntfy_settings()
+        if not cfg:
+            return {"enabled": False}
+        return {"enabled": True, "url": ntfy.subscribe_url(cfg["server"], cfg["topic"]), "sent": self.notifier.sent,
+                "error": self.notifier.last_error, "when": self.config.get("ntfy", {}).get("when", "away"),
+                "content": cfg["content"]}
+
+    # -- scheduled prompts ------------------------------------------------------------
+    def add_schedule(self, prompt: str, at: float, session: str = "", new: dict | None = None,
+                     repeat: str = "") -> dict:
+        """Send `prompt` at `at`: to a conversation (`session`), or as a new thread (`new`: target, cwd)."""
+        prompt = prompt.strip()
+        if not prompt or not at:
+            raise ValueError("a prompt and a time")
+        title = (f"New thread ({TARGET_NAMES.get((new or {}).get('target', ''), 'where you last worked')})"
+                 if new is not None else self._title(session, self.threads.get(session, {}).get("source", "")))
+        item = {"id": max((s["id"] for s in self._schedules), default=0) + 1, "at": int(at), "prompt": prompt[:4000],
+                "session": session, "new": new, "repeat": repeat if repeat in schedule.REPEATS else "",
+                "title": title}
+        self._schedules.append(item)
+        self._save_schedules()
+        log.info("scheduled #%d for %s: %s", item["id"], _clock(at, "seven_day"), title)
+        self._show_banner(f"At {_clock(at, 'seven_day')}" + (f" ({item['repeat']})" if item["repeat"] else "")
+                          + f", {title} gets: {prompt[:160]}", "", "", kind="note", tag="scheduled")
+        return item
+
+    def cancel_schedule(self, item_id: int) -> bool:
+        before = len(self._schedules)
+        self._schedules = [s for s in self._schedules if s["id"] != item_id]
+        self._save_schedules()
+        return len(self._schedules) < before
+
+    def _save_schedules(self) -> None:
+        self.state["schedules"] = self._schedules
+        save_state(self.state)
+
+    def schedule_said(self, text: str, lang: str, session: str) -> bool:
+        """'At 2 pm tell Codex to run the tests', 'in 20 minutes, new thread: ...', 'à 14h lance les tests'."""
+        timed = schedule.split_when(text, time.time())
+        if not timed:
+            return False
+        at, rest = timed
+        new = parse_new_thread(rest)
+        if new:
+            self.add_schedule(new[1], at, new={"target": {"claude": "", "": ""}.get(new[0], new[0]), "cwd": ""})
+            return True
+        routed = self._routed(rest)
+        if routed:
+            self.add_schedule(routed[1], at, session=routed[0])
+            return True
+        self.add_schedule(rest, at, session=session or self._last_session)
+        return True
+
+    def _check_schedules(self, now: float) -> None:
+        """Send what's due; a prompt missed by more than 6 hours (the PC was off) is dropped, and said so."""
+        changed = False
+        for item in list(self._schedules):
+            if item["at"] > now:
+                continue
+            late = now - item["at"] > 6 * 3600
+            following = schedule.next_run(item["at"], item.get("repeat", ""), now)
+            if following:
+                item["at"] = int(following)
+            else:
+                self._schedules.remove(item)
+            changed = True
+            if late:
+                self._show_banner(f"Missed while the PC was off: {item['title']}: {item['prompt'][:120]}", "", "",
+                                  kind="note", tag="scheduled")
+                continue
+            self.jobs.put(lambda i=dict(item): self._run_schedule(i))
+        if changed:
+            self._save_schedules()
+
+    def _run_schedule(self, item: dict) -> None:
+        from agent_voice import lang
+
+        log.info("running scheduled #%d (%s)", item["id"], item["title"])
+        self._push("scheduled", item["title"], item["prompt"])
+        if item.get("new") is not None:
+            self.new_thread(item["prompt"], item["new"].get("target", ""), item["new"].get("cwd", ""))
+        else:
+            self._send_to(item["session"], item["prompt"], lang.detect(item["prompt"]))
+
+    def _schedules_status(self) -> list[dict]:
+        return [{k: s[k] for k in ("id", "at", "title", "prompt", "repeat")}
+                for s in sorted(self._schedules, key=lambda s: s["at"])][:6]
 
     # -- the day ----------------------------------------------------------------
     def _day(self) -> dict:
@@ -970,7 +1128,9 @@ class Daemon:
             lines.append(f"Still waiting on you: {_join(sorted(set(waiting)))}.")
         limits = []
         for source, windows in self._limits_status().items():
-            parts = [f"{'5h' if k == 'five_hour' else 'week'} {w['pct']}%" for k, w in sorted(windows.items())]
+            parts = [f"{'5h' if k == 'five_hour' else 'week'} "
+                     + (f"{'~' if w.get('est') else ''}{w['pct']}%" if w.get("pct") is not None
+                        else f"{_tokens_label(w.get('tokens', 0))} tokens") for k, w in sorted(windows.items())]
             limits.append(f"{AGENT_TITLES.get(source, source.capitalize())} {', '.join(parts)}")
         if limits:
             lines.append("Limits: " + "; ".join(limits) + ".")
@@ -979,7 +1139,8 @@ class Daemon:
                 f"{top.get('title') or 'one thread'}." + (f" {_join(sorted(set(waiting)))} still "
                                                            f"need{'s' if len(set(waiting)) == 1 else ''} you."
                                                            if waiting else ""))
-        week = [w["pct"] for windows in self._limits_status().values() for k, w in windows.items() if k == "seven_day"]
+        week = [w["pct"] for windows in self._limits_status().values() for k, w in windows.items()
+                if k == "seven_day" and w.get("pct") is not None]
         if week:
             said += f" You've used {max(week)}% of your weekly limit."
         return " ".join(lines), said
@@ -988,6 +1149,7 @@ class Daemon:
         shown, said = self.recap_text()
         log.info("recap: %s", said)
         self._show_banner(shown, "", "", kind="recap")
+        self._push("recap", "Today", shown, full=shown)
         if spoken and not self.quiet:
             self._wake_cancel.set()
             self.speaker.speak(said, "en")
@@ -1024,6 +1186,7 @@ class Daemon:
                 now = time.time()
                 self._check_away(winfocus.idle_seconds(), now)
                 self._check_resumes(now)
+                self._check_schedules(now)
                 self._check_recap(now)
             except Exception:
                 log.exception("away check failed")
@@ -1138,6 +1301,10 @@ class Daemon:
         at = at or time.time()
         limits = {k: {"pct": max(0, min(100, int(v["pct"]))), "resets": int(v.get("resets") or 0)}
                   for k, v in limits.items() if k in quota.WINDOWS}
+        if source == "claude":  # every real reading calibrates the estimate
+            for window, w in limits.items():
+                self._estimator.reading(window, w["pct"], w["resets"], at)
+            self.state["claude_usage"] = self._estimator.state()
         if not limits or at < self._limits_at.get(source, 0.0):
             return  # older than what we have (Claude's cache vs its status line)
         self._limits_at[source] = at
@@ -1151,7 +1318,13 @@ class Daemon:
                          key=lambda s: self.threads[s]["last"], default="")
             if latest and latest not in self._limited:
                 self.limit_hit(latest, source)
+        self._warn_limits(source, limits)
+
+    def _warn_limits(self, source: str, limits: dict) -> None:
+        """A note, once per window, when one passes 90% (measured or estimated)."""
         for window, w in limits.items():
+            if w.get("pct") is None:
+                continue
             key = f"{source}:{window}:{w['resets'] // 600}"  # once per window (its reset time, give or take)
             if w["pct"] >= 90 and key not in self._limit_warned:
                 self._limit_warned.add(key)
@@ -1159,8 +1332,9 @@ class Daemon:
                 span = "5-hour" if window == "five_hour" else "weekly"
                 when = f", it resets at {_clock(w['resets'], window)}" if w["resets"] else ""
                 log.info("%s %s limit at %d%%", source, window, w["pct"])
-                self._show_banner(f"{name} has used {w['pct']}% of its {span} limit{when}.", "", "", kind="note",
-                                  tag="limits")
+                about = "about " if w.get("est") else ""
+                self._show_banner(f"{name} has used {about}{w['pct']}% of its {span} limit{when}.", "", "",
+                                  kind="note", tag="limits")
 
     def _quota_watch(self) -> None:
         """Codex writes its rate limits in its session logs, Claude caches its own: re-read them when they change."""
@@ -1169,6 +1343,7 @@ class Daemon:
         claude_json = Path.home() / ".claude.json"
         while True:
             try:
+                self._ledger.refresh()  # first: a reading calibrates against the requests before it
                 mtime = claude_json.stat().st_mtime if claude_json.exists() else 0.0
                 if mtime != claude_seen:
                     claude_seen = mtime
@@ -1177,6 +1352,22 @@ class Daemon:
                         self._set_limits("claude", found, at=fetched)
             except Exception:
                 log.exception("claude limits check failed")
+            try:
+                if self._ask_claude_usage():
+                    fetched, found = quota.claude_cached(claude_json)
+                    if found:
+                        claude_seen = claude_json.stat().st_mtime
+                        self._set_limits("claude", found, at=fetched)
+            except Exception:
+                log.exception("claude usage refresh failed")
+            try:
+                self._estimate_claude()
+            except Exception:
+                log.exception("claude usage estimate failed")
+            try:
+                self._read_usage_drops()
+            except Exception:
+                log.exception("usage folder check failed")
             try:
                 path = quota.latest_codex_log()
                 if path is not None and (path, path.stat().st_mtime) != seen:
@@ -1188,11 +1379,76 @@ class Daemon:
                 log.exception("codex limits check failed")
             time.sleep(60)
 
+    def _ask_claude_usage(self, now: float | None = None) -> bool:
+        """Have Claude Code fetch its own usage (`claude -p /usage`: a local command, no model request), which it
+        saves to ~/.claude.json. Every few minutes while Claude is in use, and once at start."""
+        from agent_voice import launch
+
+        now = time.time() if now is None else now
+        minutes = float(self.config.get("limits", {}).get("claude_refresh_minutes", 10) or 0)
+        if minutes <= 0 or now - self._claude_asked < minutes * 60:
+            return False
+        last = self._ledger.items[-1][0] if self._ledger.items else 0.0
+        if self._claude_asked and now - last > 3600:
+            return False  # Claude not used in the last hour: nothing moved
+        exe = launch.find_cli("claude")
+        if not exe:
+            return False
+        self._claude_asked = now
+        import subprocess
+
+        try:
+            subprocess.run([exe, "-p", "/usage"], cwd=str(Path.home()), stdin=subprocess.DEVNULL,
+                           capture_output=True, timeout=90, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.info("claude /usage didn't run: %s", type(exc).__name__)
+            return False
+        return True
+
+    def _estimate_claude(self, now: float | None = None) -> None:
+        """Read the new requests in Claude's transcripts and estimate where its windows are."""
+        now = time.time() if now is None else now
+        self._ledger.refresh(now)
+        est = {w: e for w in usage.SPANS if (e := self._estimator.estimate(w, now))}
+        self._claude_est = est
+        self._warn_limits("claude", {w: e for w, e in est.items() if e.get("pct") is not None and e["resets"]})
+
+    def _read_usage_drops(self) -> None:
+        """~/.agent-voice/usage/*.json: limits any agent or script reports (one file per agent, see the guide)."""
+        folder = HOME / "usage"
+        if not folder.is_dir():
+            return
+        now = time.time()
+        for path in folder.glob("*.json"):
+            mtime = path.stat().st_mtime
+            if now - mtime > 12 * 3600 or mtime <= self._limits_at.get(path.stem, 0.0):
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            windows = {w: v for w, v in data.items() if w in quota.WINDOWS and isinstance(v, dict)
+                       and isinstance(v.get("pct"), (int, float))}
+            if windows:
+                self._set_limits(str(data.get("agent") or path.stem)[:40], windows,
+                                 at=float(data.get("updated") or mtime))
+
     def _limits_status(self) -> dict:
-        """Each agent's windows still running (a window past its reset starts again at zero: dropped)."""
+        """Each agent's windows still running (a window past its reset starts again at zero: dropped).
+
+        Claude: the last reading as it is until the next one is due, then the estimate from its transcripts ("est").
+        """
         now = time.time()
         out = {source: {k: v for k, v in windows.items() if not v["resets"] or v["resets"] > now}
                for source, windows in self.limits.items()}
+        refresh = float(self.config.get("limits", {}).get("claude_refresh_minutes", 10) or 10)
+        fresh = now - self._limits_at.get("claude", 0.0) < refresh * 60 + 120  # until the next reading is due
+        for window, e in self._claude_est.items():
+            real = (out.get("claude") or {}).get(window)
+            if (real and fresh) or (e.get("pct") is None and not e.get("tokens")):
+                continue
+            if not e["resets"] or e["resets"] > now:
+                out.setdefault("claude", {})[window] = e
         return {source: windows for source, windows in out.items() if windows}
 
     def usage_line(self, enable: bool) -> None:
@@ -1319,6 +1575,10 @@ class Daemon:
             turn["result"] = result
         summary = text.strip() or self._turn_text(session)
         self._event("done", session, source, textclean.clean(summary) if summary else "")
+        said_line = re.search(r"voice summary:\s*(.+)", summary or "", re.I)
+        full = textclean.clean(strip_summary(self._turn_text(session) or summary or ""))
+        self._push("done", self._title(session, source),
+                   said_line.group(1).strip() if said_line else full, full=full)
         said = re.search(r"voice summary:\s*(.+)", summary or "", re.I)  # its own one-line summary, if it wrote one
         self._log_turn(session, source, said.group(1).strip() if said else textclean.clean(summary) if summary else "")
         if result and (result.get("files") or result.get("tests")):
@@ -1955,6 +2215,7 @@ class Daemon:
         if session:
             self.threads[session] = {"source": source, "last": time.time()}
         self._event("needs", session, source, summary)
+        self._push("permission", self._title(session, source), f"Wants to {summary}.")
         log.info("permission #%d: %s (%d waiting)", self._perm_seq, summary, len(self._perms))
         if self.permission is None:
             self._present_permission(perm)
@@ -2180,6 +2441,9 @@ class Daemon:
             if self._perms and self._voice_approval(command):  # "Hey Claude, approve Codex"
                 self._heard(command, lang, "", tag="answer")
                 continue
+            if self.schedule_said(command, lang, session):  # "Hey Claude, at 2 pm tell Codex to run the tests"
+                self._heard(command, lang, "", tag="scheduled")
+                continue
             if match_recap(command):  # "Hey Claude, daily recap"
                 self._heard(command, lang, "", tag="command")
                 self.recap()
@@ -2246,6 +2510,8 @@ class Daemon:
             "output": self.output,
             "in_call": self.in_call,
             "focus": self.focus if self._holding() else "",
+            "phone": self._phone_status(),
+            "schedules": self._schedules_status(),
             "day": self._day_status(),
             "banner": {**self.banner, "age": round(time.time() - self.banner["at"], 1)}
             if self.banner and time.time() - self.banner["at"] < 60 else None,
@@ -2533,6 +2799,36 @@ def _handler(daemon: Daemon):
                 else:
                     daemon.ptt_start()
                 return self._json(200, {"ok": True})
+            if self.path == "/phone":
+                action = str(data.get("action") or "")
+                if action == "test":
+                    return self._json(200, {"ok": daemon.phone_test(), **daemon._phone_status()})
+                if action == "new":
+                    return self._json(200, daemon.new_phone_topic())
+                return self._json(200, daemon.set_phone(bool(data.get("on", True))))
+            if self.path == "/schedule":
+                at = data.get("at")
+                if not isinstance(at, (int, float)):
+                    at = schedule.parse_when(str(data.get("when") or ""), time.time())
+                session = str(data.get("session") or "")
+                if data.get("thread") and not session:
+                    session = daemon._find_thread(str(data["thread"])) or ""
+                    if not session:
+                        return self._json(400, {"error": f"no thread called {data['thread']}"})
+                new = data.get("new") if isinstance(data.get("new"), dict) else None
+                if not at:
+                    return self._json(400, {"error": "when? (14:00, 2pm, in 20 minutes, tomorrow at 9)"})
+                if new is None and not session:
+                    session = daemon._last_session
+                try:
+                    item = daemon.add_schedule(str(data.get("prompt") or ""), float(at), session,
+                                               {"target": str(new.get("target") or ""), "cwd": str(new.get("cwd") or "")}
+                                               if new is not None else None, str(data.get("repeat") or ""))
+                except ValueError as exc:
+                    return self._json(400, {"error": str(exc)})
+                return self._json(200, item)
+            if self.path == "/schedule_cancel":
+                return self._json(200, {"ok": daemon.cancel_schedule(_int(data.get("id")))})
             if self.path == "/recap":
                 daemon.recap(spoken=bool(data.get("speak", True)))
                 return self._json(200, {"text": daemon.recap_text()[0]})

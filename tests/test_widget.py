@@ -271,4 +271,5 @@ def test_opening_the_notch_resizes_its_window_rarely(app, monkeypatch):
         widths.append(round(w._vw))
     assert len(set(widths)) > 10  # the island glides open...
     assert len(set(sizes)) <= 3  # ...inside a canvas sized once (and trimmed at the end), not every frame
-    assert w._two_col() and abs(w._vw - 640) < 1 and w.size().width() == round(w._vw)
+    assert len({x for x, _ in sizes}) == 1  # never wider or narrower: it doesn't jolt sideways at the end
+    assert w._two_col() and abs(w._vw - 640) < 1 and w.height() == round(w._vis_h())

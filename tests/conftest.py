@@ -4,6 +4,8 @@ import os
 import tempfile
 
 os.environ["AGENT_VOICE_HOME"] = tempfile.mkdtemp(prefix="agent-voice-tests-")
+# Linux: no test reaches a real sound server, and pactl never starts one (it would outlive the tests).
+os.environ["PULSE_SERVER"] = "unix:/nonexistent/agent-voice-tests"
 
 
 def pytest_unconfigure(config):

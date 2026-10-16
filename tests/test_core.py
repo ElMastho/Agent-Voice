@@ -450,6 +450,7 @@ def test_call_watch_switches_to_chimes_and_back(daemon, monkeypatch):
 
     seen = []
     monkeypatch.setattr(server.calls, "apps_using_mic", fake_apps)
+    monkeypatch.setattr(daemon, "_check_output", lambda: None)  # not about headphones (and no real pactl)
     monkeypatch.setattr(server.time, "sleep", lambda s: seen.append((daemon.in_call, daemon.chime)))
     with pytest.raises(SystemExit):
         daemon._call_watch()

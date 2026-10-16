@@ -1,6 +1,6 @@
 # agent-voice: to-do
 
-Everything listed so far is built and committed on `main`, not pushed or released yet. What's left:
+Everything listed so far is released in 0.5.2. What's left:
 
 ## To check live (built and tested, not yet seen working for real)
 - **Resume after a limit**: Claude Code's `StopFailure` hook firing on a real exhausted limit; "Continue." reaching the desktop-app conversation.
@@ -21,5 +21,4 @@ Everything listed so far is built and committed on `main`, not pushed or release
 - Possibly raise `catch_up.away_minutes`, or only catch up after calls (undecided).
 
 ## Release
-- Version 0.5.2: bump `pyproject.toml`, `agent_voice/__init__.py`, `agent_voice/browser/manifest.json`; run the tests; push; tag `v0.5.2` (CI builds the Windows zip, now with `qrcode`).
-- The first release the 0.5.1 one-click updater installs: its first real test.
+- 0.5.2 is the first release the 0.5.1 one-click updater installs: check that *Update* goes through on a 0.5.1 install.

@@ -20,6 +20,12 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
+@pytest.fixture(autouse=True)
+def own_position_file(tmp_path, monkeypatch):
+    # Never the real ~/.agent-voice/widget.json: what the user left folded or hidden mustn't change the tests.
+    monkeypatch.setattr(widget, "POS_FILE", tmp_path / "widget.json")
+
+
 def test_swipe_up_dismisses_the_banner(app, monkeypatch):
     opened = []
     monkeypatch.setattr(widget, "_post", lambda path, payload=None: opened.append(path))

@@ -566,6 +566,24 @@ def test_codex_limits_come_from_its_session_log(tmp_path):
     assert quota.latest_codex_log(tmp_path / "nothing") is None
 
 
+def test_claude_limits_from_its_cache(tmp_path, daemon):
+    import json
+
+    from agent_voice import quota
+
+    cache = tmp_path / ".claude.json"
+    cache.write_text(json.dumps({"cachedUsageUtilization": {"fetchedAtMs": 1792000000000, "utilization": {
+        "five_hour": {"utilization": 68, "resets_at": "2026-10-09T20:59:59.687531+00:00"},
+        "seven_day": {"utilization": 36, "resets_at": "2026-10-14T17:59:59+00:00"}, "seven_day_opus": None}}}))
+    fetched, found = quota.claude_cached(cache)
+    assert fetched == 1792000000 and found["five_hour"]["pct"] == 68 and found["seven_day"]["resets"] == int(quota._stamp("2026-10-14T17:59:59+00:00"))
+    assert quota.claude_cached(tmp_path / "missing.json") == (0.0, {})
+    far = 4102444800
+    daemon.set_usage({"source": "claude", "five_hour": {"pct": 12, "resets": far}})  # the status line, just now
+    daemon._set_limits("claude", {"five_hour": {"pct": 68, "resets": far}}, at=fetched)  # an older cache
+    assert daemon.limits["claude"]["five_hour"]["pct"] == 12
+
+
 def test_limits_are_kept_and_warn_once_near_full(daemon):
     far = 4102444800
     daemon._set_limits("codex", {"five_hour": {"pct": 91, "resets": far}, "seven_day": {"pct": 20, "resets": far}})

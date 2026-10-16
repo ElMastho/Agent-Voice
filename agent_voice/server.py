@@ -364,6 +364,7 @@ class Daemon:
         self.usage: dict[str, dict] = {}
         self.limits: dict[str, dict] = {k: v for k, v in (self.state.get("limits") or {}).items() if isinstance(v, dict)}
         self._limit_warned: set[str] = set()
+        self._limits_at: dict[str, float] = {}  # when each agent's numbers were measured (newest wins)
         self._usage_line = ""  # Claude Code's status line: "on" (ours), "off" or "custom" (yours); cached with agents
         # The last finished turn's outcome (files changed, tests), shown for a while in the notch.
         self.last_result: dict | None = None
@@ -819,11 +820,15 @@ class Daemon:
         if limits:
             self._set_limits(source, limits)
 
-    def _set_limits(self, source: str, limits: dict) -> None:
+    def _set_limits(self, source: str, limits: dict, at: float = 0.0) -> None:
         """Keep an agent's latest windows; warn once when one gets close to full."""
+        at = at or time.time()
         limits = {k: {"pct": max(0, min(100, int(v["pct"]))), "resets": int(v.get("resets") or 0)}
                   for k, v in limits.items() if k in quota.WINDOWS}
-        if not limits or limits == self.limits.get(source):
+        if not limits or at < self._limits_at.get(source, 0.0):
+            return  # older than what we have (Claude's cache vs its status line)
+        self._limits_at[source] = at
+        if limits == self.limits.get(source):
             return
         self.limits[source] = limits
         self.state["limits"] = self.limits
@@ -840,9 +845,20 @@ class Daemon:
                                   tag="limits")
 
     def _quota_watch(self) -> None:
-        """Codex writes its rate limits in its session logs: read the newest one when it changes (every minute)."""
+        """Codex writes its rate limits in its session logs, Claude caches its own: re-read them when they change."""
         seen = (None, 0.0)
+        claude_seen = 0.0
+        claude_json = Path.home() / ".claude.json"
         while True:
+            try:
+                mtime = claude_json.stat().st_mtime if claude_json.exists() else 0.0
+                if mtime != claude_seen:
+                    claude_seen = mtime
+                    fetched, found = quota.claude_cached(claude_json)
+                    if found:
+                        self._set_limits("claude", found, at=fetched)
+            except Exception:
+                log.exception("claude limits check failed")
             try:
                 path = quota.latest_codex_log()
                 if path is not None and (path, path.stat().st_mtime) != seen:

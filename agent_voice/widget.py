@@ -1198,11 +1198,11 @@ class VoiceWidget(QWidget):
         return self._hist_y() + 16 + max(1, len(self._history())) * ROW_H + 8
 
     def _limit_rows(self) -> list[tuple[str, dict]]:
-        """(agent, its windows) per row; Claude Code without its status line gets a row to turn it on."""
+        """(agent, its windows) per row. Claude Code without numbers still gets a row: to turn its status line on,
+        or to say they're on their way."""
         limits = self.st.get("limits") or {}
         rows = [(s, limits[s]) for s in sorted(limits, key=lambda s: (s not in LIMIT_NAMES, s))]
-        if ("claude" not in limits and self.st.get("usage_line") == "off"
-                and self._agent_state("claude") == "on"):
+        if "claude" not in limits and self._agent_state("claude") == "on":
             rows.append(("claude", {}))
         return rows
 
@@ -1214,6 +1214,8 @@ class VoiceWidget(QWidget):
         return 16 + n * LIMIT_H + 8 if n else 0
 
     def _limit_on_rect(self) -> QRectF | None:
+        if self.st.get("usage_line") != "off":
+            return None  # on already (numbers on their way), or your own status line
         for i, (_source, windows) in enumerate(self._limit_rows()):
             if not windows:
                 row = self._limit_row(i)
@@ -1930,11 +1932,17 @@ class VoiceWidget(QWidget):
             p.drawText(QRectF(row.x() + 4, row.y(), name_w - 6, row.height()), Qt.AlignLeft | Qt.AlignVCenter,
                        QFontMetrics(self.f_sub).elidedText(LIMIT_NAMES.get(source, source.capitalize()),
                                                            Qt.ElideRight, name_w - 6))
-            if not windows:  # Claude Code: its status line isn't ours yet
+            if not windows:  # Claude Code without numbers yet
                 on = self._limit_on_rect()
-                ht = self.hover_t.get("limits:on", 0.0)
                 p.setFont(self.f_hint)
                 p.setPen(QColor(226, 232, 240, 120))
+                if on is None:
+                    p.drawText(QRectF(row.x() + name_w, row.y(), row.width() - name_w - 4, row.height()),
+                               Qt.AlignLeft | Qt.AlignVCenter, fm.elidedText(
+                                   "Shows after Claude Code's next reply in a terminal, or its /usage",
+                                   Qt.ElideRight, int(row.width() - name_w - 4)))
+                    continue
+                ht = self.hover_t.get("limits:on", 0.0)
                 p.drawText(QRectF(row.x() + name_w, row.y(), on.x() - row.x() - name_w - 6, row.height()),
                            Qt.AlignLeft | Qt.AlignVCenter, "Show its 5-hour and weekly limits")
                 p.setPen(Qt.NoPen)

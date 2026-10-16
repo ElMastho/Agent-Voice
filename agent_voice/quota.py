@@ -1,6 +1,7 @@
 """Rate limits each agent reports locally (5-hour and weekly windows), for the notch's Limits section.
 
-Claude Code hands them to its status line (`hooks.statusline`); Codex writes them in its session logs
+Claude Code hands them to its status line (`hooks.statusline`) and caches the last ones it fetched in
+`~/.claude.json` (`cachedUsageUtilization`, refreshed now and then); Codex writes them in its session logs
 (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, a `token_count` event per turn). Read-only, nothing leaves the machine.
 """
 
@@ -50,6 +51,22 @@ def codex_limits_from(entry: dict) -> dict:
             resets = at + w["resets_in_seconds"]
         out[name] = {"pct": round(float(w["used_percent"])), "resets": int(resets or 0)}
     return out
+
+
+def claude_cached(path: Path | None = None) -> tuple[float, dict]:
+    """(when Claude fetched them, its windows) from the usage Claude Code caches in ~/.claude.json."""
+    path = path or Path.home() / ".claude.json"
+    try:
+        cached = json.loads(path.read_text(encoding="utf-8")).get("cachedUsageUtilization") or {}
+    except (OSError, ValueError, AttributeError):
+        return 0.0, {}
+    used = cached.get("utilization") if isinstance(cached, dict) else None
+    out: dict = {}
+    for name in WINDOWS:
+        w = (used or {}).get(name) if isinstance(used, dict) else None
+        if isinstance(w, dict) and isinstance(w.get("utilization"), (int, float)):
+            out[name] = {"pct": round(float(w["utilization"])), "resets": int(_stamp(w.get("resets_at")))}
+    return float(cached.get("fetchedAtMs") or 0) / 1000, out
 
 
 def codex_home() -> Path:

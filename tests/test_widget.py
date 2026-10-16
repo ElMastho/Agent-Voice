@@ -248,5 +248,6 @@ def test_limits_rows_and_turning_claude_on(app, monkeypatch):
     assert w._agents_y() == w._limits_y() + 16 + 2 * widget.LIMIT_H + 8
     w._activate("limits:on")
     assert posted == [("/usage_line", {"enable": True})] and "limits:on" not in w._rects()
+    assert [s for s, _ in w._limit_rows()] == ["codex", "claude"]  # still there: its numbers are on their way
     w.grab()  # paints the section without errors
     assert widget._limit_color(95).name() == "#f87171"

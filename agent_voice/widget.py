@@ -867,12 +867,14 @@ class VoiceWidget(QWidget):
             self.setWindowOpacity(self._opacity)
         # Battery: 30 fps only while something moves. At rest, no redraws and a slower status poll.
         still = self._is_still(want)
+        gliding = still and self._glow_moving()  # at rest otherwise: the working light alone, at 15 fps
         self.poller.interval = 0.6 if still else 0.12
-        if self.frame.interval() != (250 if still else 33):
-            self.frame.setInterval(250 if still else 33)
-        if still and self._painted_still:
+        interval = 66 if gliding else 250 if still else 33
+        if self.frame.interval() != interval:
+            self.frame.setInterval(interval)
+        if still and not gliding and self._painted_still:
             return
-        self._painted_still = still
+        self._painted_still = still and not gliding
         self.update()
 
     def _is_still(self, opacity_target: float) -> bool:
@@ -1187,19 +1189,41 @@ class VoiceWidget(QWidget):
         return path
 
     def _edge_live(self) -> float:
-        """How strongly the edge light shows: only while the mic or the voice is live."""
-        return {"speaking": 1.0, "recording": 1.0, "waiting": 0.75, "transcribing": 0.6}.get(self.phase, 0.0)
+        """How strongly the edge light shows: bright while the voice or the mic is live, soft while an agent
+        works (in its conversation's colour), and a faint, still rim when ready."""
+        live = {"speaking": 1.0, "recording": 1.0, "waiting": 0.75, "transcribing": 0.6}.get(self.phase, 0.0)
+        if live:
+            return live
+        if self._activity():
+            return 0.85
+        return 0.5 if self.phase == "idle" else 0.0
+
+    def _glow_moving(self) -> bool:
+        """The working light glides around the edge: worth a gentle 15 fps, but only while it can be seen."""
+        return bool(self._activity()) and self._reveal > 0.3 and self.isVisible()
 
     def _paint_edge_light(self, p: QPainter, w: float, h: float) -> None:
-        """A thin band of light running around the island while it's live; nothing at rest."""
+        """A thin band of light around the island: running while live, gliding while working, still when ready."""
         live = self._edge_live() * _smooth((self._reveal - 0.3) / 0.6)
         if live < 0.02:
             return
         t = time.time() - self.t0
-        grad = QConicalGradient(QPointF(w / 2, h * 0.4), -t * (40 + 70 * self.energy))
-        # One colour (the phase's); the motion comes from a brighter stretch travelling around.
-        for pos, alpha in ((0.0, 255), (0.25, 120), (0.5, 70), (0.75, 120), (1.0, 255)):
-            c = QColor(self.accent)
+        act = self._activity() if self.phase == "idle" else None
+        # Ready: a cool silver rim, like light on a polished edge; otherwise the state's (or thread's) colour.
+        color = QColor(act["color"]) if act else QColor("#CBD5E1") if self.phase == "idle" else QColor(self.accent)
+        if self.phase != "idle":
+            angle = -t * (40 + 70 * self.energy)  # live: the light runs around with the voice
+        elif act:
+            angle = -t * 30  # working: a slow glide
+        else:
+            angle = 270.0  # ready: still, brightest along the bottom edge
+        grad = QConicalGradient(QPointF(w / 2, h * 0.4), angle)
+        # One colour; the motion comes from a brighter stretch travelling around. Working: a single comet
+        # (a bright head, a long fading tail) rather than two highlights, calmer than a live voice.
+        stops = (((0.0, 255), (0.08, 230), (0.35, 70), (0.7, 25), (0.92, 40), (1.0, 255)) if act
+                 else ((0.0, 255), (0.25, 120), (0.5, 70), (0.75, 120), (1.0, 255)))
+        for pos, alpha in stops:
+            c = QColor(color)
             c.setAlpha(int(alpha * live))
             grad.setColorAt(pos, c)
         e, r, k = NOTCH_EAR, min(NOTCH_RADIUS, h / 2), 0.75
@@ -1215,7 +1239,7 @@ class VoiceWidget(QWidget):
             edge = self._body_path(w, h)  # floating: all the way round
         p.setBrush(Qt.NoBrush)
         p.setClipPath(self._body_path(w, h))
-        bloom = QColor(self.accent)
+        bloom = QColor(color)
         bloom.setAlpha(int((30 + 40 * self.energy) * live))
         p.setPen(_round_pen(bloom, 5.0))  # a soft inner bloom, clipped to the island
         p.drawPath(edge)

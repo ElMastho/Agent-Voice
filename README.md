@@ -45,6 +45,7 @@ Everything runs **locally on the CPU**: no cloud, no API key, no audio leaving y
 | ⏳ **Resumes after a limit** | A thread runs out of quota while you're away: once the limit resets, the notch sends it *"Continue."* so it picks up where it stopped. On by default. |
 | 🎯 **Focus** | In a call, presenting, or with an app full screen, replies are held (approvals still come through) and a catch-up follows. |
 | 🌇 **Daily recap** | At 18:00 (or *"Hey Claude, daily recap"*): what each thread did today, what's still waiting, your limits and tokens. |
+| 🗣️ **A natural voice** (opt-in) | *Voice: Natural* in the panel switches to [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M): expressive, close to a cloud voice, still offline. *Light* (Piper) stays the default, easier on the battery. |
 | ⏳ **Take it back** | What you dictate waits 5 seconds under the notch before it's sent: say *"wait"* to fix it, *"cancel that"* to drop it, or keep talking to add to it. |
 | 👀 **"Look at this"** | *"Hey Claude, look at this and tell me why it's red"*: a picture of the window you're looking at goes to your thread, with your question. |
 | 🎧 **Headphones only** (opt-in) | The voice in your headphones; through the laptop's speakers (an open office), chimes and the banner instead. It switches by itself as you plug them in. |
@@ -349,6 +350,8 @@ sequenceDiagram
 | Key | Default | Meaning |
 |---|---|---|
 | `voices.en` / `voices.fr` | `en_US-hfc_male-medium` / `fr_FR-siwis-medium` | Any [Piper voice](https://huggingface.co/rhasspy/piper-voices); `name:speaker` for multi-speaker models. Downloaded on first use |
+| `engine` | `"piper"` | The voice: `"piper"` (light) or `"kokoro"` (natural; the panel's *Voice* row overrides it) |
+| `kokoro.voices` | `en: af_heart`, `fr: ff_siwis` | Kokoro's voices per language (`af_*`/`am_*` American, `bf_*`/`bm_*` British, `ff_siwis` French) |
 | `speed` | `0.67` | Piper length scale: `1.0` normal, lower is faster (the panel's speed overrides it) |
 | `max_chars` | `1500` | Long replies are cut at a sentence boundary |
 | `speak_progress` | `true` | Also speak Claude's messages between tool calls |
@@ -408,7 +411,7 @@ agent-voice serve                               run in the foreground (debugging
 
 ## 🔒 Privacy, security, battery
 
-- **Offline by design**: text-to-speech, transcription, language detection and the wake word run locally. Audio never leaves the machine. agent-voice's own network calls are the model downloads on first use, the optional release check, the new release's zip when you click *Update*, and, only if you turn them on, phone notifications.
+- **Offline by design**: text-to-speech, transcription, language detection and the wake word run locally. Audio never leaves the machine. agent-voice's own network calls are the model downloads on first use (the natural voice's too, from its GitHub release, checked against pinned SHA-256 sums), the optional release check, the new release's zip when you click *Update*, and, only if you turn them on, phone notifications.
 - **Phone notifications (opt-in, off by default)**: when you turn on *Phone*, notifications go to the ntfy server (`ntfy.sh` unless you set your own) over HTTPS, then to your phone. What leaves is the thread's name, what happened and, by default, its one-line summary (`ntfy.content: "titles"` sends no reply text at all, `"full"` sends the reply). Your audio, prompts, files and transcripts never do. The channel is a long random topic: anyone who has it (the QR code, the link) can read your notifications, so keep it private, and *New link* revokes it. ntfy.sh topics are public by name and messages are kept on the server for a while ([ntfy's docs](https://docs.ntfy.sh/)); for full control, run your own ntfy server and set `ntfy.server` and an access `ntfy.token` (never written to logs). Nothing is sent while it's off, and phones can't send anything back.
 - **Claude's limits**: agent-voice runs Claude Code's own `claude -p /usage` (a local command of the Claude Code you installed; it fetches your usage from Anthropic with your login, like the Usage page) and reads what it saves. agent-voice never reads Claude's credentials. Between readings it reads only the token counts in your local transcripts. `limits.claude_refresh_minutes: 0` turns this off.
 - **"Look at this"**: the picture of your window is saved locally (`~/.agent-voice/shots`, the last 20) and handed to the agent you named, which reads it like any file you give it (and sends it to its model). It's only taken when you ask.
@@ -438,7 +441,10 @@ Architecture notes, invariants and gotchas for contributors (human or AI) are in
 | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | Speech-to-text | MIT |
 | [CTranslate2](https://github.com/OpenNMT/CTranslate2) | Whisper inference engine | MIT |
 | [OpenAI Whisper](https://github.com/openai/whisper) | Speech recognition model weights | MIT |
-| [ONNX Runtime](https://github.com/microsoft/onnxruntime) | Runs the Piper models | MIT |
+| [ONNX Runtime](https://github.com/microsoft/onnxruntime) | Runs the Piper and Kokoro models | MIT |
+| [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | The natural voice's model and voices | Apache-2.0 |
+| [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx) | Runs Kokoro on ONNX Runtime (and its int8 model files) | MIT |
+| [phonemizer](https://github.com/bootphon/phonemizer) + [espeak-ng](https://github.com/espeak-ng/espeak-ng) (`espeakng-loader`) | Text to phonemes for Kokoro | GPL-3.0 |
 | [Lingua](https://github.com/pemistahl/lingua-py) | French/English detection | Apache-2.0 |
 | [PySide6 / Qt](https://doc.qt.io/qtforpython-6/) | Notch, widget and tray icon | LGPL-3.0 |
 | [sounddevice](https://github.com/spatialaudio/python-sounddevice) | Audio playback & recording | MIT |

@@ -25,6 +25,10 @@ DEFAULTS: dict = {
         "fr": "fr_FR-siwis-medium",
     },
     "default_lang": "en",
+    # "piper" (light, the default) or "kokoro" (natural: more expressive, ~3x the CPU, a 120 MB download once).
+    # The panel's Voice row switches it; kokoro.voices picks its voices (af_heart, bf_emma, am_adam, ff_siwis...).
+    "engine": "piper",
+    "kokoro": {"voices": {"en": "af_heart", "fr": "ff_siwis"}},
     # Piper length_scale: 1.0 = normal, 0.67 = about 1.5x faster.
     "speed": 0.67,
     "volume": 1.0,

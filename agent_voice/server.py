@@ -421,6 +421,10 @@ class Daemon:
         if self.state.get("speed_x"):
             # The speaker reads config["speed"] (Piper length_scale) for every sentence.
             config["speed"] = 1.0 / float(self.state["speed_x"])
+        # The voice engine: Piper (light, the default) or Kokoro (natural); Piper's voices are kept to go back to.
+        self._piper_voices = dict(config["voices"])
+        self._engine_state = ""  # "downloading 40%" while the natural voice is fetched
+        self._apply_engine()
         self.speaker = Speaker(config)
         # HTTP handlers, the job worker, the mic and wake threads all touch the thread queue.
         self._lock = threading.RLock()
@@ -608,6 +612,65 @@ class Daemon:
     def chime(self) -> bool:
         """Chimes instead of the voice: chosen, automatic while you're in a call or in focus, or on speakers."""
         return bool(self.state.get("chime")) or bool(self.focus) or self.on_speakers
+
+    @property
+    def engine(self) -> str:
+        """'piper' (light) or 'kokoro' (natural)."""
+        return str(self.state.get("engine") or self.config.get("engine") or "piper")
+
+    def _apply_engine(self) -> None:
+        """The voices the speaker uses: Kokoro's for the languages it has (when it's on and ready), Piper's else."""
+        from agent_voice import kokoro
+        from agent_voice.tts import KOKORO
+
+        voices = dict(self._piper_voices)
+        if self.engine == "kokoro" and kokoro.available() and kokoro.ready():
+            chosen = {**kokoro.DEFAULT_VOICES, **(self.config.get("kokoro", {}).get("voices") or {})}
+            voices.update({lang: KOKORO + name for lang, name in chosen.items() if lang in voices})
+        self.config["voices"] = voices
+
+    def set_engine(self, name: str) -> None:
+        """Light (Piper) or natural (Kokoro): the natural voice is downloaded the first time (~120 MB)."""
+        from agent_voice import kokoro
+
+        if name == "kokoro" and not kokoro.available():
+            self._show_banner("The natural voice needs the kokoro-onnx package: pip install kokoro-onnx.", "", "",
+                              kind="note", tag="voice")
+            return
+        self.state["engine"] = name
+        save_state(self.state)
+        log.info("engine=%s", name)
+        if name == "kokoro" and not kokoro.ready():
+            if not self._engine_state:
+                threading.Thread(target=self._fetch_kokoro, name="kokoro", daemon=True).start()
+            return
+        self._apply_engine()
+        self.speaker.stop()
+        self._confirm("This is the natural voice." if name == "kokoro" else "This is the light voice.")
+
+    def _fetch_kokoro(self) -> None:
+        from agent_voice import kokoro
+
+        def progress(frac: float) -> None:
+            self._engine_state = f"downloading {int(frac * 100)}%"
+
+        self._engine_state = "downloading 0%"
+        self._show_banner("Downloading the natural voice (about 120 MB, once)...", "", "", kind="note", tag="voice")
+        try:
+            kokoro.download(progress)
+            kokoro.engine()  # loaded now, not on the first sentence
+        except Exception as exc:
+            log.exception("kokoro download failed")
+            self.state["engine"] = "piper"
+            save_state(self.state)
+            self._show_banner(f"Couldn't get the natural voice ({exc}). Still the light one.", "", "", kind="note",
+                              tag="voice")
+            return
+        finally:
+            self._engine_state = ""
+        if self.engine == "kokoro":
+            self._apply_engine()
+            self._confirm("This is the natural voice.")
 
     @property
     def headphones_only(self) -> bool:
@@ -2855,7 +2918,9 @@ class Daemon:
             "widget_opens": self.widget_opens,
             "phase": self.phase(),
             "level": round(self.level, 4),
-            "speaking_lang": self.speaker.current_spec[:2] if self.speaker.busy else "",
+            "speaking_lang": self.speaker.current_lang if self.speaker.busy else "",
+            "engine": self.engine,
+            "engine_state": self._engine_state,
             "caption": self.speaker.current_text if self.speaker.busy else "",
             "awaiting_reply": self._listen_armed,
             "widget_toggles": self.widget_toggles,
@@ -3212,6 +3277,12 @@ def _handler(daemon: Daemon):
                 daemon.limit_hit(str(data.get("session") or ""), str(data.get("source") or ""),
                                  str(data.get("text") or "")[:400])
                 return self._json(200, {"ok": True})
+            if self.path == "/engine":  # the voice: light (Piper) or natural (Kokoro)
+                name = str(data.get("engine") or "")
+                if name not in ("piper", "kokoro"):
+                    return self._json(400, {"error": "engine must be piper or kokoro"})
+                _background(daemon.set_engine, name)
+                return self._json(200, {"engine": name})
             if self.path == "/pending":  # the take-back banner's Send, Edit (hold) and Cancel
                 return self._json(200, {"ok": daemon.pending_action(_int(data.get("id")), str(data.get("action") or ""))})
             if self.path == "/widget_open":

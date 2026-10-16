@@ -16,6 +16,8 @@ from agent_voice.config import VOICES_DIR
 
 log = logging.getLogger("agent_voice.tts")
 
+KOKORO = "kokoro:"  # a voice spec for the natural engine: "kokoro:af_heart" (Piper's are "en_US-hfc_male-medium")
+
 
 def download_voice(name: str) -> None:
     from piper.download_voices import download_voice as _download
@@ -83,9 +85,26 @@ class Speaker:
         return voice, speaker_id
 
     def warm_up(self) -> None:
+        from agent_voice import kokoro
+
         for lang in self.config["voices"]:
-            self._voice(self._spec(lang))
+            spec = self._spec(lang)
+            if spec.startswith(KOKORO):
+                if kokoro.ready():  # never a download here: the service isn't answering yet
+                    kokoro.engine()
+            else:
+                self._voice(spec)
         langdet.warm_up()
+
+    @property
+    def current_lang(self) -> str:
+        """The language of the sentence playing ('en', 'fr'), whichever engine reads it."""
+        spec = self.current_spec
+        if spec.startswith(KOKORO):
+            from agent_voice.kokoro import LANGS
+
+            return LANGS.get(spec[len(KOKORO):][:1], "")[:2]
+        return spec[:2]
 
     # -- public API -------------------------------------------------------------
     def speak(self, text: str, lang: str | None = None, voice: str | None = None, pitch: float = 1.0) -> int:
@@ -133,29 +152,39 @@ class Speaker:
 
     # -- workers ----------------------------------------------------------------
     def _synth_loop(self) -> None:
-        from piper import SynthesisConfig
-
         while True:
             gen, spec, sentence, pitch = self._text_q.get()
             if gen != self._gen:
                 continue
             self._synthesizing.set()
             try:
-                voice, speaker_id = self._voice(spec)
-                syn = SynthesisConfig(
-                    speaker_id=speaker_id, length_scale=float(self.config["speed"]), volume=float(self.config["volume"])
-                )
-                chunks = list(voice.synthesize(sentence, syn_config=syn))
-                if not chunks or gen != self._gen:
+                audio, rate = self._synthesize(spec, sentence)
+                if not len(audio) or gen != self._gen:
                     continue
-                audio = np.concatenate([c.audio_float_array for c in chunks]).astype(np.float32)
                 # A short pause between sentences sounds more natural.
-                audio = np.concatenate([audio, np.zeros(int(chunks[0].sample_rate * 0.12), dtype=np.float32)])
-                self._audio_q.put((gen, audio, int(chunks[0].sample_rate * pitch), spec, sentence))
+                audio = np.concatenate([audio, np.zeros(int(rate * 0.12), dtype=np.float32)])
+                self._audio_q.put((gen, audio, int(rate * pitch), spec, sentence))
             except Exception:  # never let one bad sentence kill the worker
                 log.exception("synthesis failed for %r", sentence)
             finally:
                 self._synthesizing.clear()
+
+    def _synthesize(self, spec: str, sentence: str):
+        """(float32 audio, sample rate) for one sentence, by Piper or (a "kokoro:" spec) Kokoro."""
+        speed, volume = float(self.config["speed"]), float(self.config["volume"])
+        if spec.startswith(KOKORO):
+            from agent_voice import kokoro
+
+            audio, rate = kokoro.synthesize(sentence, spec[len(KOKORO):], speed=1.0 / speed)  # its speed: a rate
+            return (np.asarray(audio, dtype=np.float32) * volume), int(rate)
+        from piper import SynthesisConfig
+
+        voice, speaker_id = self._voice(spec)
+        chunks = list(voice.synthesize(sentence, syn_config=SynthesisConfig(speaker_id=speaker_id, length_scale=speed,
+                                                                           volume=volume)))
+        if not chunks:
+            return np.zeros(0, dtype=np.float32), 22050
+        return np.concatenate([c.audio_float_array for c in chunks]).astype(np.float32), int(chunks[0].sample_rate)
 
     def _play_loop(self) -> None:
         while True:

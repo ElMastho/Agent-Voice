@@ -296,7 +296,7 @@ class FakeSpeaker:
     def __init__(self, config):
         self.said = []
         self.busy = False
-        self.current_spec = self.current_text = ""
+        self.current_spec = self.current_text = self.current_lang = ""
 
     def speak(self, text, lang=None, voice=None, pitch=1.0):
         self.said.append((text, pitch))
@@ -1479,3 +1479,39 @@ def test_look_at_this_sends_a_picture_of_the_window(daemon, monkeypatch, tmp_pat
     monkeypatch.setattr(server.winfocus, "window_png", lambda hwnd: b"")
     daemon.look_at("a", "", "en")
     assert "Couldn't take a picture" in daemon.banner["text"]
+
+
+def test_the_natural_voice_kokoro(daemon, monkeypatch, tmp_path):
+    import io
+
+    from agent_voice import kokoro, tts
+
+    sp = tts.Speaker.__new__(tts.Speaker)
+    sp.config = {"speed": 0.5, "volume": 0.5}
+    monkeypatch.setattr(kokoro, "synthesize", lambda text, voice, speed=1.0: (tts.np.ones(4), 24000) if speed == 2.0
+                        else (tts.np.zeros(0), 0))
+    audio, rate = sp._synthesize("kokoro:af_heart", "Hello.")
+    assert rate == 24000 and float(audio[0]) == 0.5  # its speed is a rate; the volume applies
+    sp.current_spec = "kokoro:ff_siwis"
+    assert sp.current_lang == "fr"
+    monkeypatch.setattr(kokoro, "available", lambda: True)
+    monkeypatch.setattr(kokoro, "ready", lambda: True)
+    daemon.set_engine("kokoro")
+    assert daemon.config["voices"]["en"] == "kokoro:af_heart" and daemon.status()["engine"] == "kokoro"
+    daemon.set_engine("piper")
+    assert not daemon.config["voices"]["en"].startswith("kokoro:")
+    # A download that doesn't match its checksum is never kept.
+    monkeypatch.setattr(kokoro, "FOLDER", tmp_path)
+    monkeypatch.setattr(kokoro, "FILES", {"model.onnx": (5, "0" * 64)})
+
+    class Reply(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(kokoro.urllib.request, "urlopen", lambda url, timeout=0: Reply(b"12345"))
+    with pytest.raises(ValueError):
+        kokoro.download()
+    assert not list(tmp_path.iterdir())

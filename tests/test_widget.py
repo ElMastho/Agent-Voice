@@ -397,3 +397,14 @@ def test_do_not_disturb_has_a_way_back_on_the_notch(app, monkeypatch):
     assert w._reveal_until == 0.0  # an agent at work doesn't bring it down
     w._activate("primary")
     assert posted == [("/output", {"mode": "chime"})] and w._output() == "chime"
+
+
+def test_voice_engine_switch(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    w = _widget({"phase": "idle", "output": "voice", "engine": "piper", "threads": []})
+    assert {"engine:piper", "engine:kokoro"} <= set(w._rects())
+    w._activate("engine:kokoro")
+    assert posted == [("/engine", {"engine": "kokoro"})] and "120 MB" in w._tooltip("engine:kokoro")
+    w._on_status({"phase": "idle", "output": "chime", "threads": []})
+    assert "engine:kokoro" not in w._rects()  # no voice to pick in Chimes

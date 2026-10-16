@@ -245,6 +245,8 @@ The notch **never takes keyboard focus**: clicking it keeps your agent window ac
 agent-voice say --voice en_US-ryan-high "Hello, I am Ryan."
 ```
 
+**The natural voice:** in the panel, *Voice: Light / Natural*. *Natural* is [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), a newer local model with a far more expressive delivery, close to a cloud voice. It runs offline like Piper but uses about three times the CPU per sentence (still faster than it speaks), so *Light* stays the default. The first switch downloads it (about 120 MB, verified by checksum; the panel shows the progress), then it's instant. Its voices: `af_heart` (American English, the default), `bf_emma` (British), `am_adam`, `bm_george`... and `ff_siwis` for French. Pick them in the config: `{ "kokoro": { "voices": { "en": "bf_emma" } } }`. `agent-voice say` uses whichever engine is on.
+
 **Speed:** `"speed": 0.67` (about 1.5× faster than normal). `1.0` is the natural pace; lower is faster.
 
 ## 6. Connecting each agent

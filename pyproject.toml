@@ -27,6 +27,7 @@ dependencies = [
     "qrcode",
     "pywinpty; sys_platform == 'win32'",
     "pycaw; sys_platform == 'win32'",
+    "kokoro-onnx",
     "pynput; sys_platform == 'darwin'",
 ]
 

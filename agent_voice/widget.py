@@ -42,6 +42,7 @@ WIDTH = 320
 BAR_H = 64
 SPEEDS = (1.0, 1.25, 1.5, 1.75, 2.0)
 MODES = (("voice", "Voice"), ("chime", "Chimes"), ("silent", "Do not disturb"))
+ENGINES = (("piper", "Light"), ("kokoro", "Natural"))  # the voice: Piper, or Kokoro (more expressive, more CPU)
 HIST_ROWS, THREAD_ROWS, ROW_H = 5, 4, 22
 LIMIT_H = 22  # a Limits row: the agent, then its 5-hour and weekly bars
 LIMIT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
@@ -1555,6 +1556,11 @@ class VoiceWidget(QWidget):
             seg = track.width() / len(MODES)
             for i, (key, _label) in enumerate(MODES):
                 r[f"mode:{key}"] = QRectF(track.x() + i * seg, track.y(), seg, track.height())
+            if self._show_speed():
+                track = self._engine_track()
+                seg = track.width() / len(ENGINES)
+                for i, (key, _label) in enumerate(ENGINES):
+                    r[f"engine:{key}"] = QRectF(track.x() + i * seg, track.y(), seg, track.height())
             for i, t in enumerate(self._threads()):
                 for key, rect in self._thread_buttons(i, t).items():  # first: they sit on top of the row
                     r[key] = rect
@@ -1591,8 +1597,11 @@ class VoiceWidget(QWidget):
     def _mode_y(self) -> float:
         return self._speed_y() + (34 if self._show_speed() else 0)
 
+    def _engine_y(self) -> float:
+        return self._mode_y() + 34
+
     def _threads_y(self) -> float:
-        return self._mode_y() + 36
+        return (self._engine_y() if self._show_speed() else self._mode_y()) + 36
 
     def _kpi_h(self) -> float:
         return KPI_H if self._two_col() else 0.0
@@ -1730,6 +1739,9 @@ class VoiceWidget(QWidget):
 
     def _mode_track(self) -> QRectF:
         return QRectF(70, self._mode_y(), self.cw - 70 - 12, 26)
+
+    def _engine_track(self) -> QRectF:
+        return QRectF(70, self._engine_y(), self.cw - 70 - 12, 26)
 
     def _speed_index(self) -> float:
         x = float(self.st.get("speed_x", 1.5) or 1.5)
@@ -2181,6 +2193,13 @@ class VoiceWidget(QWidget):
         mode_pos = self.mode_pos if self.mode_pos is not None else float([k for k, _ in MODES].index(self._output()))
         self._paint_segmented(p, progress, 7, self._mode_track(), "Mode",
                               [f"mode:{k}" for k, _ in MODES], [label for _, label in MODES], mode_pos)
+        if self._show_speed():
+            fetching = self.st.get("engine_state") or ""  # "downloading 40%": the natural voice, once
+            labels = [f"Natural · {fetching.split()[-1]}" if key == "kokoro" and fetching else label
+                      for key, label in ENGINES]
+            engine = self.st.get("engine") or "piper"
+            self._paint_segmented(p, progress, 8, self._engine_track(), "Voice", [f"engine:{k}" for k, _ in ENGINES],
+                                  labels, float(next((i for i, (k, _) in enumerate(ENGINES) if k == engine), 0)))
 
         self._paint_threads(p, progress)
         self._paint_history(p, progress)
@@ -2876,6 +2895,11 @@ class VoiceWidget(QWidget):
             return "Final answers as a one-sentence summary, or read in full"
         if key and key.startswith("opt:"):
             return self._nth(key, (self._question() or {}).get("options") or []) or ""
+        if key == "engine:piper":
+            return "Light voice (Piper): quick, and easy on the battery"
+        if key == "engine:kokoro":
+            return ("Natural voice (Kokoro): more expressive, about three times the CPU. Downloaded the first time "
+                    "(about 120 MB), then offline like the light one")
         if key == "mode:voice":
             return "Voice: replies are read aloud and the mic opens"
         if key == "mode:chime":
@@ -3061,6 +3085,10 @@ class VoiceWidget(QWidget):
             _post("/approvals", {"mode": "toggle"})
         elif key == "summary":
             _post("/summary", {"mode": "toggle"})
+        elif key.startswith("engine:"):
+            name = key.split(":", 1)[1]
+            self.st["engine"] = name
+            _post("/engine", {"engine": name})
         elif key.startswith("mode:"):
             mode = key.split(":", 1)[1]
             self.st["output"] = mode  # move the indicator now

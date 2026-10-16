@@ -34,7 +34,14 @@ jobs:
       - name: Tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -v --timeout 60 -p no:cacheprovider
+        # Into a file: a background process a test started (an audio server) can't hold the step open then.
+        run: |
+          set +e
+          python -m pytest -v --timeout 60 -p no:cacheprovider < /dev/null > pytest.log 2>&1
+          status=$?
+          cat pytest.log
+          ps -eo pid,ppid,etime,cmd | grep -iv "ps -eo" | tail -15
+          exit $status
 
       - name: Smoke test (PulseAudio, X11, the notch)
         run: |

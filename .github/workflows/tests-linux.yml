@@ -37,7 +37,7 @@ jobs:
         # Into a file: a background process a test started (an audio server) can't hold the step open then.
         run: |
           set +e
-          python -m pytest -v --timeout 60 -p no:cacheprovider < /dev/null > pytest.log 2>&1
+          timeout -k 10 240 python -X faulthandler -m pytest -v --timeout 60 -p no:cacheprovider < /dev/null > pytest.log 2>&1
           status=$?
           cat pytest.log
           ps -eo pid,ppid,etime,cmd | grep -iv "ps -eo" | tail -15

@@ -105,6 +105,9 @@ DEFAULTS: dict = {
     # /usage` (a local command: no model request; your credentials stay in Claude Code) and reads what it reports.
     # 0 turns it off; between readings the notch estimates from your transcripts.
     "limits": {"claude_refresh_minutes": 10},
+    # Other apps' sound (Windows): lowered to `voice` of their volume while agent-voice speaks, to `listen` while
+    # you reply, and a video or song playing is paused then (`pause_media`) and played again after.
+    "ducking": {"enabled": True, "voice": 0.3, "listen": 0.0, "pause_media": True},
     # Out of quota: once the limit resets, send this to the thread so it picks up where it stopped (auto: without
     # asking; off: only after "resume when it resets" or a click on Resume).
     "resume": {"auto": True, "message": "Continue."},

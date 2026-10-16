@@ -800,7 +800,7 @@ def test_cli_parses_every_command(capsys):
     with pytest.raises(SystemExit):
         cli.main(["--help"])
     help_text = capsys.readouterr().out
-    for command in ("mcp", "watch", "apps", "usage", "install", "say", "recap"):
+    for command in ("mcp", "watch", "apps", "usage", "install", "say", "recap", "schedule", "phone"):
         assert command in help_text
 
 
@@ -1129,3 +1129,184 @@ def test_clipboard_bitmaps_become_png():
     png = winfocus.dib_to_png(buf.getvalue()[14:])  # the clipboard's CF_DIB: a BMP without its file header
     out = PIL.open(io.BytesIO(png))
     assert out.size == (3, 2) and out.getpixel((0, 0)) == (255, 0, 0) and out.getpixel((2, 1)) == (0, 0, 255)
+
+
+
+def _transcript(path, rows):
+    import json
+    from datetime import datetime, timezone
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        for i, (at, model, out) in enumerate(rows):
+            stamp = datetime.fromtimestamp(at, timezone.utc).isoformat()
+            f.write(json.dumps({"type": "assistant", "timestamp": stamp, "message": {
+                "id": f"{path.stem}-{at}-{i}", "model": model,
+                "usage": {"input_tokens": 1000, "output_tokens": out, "cache_read_input_tokens": 50000}}}) + "\n")
+            f.write(json.dumps({"type": "user", "message": {"content": "x" * 50}}) + "\n")
+
+
+def test_claude_usage_from_transcripts(tmp_path):
+    from agent_voice import usage
+
+    now = float(int(__import__("time").time()))  # files are dated now: the ledger skips week-old ones
+    log = tmp_path / "proj" / "a.jsonl"
+    _transcript(log, [(now - 3 * 3600 + 60 * i, "claude-opus-5-5", 2000) for i in range(10)])
+    ledger = usage.Ledger(tmp_path)
+    assert ledger.refresh(now) == 10 and ledger.refresh(now) == 0  # read once, then only what's new
+    spent, tokens = ledger.window(now - 5 * 3600, now)
+    one = usage.cost("opus", {"input_tokens": 1000, "output_tokens": 2000, "cache_read_input_tokens": 50000})
+    assert tokens == 30000 and abs(spent - 10 * one) < 1e-9
+    assert usage.cost("claude-sonnet-5", {"output_tokens": 1_000_000}) == 15.0
+    start, end = usage.current_window("five_hour", now, 0.0, ledger)
+    first = now - 3 * 3600
+    assert start == first - first % 60 and end == start + 5 * 3600  # from its first request, to the minute
+    est = usage.Estimator(ledger)
+    assert est.estimate("five_hour", now)["pct"] is None  # tokens, but no reading yet to scale them
+    est.reading("five_hour", 20, end, now)  # Claude says 20% of this window
+    _transcript(log, [(now + 60 + i, "claude-opus-5-5", 2000) for i in range(5)])
+    ledger.refresh(now + 120)
+    e = est.estimate("five_hour", now + 120)
+    assert e["est"] and e["resets"] == int(end) and e["pct"] == 30  # 10 requests were 20%: 5 more, 10% more
+    week = usage.Estimator(ledger, {"real": {"seven_day": {"pct": 50, "resets": now - 3600, "at": now - 7200}}})
+    assert week.estimate("seven_day", now)["resets"] == int(now - 3600 + 7 * 86400)  # weekly: the same schedule
+
+
+def test_limits_from_the_usage_folder_and_claude_refresh(daemon, monkeypatch, tmp_path):
+    import json
+    import subprocess
+
+    from agent_voice import launch, server
+
+    monkeypatch.setattr(server, "HOME", tmp_path)
+    (tmp_path / "usage").mkdir()
+    (tmp_path / "usage" / "mytool.json").write_text(json.dumps(
+        {"agent": "mytool", "five_hour": {"pct": 42, "resets": 4102444800}}), encoding="utf-8")
+    daemon._read_usage_drops()
+    assert daemon._limits_status()["mytool"]["five_hour"]["pct"] == 42
+    ran = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: ran.append(a[0]))
+    monkeypatch.setattr(launch, "find_cli", lambda agent: "claude.exe")
+    t0 = 1_000_000_000.0
+    assert daemon._ask_claude_usage(t0) and ran == [["claude.exe", "-p", "/usage"]]
+    assert not daemon._ask_claude_usage(t0 + 100)  # every 10 minutes at most
+    assert not daemon._ask_claude_usage(t0 + 700)  # and only while Claude is in use (no requests here)
+    daemon.config["limits"] = {"claude_refresh_minutes": 0}
+    daemon._claude_asked = 0
+    assert not daemon._ask_claude_usage(5000.0)
+
+
+def test_ntfy_messages_and_batching():
+    from agent_voice import ntfy
+
+    topic = ntfy.new_topic()
+    assert topic.startswith("agent-voice-") and len(topic) > 30 and all(c.isalnum() or c == "-" for c in topic)
+    long = "word " * 100
+    assert ntfy.message("done", "Codex", long, "titles")["message"] == "Codex finished."
+    summary = ntfy.message("done", "Codex", long, "summary")
+    assert len(summary["message"]) <= 240 and summary["priority"] == 3
+    assert ntfy.message("permission", "Codex", "Wants to deploy.")["priority"] == 5
+    both = ntfy.batch([ntfy.message("done", "A", "ok"), ntfy.message("permission", "B", "Wants to deploy.")])
+    assert both["title"] == "agent-voice: 2 updates" and both["priority"] == 5
+    assert "• B: Wants to deploy." in both["message"]
+    assert ntfy.subscribe_url("https://ntfy.example.com/", "t") == "https://ntfy.example.com/t"
+
+
+def test_phone_notifications_only_when_on_and_away(daemon, monkeypatch):
+    from agent_voice import server
+
+    pushed = []
+    monkeypatch.setattr(daemon.notifier, "push", lambda kind, title, text="": pushed.append((kind, title, text)))
+    monkeypatch.setattr(server.winfocus, "idle_seconds", lambda: 0.0)
+    daemon.speak("Voice summary: shipped.", source="claude", final=True, session="a")
+    assert pushed == [] and daemon.status()["phone"] == {"enabled": False}  # off: nothing, ever
+    status = daemon.set_phone(True)
+    assert status["enabled"] and status["url"].startswith("https://ntfy.sh/agent-voice-")
+    daemon.speak("Voice summary: shipped again.", source="claude", final=True, session="a")
+    assert pushed == []  # you're at the PC
+    monkeypatch.setattr(server.winfocus, "idle_seconds", lambda: 600.0)
+    daemon.speak("Voice summary: shipped once more.", source="claude", final=True, session="a")
+    daemon.request_permission("c", "Bash", "deploy", source="codex")
+    assert pushed == [("done", "Claude Code", "shipped once more."), ("permission", "Codex", "Wants to deploy.")]
+    old = status["url"]
+    assert daemon.new_phone_topic()["url"] != old
+    daemon.set_phone(False)
+    assert daemon._ntfy_settings() is None
+
+
+def test_scheduled_prompts(daemon, monkeypatch):
+    import time as t
+
+    from agent_voice import server
+
+    sent, started = [], []
+    monkeypatch.setattr(daemon, "_send_to", lambda session, message, lang: sent.append((session, message)))
+    monkeypatch.setattr(daemon, "new_thread",
+                        lambda prompt, target="", cwd="", lang="": started.append((prompt, target)))
+    daemon.threads.update({"c": {"source": "codex", "last": 2}})
+    now = t.time()
+    one = daemon.add_schedule("Run the tests", now + 60, session="c")
+    daemon.add_schedule("Add a health check", now + 120, new={"target": "codex", "cwd": "C:/w"})
+    daily = daemon.add_schedule("Standup notes", now + 30, session="c", repeat="daily")
+    assert [s["title"] for s in daemon.status()["schedules"]] == ["Codex", "Codex", "New thread (Codex)"]
+    assert daemon.state["schedules"][0]["prompt"] == "Run the tests"  # survives a restart
+    daemon._check_schedules(now + 200)
+    while not daemon.jobs.empty():
+        daemon.jobs.get()()
+    assert sorted(sent) == [("c", "Run the tests"), ("c", "Standup notes")]
+    assert started == [("Add a health check", "codex")]
+    assert [s["id"] for s in daemon._schedules] == [daily["id"]] and daemon._schedules[0]["at"] > now + 80000
+    assert daemon.cancel_schedule(daily["id"]) and daemon._schedules == []
+    daemon.add_schedule("Too late", now - 7 * 3600, session="c")
+    daemon._check_schedules(now)
+    assert daemon.jobs.empty() and "Missed" in daemon.banner["text"]  # the PC was off: said, not sent late
+    assert daemon.schedule_said("At 2 pm tell Codex to commit this", "en", "")
+    assert daemon._schedules[-1]["session"] == "c" and daemon._schedules[-1]["prompt"] == "Commit this"
+    assert daemon.schedule_said("in 20 minutes, new thread with codex: add logging", "en", "")
+    assert daemon._schedules[-1]["new"] == {"target": "codex", "cwd": ""}
+    assert not daemon.schedule_said("run the tests", "en", "")
+    assert one["id"] == 1 and server.TARGET_NAMES["claude-app"] == "Claude app"
+
+
+def test_schedule_times():
+    from datetime import datetime
+
+    from agent_voice.schedule import next_run, parse_when, split_when
+
+    now = datetime(2026, 10, 16, 10, 0).timestamp()
+
+    def at(h, m=0, d=16):
+        return datetime(2026, 10, d, h, m).timestamp()
+
+    assert parse_when("14:00", now) == at(14) and parse_when("2pm", now) == at(14)
+    assert parse_when("2:30 pm", now) == at(14, 30) and parse_when("at 9", now) == at(9, d=17)
+    assert parse_when("in 20 minutes", now) == now + 1200 and parse_when("demain à 9h", now) == at(9, d=17)
+    assert parse_when("à 14h30", now) == at(14, 30) and parse_when("noon", now) == at(12)
+    assert parse_when("hello", now) is None and parse_when("25:00", now) is None
+    assert split_when("At 2 pm tell Codex to run the tests", now) == (at(14), "Tell Codex to run the tests")
+    assert split_when("at the end it works", now) is None
+    assert next_run(at(9), "weekdays", at(9, 1)) == at(9, d=19)  # Friday -> Monday
+
+
+
+def test_cues_and_chimes_are_soft():
+    import numpy as np
+
+    from agent_voice import server
+
+    for kind in ("done", "attention"):
+        audio, rate = server.chime_audio(kind, 0.35)
+        assert abs(float(np.abs(audio).max()) - 0.35) < 1e-3 and abs(float(audio[-1])) < 1e-3  # no click at the end
+        spectrum = np.abs(np.fft.rfft(audio))
+        freqs = np.fft.rfftfreq(len(audio), 1 / rate)
+        assert spectrum[freqs > 2500].sum() < 0.02 * spectrum.sum()  # nothing shrill
+    cue, _ = server.tone_audio(((700.0, 0.0),), 0.16, decay=14.0, tail=0.18)
+    assert len(cue) < 0.25 * 44100 and float(np.abs(cue).max()) <= 0.161
+
+
+def test_limits_refresh_now(daemon, monkeypatch):
+    asked = []
+    monkeypatch.setattr(daemon, "_ask_claude_usage", lambda now=None, force=False: asked.append(force) or False)
+    monkeypatch.setattr(daemon, "_estimate_claude", lambda now=None: None)
+    daemon.refresh_limits()
+    assert asked == [True] and daemon.status()["limits_refreshing"] is False

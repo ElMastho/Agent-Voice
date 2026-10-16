@@ -273,3 +273,59 @@ def test_opening_the_notch_resizes_its_window_rarely(app, monkeypatch):
     assert len(set(sizes)) <= 3  # ...inside a canvas sized once (and trimmed at the end), not every frame
     assert len({x for x, _ in sizes}) == 1  # never wider or narrower: it doesn't jolt sideways at the end
     assert w._two_col() and abs(w._vw - 640) < 1 and w.height() == round(w._vis_h())
+
+
+
+def test_phone_card_and_upcoming(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    monkeypatch.setattr(widget, "SCREEN_W", 1920)
+    st = {"phase": "idle", "threads": [], "phone": {"enabled": True, "url": "https://ntfy.sh/agent-voice-abc"},
+          "schedules": [{"id": 3, "at": 4102444800, "title": "Codex", "prompt": "Run the tests", "repeat": ""}]}
+    w = _widget(st)
+    rects = w._rects()
+    assert {"phone", "phone:test", "phone:new", "phone:off", "unsched:0"} <= set(rects)
+    assert w._limits_y() == w._sched_y() + w._sched_h() and w._sched_y() == w._phone_y() + widget.PHONE_H + 10
+    w._activate("phone:test")
+    w._activate("unsched:0")
+    assert posted[:2] == [("/phone", {"action": "test"}), ("/schedule_cancel", {"id": 3})]
+    w.grab()  # the QR code, the card and the list paint without errors
+    assert widget._QR  # the code was made once, and kept
+
+
+def test_reply_box_schedules_for_later(app, monkeypatch):
+    from PySide6.QtCore import QRectF
+
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    box = widget.ReplyBox()
+    box.open(ITEM, QRectF(0, 0, 440, 44), 422)
+    QTest.keyClicks(box.edit, "Run the tests")
+    box.when.setText("never o'clock")
+    box.send()
+    assert posted == [("/listen_cancel", None)] and box.isVisible()  # not a time: nothing sent, the field says so
+    box.when.setText("in 30 minutes")
+    box.send()
+    assert posted[-1][0] == "/schedule" and posted[-1][1]["session"] == "a" and posted[-1][1]["prompt"] == "Run the tests"
+    assert not box.isVisible() and box.when.text() == ""
+
+
+
+def test_banner_follows_the_notch_width(app, monkeypatch):
+    from PySide6.QtCore import QRectF
+
+    monkeypatch.setattr(widget, "SCREEN_W", 1920)
+    w = _widget({"phase": "idle", "threads": []})
+    w.expanded = False
+    w._reveal_until = 1e12  # down, as it is while you look at it
+    w.banner.present(ITEM, 462)
+    w.toggle_expanded()  # opening: the banner widens with it, frame by frame
+    widths = []
+    for _ in range(60):
+        w._last_tick -= widget.FRAME
+        w._tick()
+        widths.append(w.banner.width())
+    assert widths[-1] == int(w.visual_rect().width() - 2 * widget.NOTCH_EAR) and len(set(widths)) > 5
+    assert w.banner.y() >= w.visual_rect().bottom()  # right under the notch
+    w.banner.step(QRectF(0, 0, 500, 44), widget.FRAME, 400)
+    assert w.banner.width() == 400

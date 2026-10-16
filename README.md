@@ -46,6 +46,9 @@ Everything runs **locally on the CPU**: no cloud, no API key, no audio leaving y
 | 🎯 **Focus** | In a call, presenting, or with an app full screen, replies are held (approvals still come through) and a catch-up follows. |
 | 🌇 **Daily recap** | At 18:00 (or *"Hey Claude, daily recap"*): what each thread did today, what's still waiting, your limits and tokens. |
 | 📎 **Hand things over** | *"Hey Claude, send this to Codex and ask it to explain it"*: your selection, or the screenshot on the clipboard, goes to that thread. |
+| 🔉 **Your video turns down** | While the voice speaks, other apps (YouTube, Spotify...) fade to 30% and come back after; while you reply, they go silent and a playing video pauses, then plays on. |
+| 📱 **On your phone** (opt-in) | Turn on *Phone*, scan the QR code with the [ntfy](https://ntfy.sh) app: replies, approvals, limits and the recap reach your phone while you're away. |
+| ⏰ **Scheduled prompts** | *"Hey Claude, at 2 pm tell Codex to run the tests"*, a time in the reply box, or `agent-voice schedule`: sent to a thread, or as a new thread, at that time (daily or weekdays if you like). |
 | ⚡ **Saved prompts** | *"Hey Claude, run the tests"*, *"tell Codex to commit this"*: a name you say, a full prompt sent (`shortcuts`). |
 | ➕ **Start a new thread** | `Ctrl+Alt+N`, *+ New* in the panel, or *"Hey Claude, new thread: add a health check"*: a new Claude Code session in the desktop app, or Claude Code / Codex / Gemini CLI in a new terminal tab. |
 | 📣 **Talk to any thread by name** | *"Tell Codex to run the tests"* is typed into Codex's window and sent, wherever you are. |
@@ -55,9 +58,9 @@ Everything runs **locally on the CPU**: no cloud, no API key, no audio leaving y
 | 📖 **Read along** | The text being spoken hangs under the notch, from the sentence you're hearing, and leaves 5 seconds after the voice stops. |
 | ⏱️ **Live activity** | While an agent works: *Working · Edit widget.py · 14 steps* and a timer, like a Dynamic Island. |
 | 📝 **Summaries, not essays** | Long answers become one sentence (Claude Code is asked for a `Voice summary:` line). Full answers are one click away. |
-| 🎙️ **Answer by voice** | After the answer, a beep and the mic opens. Talk, pause, done: Whisper transcribes and your reply is typed (and sent, with auto-send) into the conversation it answers. |
+| 🎙️ **Answer by voice** | After the answer, a soft tone and the mic opens. Talk, pause, done: Whisper transcribes and your reply is typed (and sent, with auto-send) into the conversation it answers. |
 | 🧵 **Several conversations** | Each one has its colour, its own voice pitch and its own window; a second one waits its turn and is announced by name. |
-| 🔔 **Voice, Chimes or Silent** | In the office: a soft chime and the reply as a banner. In a call: chimes, automatically. |
+| 🔔 **Voice, Chimes or Silent** | In the office: a soft chime and the reply as a banner. In a call or full screen: replies are held for a catch-up afterwards. |
 | ✅ **Approvals & questions** | Claude's permission prompts and multiple-choice questions, read out and shown in the notch: say *"yes"* or *"the second one"*, or click. |
 | 👋 **"Hey Claude"** | Optional wake word: *"Hey Claude, run the tests"* sends a new prompt, hands-free. |
 | 🇫🇷 🇬🇧 **Bilingual** | Each sentence is read by the matching voice; Whisper detects which language you speak. |
@@ -92,7 +95,10 @@ py -3.13 -m venv .venv
 .venv/Scripts/agent-voice start
 ```
 
-Then open a **new** Claude Code session and ask it anything. You'll see it work in the notch, hear the answer, then a beep: reply out loud. The full walkthrough is in the **[user guide](docs/guide.md)**.
+Then open a **new** Claude Code session and ask it anything. You'll see it work in the notch, hear the answer, then a soft tone: reply out loud. The full walkthrough is in the **[user guide](docs/guide.md)**.
+
+### Like any app
+agent-voice adds itself to the **Start menu** the first time it runs: search for *agent-voice* to open it (it starts the service if it isn't running, and opens the notch's panel). From the tray icon: **Restart agent-voice** (the service and the notch come back together, with any new code), **Quit agent-voice** (everything stops), and *Start with Windows*. In a terminal: `agent-voice restart`.
 
 ### Updating
 
@@ -143,6 +149,9 @@ The edge light only shows while the voice or the mic is live: it doubles as a "m
 - **Focus**: in a call, while presenting, or with an app full screen (Windows' own "do not disturb" signals), replies are held: no voice, no banner, no chime. Approvals and questions still come through. When it ends, the catch-up tells you what finished. The notch shows *Focus* (or *In a call*); picking Voice in the panel overrides it until it ends. `focus.calls: "chimes"` keeps the old chimes during calls.
 - **The open notch** takes a third of the screen (480 px when closed). On the right: **Today** (turns, threads and tokens since midnight, and the turns by hour), **Limits**, what you said and your agents; on the left: what needs you, the controls and your threads.
 - **Reply previews**: rest the mouse on a thread for half a second and its last reply opens beside the panel, in full and formatted (code, lists, tables), with what it changed and its tokens today. It scrolls with the wheel and never takes the focus.
+- **Other apps' sound** (Windows): while the voice speaks, every other app's volume fades to 30% of where it was (`ducking.voice`), and back once it's done; while you reply (the mic is open), they go silent (`ducking.listen`) and a video or song that's playing is paused with the media key, then played again, so you can answer without shouting over YouTube. Only what agent-voice paused is resumed, and a volume you change yourself meanwhile is left alone. `ducking.enabled: false` turns it off.
+- **Phone notifications** (off until you turn them on): the *Phone* tile turns them on and shows a QR code; scan it with the [ntfy](https://ntfy.sh) app (iPhone, Android, or the web) and you're subscribed. You get what needs you, finished replies (their one-line summary), limits and resumes, scheduled prompts and the daily recap, by default only while you're away from the PC (2 minutes idle, in focus, or away). A burst of events comes as one notification. *Test* sends one; *New link* makes a new private channel (the old QR code stops getting anything). See [Privacy](#-privacy-security-battery) for what this sends and where.
+- **Scheduled prompts**: say *"Hey Claude, at 2 pm tell Codex to run the tests"*, *"in 20 minutes, new thread: add a health check"*, *"demain à 9h lance les tests"*; or type a time in the reply box's *When* field (*14:00*, *in 30 min*, *tomorrow 9am*); or `agent-voice schedule "prompt" --at 14:00 [--thread Codex | --new --agent codex] [--repeat daily|weekdays]`. They wait in the panel's **Upcoming** list (× cancels one), survive restarts, and are sent in the thread's own window at that time (saved prompts expand). Missed by more than 6 hours because the PC was off: you're told, nothing is sent late.
 - **Daily recap**: at 18:00 (`recap.at`), once, a violet *Today* banner: turns and tokens, what each thread did (from its last summary), what's still waiting on you, and your limits; spoken in Voice mode. Any time: *"Hey Claude, daily recap"*, *"what did I do today?"*, the tray's *Today's recap*, or `agent-voice recap`.
 - **Drop files**: drag screenshots, logs or files onto the notch (or onto a thread in the panel): their paths are typed into that conversation's prompt, not sent, so you can add your question.
 
@@ -168,7 +177,7 @@ Once your reply is transcribed, it drops down under the notch framed in green, t
   <img src="docs/images/banner.jpg" alt="Chime mode: the reply drops down under the tucked-away notch" width="640">
 </p>
 
-In **Chimes** (a soft sound) or **Silent** (no sound at all), nothing talks, not even a setting change. Each finished reply drops down as a banner for about 10 seconds (longer for long replies): hover to keep it, swipe it up to dismiss it, click it to open the conversation. **Reply** opens a box under the notch to type your answer (Enter sends it to that conversation, wherever its window is); **Talk** opens the mic for it. Both are on the read-along banner too. While **another app holds the mic** (Teams, Zoom, Meet...), agent-voice switches to chimes by itself and back when the call ends; pick *Voice* during the call to override it.
+In **Chimes** (a soft sound) or **Silent** (no sound at all), nothing talks, not even a setting change. Each finished reply drops down as a banner for about 10 seconds (longer for long replies): hover to keep it, swipe it up to dismiss it, click it to open the conversation. **Reply** opens a box under the notch to type your answer (Enter sends it to that conversation, wherever its window is); **Talk** opens the mic for it. Both are on the read-along banner too. While **another app holds the mic** (Teams, Zoom, Meet...), presenting or full screen, agent-voice holds replies (approvals still come through) and catches you up afterwards ([Focus](#every-agent-at-a-glance)); `focus.calls: "chimes"` gives chimes in calls instead, and picking *Voice* overrides it until it ends. Every sound is a soft tone on a stream of its own, so a cue never cuts the voice off.
 
 ### Every action, one click away
 
@@ -179,7 +188,12 @@ Open the chevron for the full panel:
 - **Actions** with their shortcuts: reply now, hold to talk, stop, auto-send, silent, read selection, *Hey Claude*, approvals, summaries, and the last reply's **Replay**, **Copy** and **Open chat**. Buttons that only matter for the voice hide themselves in Chimes and Silent.
 - **Speed** (1× to 2×) and **Mode**: *Voice / Chimes / Silent*.
 - **Threads**: your recent conversations, what each is doing (*working*, *speaking*, *asks you*, *needs approval*, *waiting for you*, *next up*), what its last turn changed, its context, and the start of its last reply. Its buttons: 🎙️ **talk to it** (what you say is sent to that conversation), ⌨️ **type to it**, replay and copy. Click the row to open it.
-- **Limits**: how much of each agent's **5-hour** and **weekly** limits is used, and when each resets. Codex's come from its own session logs (nothing to set up); Claude Code's from its status line: click *Turn on* in the row (or `agent-voice usage on`). A note drops down once when a window passes 90%.
+- **Limits**: how much of each agent's **5-hour** and **weekly** limits is used, and when each resets, with a note once a window passes 90%.
+  - **Claude** (Claude Code in a terminal or in the desktop app): every 10 minutes while you use Claude, agent-voice runs Claude Code's own `claude -p /usage`. That's a local command (no model request, your credentials stay inside Claude Code) and gives the same numbers as Claude's Usage page. In between, the bars move with your requests, estimated from your local transcripts (marked *≈*). A terminal session's status line (`agent-voice usage on`) reports them too.
+  - **Codex**: read from its own session logs, nothing to set up.
+  - **Anything else**: any agent or script can drop its numbers in `~/.agent-voice/usage/<agent>.json` (`{"five_hour": {"pct": 42, "resets": <epoch>}, "seven_day": {...}}`); they show up within a minute.
+  - Gemini CLI and Antigravity don't expose theirs, so they aren't shown.
+  - **↻** next to *Limits* refreshes them all now.
 - **You said**: the last 5 things it heard from you; click to copy.
 - **Needs you** (when something waits on you): approve, deny or open, for every agent.
 - **Agents**: which agents are connected (green dot): Claude Code, Codex, Gemini CLI, Cursor, Cline, Antigravity, the Claude desktop app, Windsurf, VS Code and the browser. Click one that isn't to connect it, or **?** for the setup guide.
@@ -338,6 +352,9 @@ sequenceDiagram
 | `focus` | `enabled: true`, `full_screen: true`, `calls: "hold"` | Hold replies in calls, presentations and full screen apps (`calls: "chimes"`: chimes in calls) |
 | `recap` | `enabled: true`, `at: "18:00"` | The daily recap's time |
 | `shortcuts` | *run the tests*, *commit this*, … | Saved prompts: `{"name you say": "prompt sent"}` |
+| `ducking` | `enabled: true`, `voice: 0.3`, `listen: 0.0`, `pause_media: true` | Other apps' volume under the voice and while you reply, and pausing what's playing |
+| `limits.claude_refresh_minutes` | `10` | How often (while you use Claude) to run Claude Code's `claude -p /usage` for its limits; `0` turns it off |
+| `ntfy` | `server: https://ntfy.sh`, `token: ""`, `content: "summary"`, `when: "away"`, `away_minutes: 2`, `events: [needs, done, limit, recap, scheduled]` | Phone notifications: your own server and token, `content: "titles"` (only the thread and what happened) or `"full"`, `when: "always"` |
 | `desktop_apps` | `enabled: false`, `apps: {chatgpt, copilot, perplexity}` | Read these apps' notifications (also `agent-voice apps on`) |
 | `auto_listen` | `enabled`, 15 s window, 1.5 s silence, 600 s max | Mic after the final answer |
 | `permissions` | `enabled: true`, `wait_seconds: 60` | Approvals by voice / notch, and how long Claude waits before its own dialog |
@@ -354,7 +371,9 @@ Restart after editing: `agent-voice shutdown && agent-voice start`.
 ## 🧰 Commands
 
 ```text
-agent-voice start | shutdown | status          run / stop / inspect the background service
+agent-voice start | shutdown | restart | status   run / stop / restart / inspect the background service (and the notch)
+agent-voice open                                show the notch's panel, starting agent-voice if needed (the Start menu entry)
+agent-voice shortcut on|off                     agent-voice in the Windows Start menu
 agent-voice say "text" [--lang fr|en] [--voice NAME]
 agent-voice stop | mute [on|off|toggle] | unmute | handsfree [on|off|toggle] | summary [on|off|toggle] | speed [1-2]
 agent-voice chime [on|off|toggle]               chimes instead of the voice
@@ -367,6 +386,9 @@ agent-voice new "prompt" [--agent A] [--cwd D]  start a new thread (Claude app, 
 agent-voice apps [on|off|toggle]                read ChatGPT / Copilot / Perplexity desktop notifications
 agent-voice usage on|off                        Claude Code's rate limits in the notch (adds a status line)
 agent-voice recap                               today's recap: threads, what's waiting, limits, tokens
+agent-voice schedule "prompt" --at WHEN [--thread NAME | --new [--agent A] [--cwd D]] [--repeat daily|weekdays]
+agent-voice schedule --list | --cancel ID       what's scheduled
+agent-voice phone on|off|test|new|status        phone notifications (ntfy)
 agent-voice autostart on|off                    start with Windows (a LaunchAgent on macOS)
 agent-voice setup                               config, voices, Whisper model
 agent-voice serve                               run in the foreground (debugging)
@@ -374,7 +396,9 @@ agent-voice serve                               run in the foreground (debugging
 
 ## 🔒 Privacy, security, battery
 
-- **Offline by design**: text-to-speech, transcription, language detection and the wake word run locally. Audio never leaves the machine. The only network calls are the model downloads on first use, the optional release check, and the new release's zip when you click *Update*.
+- **Offline by design**: text-to-speech, transcription, language detection and the wake word run locally. Audio never leaves the machine. agent-voice's own network calls are the model downloads on first use, the optional release check, the new release's zip when you click *Update*, and, only if you turn them on, phone notifications.
+- **Phone notifications (opt-in, off by default)**: when you turn on *Phone*, notifications go to the ntfy server (`ntfy.sh` unless you set your own) over HTTPS, then to your phone. What leaves is the thread's name, what happened and, by default, its one-line summary (`ntfy.content: "titles"` sends no reply text at all, `"full"` sends the reply). Your audio, prompts, files and transcripts never do. The channel is a long random topic: anyone who has it (the QR code, the link) can read your notifications, so keep it private, and *New link* revokes it. ntfy.sh topics are public by name and messages are kept on the server for a while ([ntfy's docs](https://docs.ntfy.sh/)); for full control, run your own ntfy server and set `ntfy.server` and an access `ntfy.token` (never written to logs). Nothing is sent while it's off, and phones can't send anything back.
+- **Claude's limits**: agent-voice runs Claude Code's own `claude -p /usage` (a local command of the Claude Code you installed; it fetches your usage from Anthropic with your login, like the Usage page) and reads what it saves. agent-voice never reads Claude's credentials. Between readings it reads only the token counts in your local transcripts. `limits.claude_refresh_minutes: 0` turns this off.
 - **Calls**: detected from Windows' own privacy records of which app uses the mic; no audio is touched.
 - **Local API only**: the service listens on `127.0.0.1` and rejects any request carrying an `Origin` header, a foreign `Host` (DNS rebinding) or a non-JSON body. Web pages can't drive it. The browser extension goes through a native messaging bridge that only its own id can start.
 - **Desktop apps' notifications** (off by default): only the listed apps' notifications are read, by a query that filters them, from Windows' local notification database; nothing else is opened.
@@ -410,6 +434,10 @@ Architecture notes, invariants and gotchas for contributors (human or AI) are in
 | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | "Hey Claude" keyword spotting (model downloaded on first use) | Apache-2.0 |
 | [py3langid](https://github.com/adbar/py3langid) | Language detection in the Windows release (lingua is too large to bundle) | BSD-3-Clause |
 | [pyte](https://github.com/selectel/pyte) | Terminal emulator for `agent-voice watch` | LGPL-3.0 |
+| [qrcode](https://github.com/lincolnloop/python-qrcode) | The QR code to subscribe your phone | BSD-3-Clause |
+| [pycaw](https://github.com/AndreMiras/pycaw) | Other apps' volume while the voice speaks (Windows audio mixer) | MIT |
+| [psutil](https://github.com/giampaolo/psutil) | Which app an audio session belongs to (through pycaw) | BSD-3-Clause |
+| [ntfy](https://ntfy.sh) | Phone notifications (a service and app you choose to use; not bundled) | Apache-2.0 / GPL-2.0 |
 | [pywinpty](https://github.com/andfoy/pywinpty) | Pseudo-terminal on Windows (ConPTY) | MIT |
 | [pynput](https://github.com/moses-palmer/pynput) | Global hotkeys on macOS | LGPL-3.0 |
 | [comtypes](https://github.com/enthought/comtypes) | UI Automation: open the right conversation in the Claude desktop app | MIT |

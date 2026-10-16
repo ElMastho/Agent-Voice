@@ -38,7 +38,11 @@ agent_voice/
   native_host.py  browser extension bridge (Chrome native messaging: 4-byte length + JSON)
   browser/      the extension (MV3): sites.js (per-site selectors + pure reply detection), content.js, background.js
   watch.py      `agent-voice watch`: pseudo-terminal + pyte screen; Tracker turns screen changes into turns
-  quota.py      agents' rate limits (5-hour, weekly): Codex's session logs; Claude's come through hooks.statusline
+  quota.py      agents' rate limits (5-hour, weekly): Codex's session logs, Claude's usage cache
+  usage.py      Claude's usage from its transcripts (Ledger) and the estimate between real readings (Estimator)
+  ntfy.py       phone notifications (opt-in): ntfy messages, batching, sending
+  ducking.py    other apps' volume under the voice / while you reply, media pause (Windows mixer, pycaw)
+  schedule.py   scheduled prompts: "14:00", "in 20 minutes", "demain à 9h", repeats
   apps.py       desktop AI apps' Windows notifications (wpndatabase.db, read-only, filtered in SQL)
   updater.py    release check helpers + one-click update of the Windows build (verified download, file swap)
   widget.py     notch / floating bar, banner (read along, chimes), tray icon, animations
@@ -62,7 +66,7 @@ py -3.13 -m venv .venv && .venv/Scripts/pip install -e ".[dev]"
 CI: `.github/workflows/tests-macos.yml` runs the suite on macOS on every push.
 Releases: `.github/workflows/release.yml` builds the exe on every push and publishes `agent-voice-windows-x64.zip` when a `v*` tag is pushed. The exe calls itself through `client.self_command()` (never `python -m agent_voice` directly): `agent-voice.exe` for hooks/CLI, `agent-voice-w.exe` (no console) for the daemon, widget and autostart. Keep the zip small (lingua is excluded; voices and Whisper are downloaded at first run).
 
-The daemon and widget run as `pythonw` in the background. **Code changes need a restart** (`shutdown` + `start`; kill a stray `pythonw3.13.exe` if the widget keeps old code). Hooks are re-executed per event, so `hooks.py` changes apply immediately.
+The daemon and widget run as `pythonw` in the background. **Code changes need a restart**: `agent-voice restart` (or the tray's *Restart agent-voice*). The widget relaunches itself when it sees the service's `boot` change, so it picks up new code too. Hooks are re-executed per event, so `hooks.py` changes apply immediately.
 
 ## Invariants: do not break these
 
@@ -73,7 +77,7 @@ The daemon and widget run as `pythonw` in the background. **Code changes need a 
 5. **Local API stays locked down.** `_allowed()` in `server.py` rejects any `Origin` header, a `Host` other than `127.0.0.1:<port>`/`localhost:<port>`, non-JSON POSTs, and bodies over 1 MB. Every new endpoint goes through it; never bind to anything but `127.0.0.1`. The browser extension never calls the API: it goes through the native host, which only our extension id may start (`allowed_origins`, pinned by the manifest's `key`) and which only accepts the sites in `native_host.SITES`.
 6. **The widget never steals focus.** It uses `WS_EX_NOACTIVATE` + `Qt.WindowDoesNotAcceptFocus`; dictation pastes into the user's agent window and depends on this.
 7. **The widget is a view.** State lives in the daemon (`/status`). The widget only keeps its own position/visibility (`~/.agent-voice/widget.json`; not `state.json`, which the daemon rewrites wholesale).
-8. **Nothing leaves the machine.** No network calls except model downloads (Piper voices, Whisper weights, the wake-word model) on first use, the optional release check (`update_check`, daily), and the release zip when the user clicks *Update* (`updater.py`: the exact asset, size/checksum/CRC verified before anything is swapped; the swap rolls back on failure). `apps.py` reads only the listed apps' notifications (the filter is in the SQL query) and is off by default.
+8. **Nothing leaves the machine.** No network calls except model downloads (Piper voices, Whisper weights, the wake-word model) on first use, the optional release check (`update_check`, daily), phone notifications once the user turns them on (`ntfy.py`: only through `Daemon._push`, gated by `_ntfy_settings()` returning None while off; `ntfy.content` decides how much text), and the release zip when the user clicks *Update* (`updater.py`: the exact asset, size/checksum/CRC verified before anything is swapped; the swap rolls back on failure). `apps.py` reads only the listed apps' notifications (the filter is in the SQL query) and is off by default.
 9. **Battery first.** ONNX Runtime sessions we create never busy-wait (`tts._quiet_session`: `allow_spinning=0`, 2 threads; the default spinning cost ~20x the CPU per sentence). Feed models whole chunks, not 30 ms blocks. The wake word runs a volume gate first and the keyword spotter only on finished utterances.
 10. **The widget doesn't redraw at rest.** `_tick` drops to 4 Hz and skips `update()` once `_is_still()` (the one exception: the working light glides at 15 fps while the notch is down, `_glow_moving()`; the ready rim is still); status polling slows to 0.6 s. Any new animation must be covered by `_is_still()`, or the widget redraws at 30 fps forever. At rest the widget long-polls `/status?wait=<tag>` (one request per change, or every 20 s): keep `server.status_tag` blind to values that change without anything visible changing (mic level, seconds).
 
@@ -104,6 +108,9 @@ The daemon and widget run as `pythonw` in the background. **Code changes need a 
 - **`render_docs.py` replaces `widget.time`** with a fake clock; keep animation code reading time through the module-level `time` import.
 - **Animations run on real time**: easing factors are tuned per 30 fps frame and go through `_k()` / `_spring()` with the frame's measured `dt`, so a late frame doesn't slow them down. Tests that tick the widget must step its clock (`w._last_tick -= widget.FRAME` before each `_tick()`).
 - **Never resize the notch every frame**: resizing a see-through window re-uploads all of it (the jerky opening). The notch's window is a canvas sized once for where an animation is going and trimmed when it settles; the island is drawn at `_vw` x `_vis_h()` inside it, and `visual_rect()` is where it is on screen.
+- **Sounds never go through `sounddevice.play()` outside `tts.py`**: it shares one global stream with the voice, so a cue there would cut the speech off. Cues and chimes use `_play_apart` (a stream of their own), built by `tone_audio` (no harmonics above the note, eased in and out). Never `winsound.Beep`.
+- **Ducking restores what it lowered**: `Ducker` saves the original volumes to `state.json` (`ducked`) before fading, and the next start puts them back.
+- **Claude's limits come from `claude -p /usage`**: a local Claude Code command (no model request) that refreshes `cachedUsageUtilization` in `~/.claude.json`. Never pass it through Git Bash (it rewrites `/usage` into a path and Claude gets a real prompt); the daemon runs it without a shell. Never read Claude's credentials ourselves.
 - **Claude Code's `StopFailure` hook** (matcher `rate_limit`) is how an out-of-quota turn reaches `/limit_hit`; the resume schedule lives in `state.json` (`limited`) so a restart doesn't lose it.
 
 ## Style

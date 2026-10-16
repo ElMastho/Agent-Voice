@@ -7,6 +7,44 @@ import json
 import sys
 
 
+def _schedule(args, client) -> int:
+    import time
+    from datetime import datetime
+
+    from agent_voice.schedule import parse_when
+
+    if args.list or (not args.prompt and not args.cancel):
+        items = (client.request("/status") or {}).get("schedules")
+        if items is None:
+            print("not running")
+            return 1
+        for item in items:
+            when = datetime.fromtimestamp(item["at"]).strftime("%a %d %b %H:%M")
+            print(f"#{item['id']}  {when}{' (' + item['repeat'] + ')' if item['repeat'] else ''}  {item['title']}: "
+                  f"{item['prompt'][:80]}")
+        print("" if items else "nothing scheduled")
+        return 0
+    if args.cancel:
+        result = client.request("/schedule_cancel", {"id": args.cancel})
+        print("cancelled" if result and result.get("ok") else "no such scheduled prompt")
+        return 0 if result and result.get("ok") else 1
+    at = parse_when(args.at, time.time()) if args.at else None
+    if not at:
+        print('when? --at "14:00", "2pm", "in 30 minutes", "tomorrow at 9"')
+        return 2
+    payload = {"prompt": " ".join(args.prompt), "at": at, "repeat": args.repeat}
+    if args.new:
+        payload["new"] = {"target": args.agent, "cwd": args.cwd}
+    elif args.thread:
+        payload["thread"] = args.thread
+    result = client.request("/schedule", payload)
+    if not result:
+        print(f"not scheduled (no thread called {args.thread}?)" if args.thread else "not running")
+        return 1
+    print(f"#{result['id']} at {datetime.fromtimestamp(result['at']).strftime('%a %H:%M')}: {result['title']}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent-voice", description="Local voice for AI coding agents.")
     sub = parser.add_subparsers(dest="cmd")
@@ -67,6 +105,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("prompt", nargs="+")
     p.add_argument("--agent", default="", help="claude-app | claude | codex | gemini (default: like your last thread)")
     p.add_argument("--cwd", default="", help="its folder (default: the one you last worked in)")
+
+    p = sub.add_parser("schedule", help="send a prompt later: to a thread, or as a new thread")
+    p.add_argument("prompt", nargs="*")
+    p.add_argument("--at", default="", help='when: "14:00", "2pm", "in 30 minutes", "tomorrow at 9"')
+    p.add_argument("--thread", default="", help="the thread's name (default: your last one)")
+    p.add_argument("--new", action="store_true", help="start a new thread with it")
+    p.add_argument("--agent", default="", help="with --new: claude-app | claude | codex | gemini")
+    p.add_argument("--cwd", default="", help="with --new: its folder")
+    p.add_argument("--repeat", default="", choices=["", "daily", "weekdays"])
+    p.add_argument("--list", action="store_true", help="what's scheduled")
+    p.add_argument("--cancel", type=int, default=0, metavar="ID")
+
+    sub.add_parser("restart", help="stop and start agent-voice again (the notch too)")
+    sub.add_parser("open", help="show the notch's panel, starting agent-voice if it isn't running (the Start menu)")
+    p = sub.add_parser("shortcut", help="agent-voice in the Windows Start menu")
+    p.add_argument("mode", nargs="?", default="on", choices=["on", "off"])
+
+    p = sub.add_parser("phone", help="phone notifications through ntfy (off until you turn them on)")
+    p.add_argument("action", nargs="?", default="status", choices=["on", "off", "test", "new", "status"])
 
     p = sub.add_parser("native-host", help=argparse.SUPPRESS)  # browser extension bridge (Chrome native messaging)
     p.add_argument("origin", nargs="*")
@@ -169,6 +226,37 @@ def main(argv: list[str] | None = None) -> int:
         result = client.request("/wake", {"mode": args.mode})
         print("not running" if result is None else f"wake word {'on' if result['wake'] else 'off'}")
         return 0 if result else 1
+    if args.cmd == "schedule":
+        return _schedule(args, client)
+    if args.cmd == "restart":
+        ok = client.restart()
+        print("agent-voice restarted" if ok else "agent-voice did not start; see ~/.agent-voice/logs/server.log")
+        return 0 if ok else 1
+    if args.cmd == "open":
+        if client.is_running():
+            client.request("/widget_open", {})
+            return 0
+        return 0 if client.start_detached(wait=60) else 1
+    if args.cmd == "shortcut":
+        from agent_voice.install import start_menu
+
+        print(start_menu(args.mode == "on"))
+        return 0
+    if args.cmd == "phone":
+        payload = {"on": args.action == "on"} if args.action in ("on", "off") else (
+            {"action": args.action} if args.action in ("test", "new") else None)
+        result = client.request("/phone", payload) if payload else (client.request("/status") or {}).get("phone")
+        if result is None:
+            print("not running")
+            return 1
+        if not result.get("enabled"):
+            print("phone notifications off (agent-voice phone on)")
+        else:
+            print(f"phone notifications on: subscribe to {result['url']} in the ntfy app (or scan the QR code in the "
+                  "notch); keep that link private")
+            if args.action == "test":
+                print("test sent" if result.get("ok") else f"test not sent ({result.get('error') or 'check the server'})")
+        return 0
     if args.cmd == "new":
         result = client.request("/new_thread", {"text": " ".join(args.prompt), "target": args.agent, "cwd": args.cwd})
         print("not running" if result is None else "starting a new thread")

@@ -91,6 +91,16 @@ def start_detached(wait: float = 15.0) -> bool:
             pass
 
 
+def restart(wait: float = 30.0) -> bool:
+    """Stop the service and start it again; the notch notices and comes back with the new code too."""
+    if is_running():
+        request("/shutdown", {})
+        end = time.time() + 10
+        while time.time() < end and is_running():
+            time.sleep(0.25)
+    return start_detached(wait)
+
+
 def _wait_running(wait: float) -> bool:
     end = time.time() + wait
     while time.time() < end:

@@ -94,10 +94,33 @@ def _acquire_instance(lock: InstanceLock, wait: float = 10.0) -> bool:
 
 
 def _beep(freq: int, ms: int = 90) -> None:
-    if sys.platform == "win32":
-        import winsound
+    """A short, soft cue (the mic opens, it heard you, it didn't): a gentle tone, not the system's square-wave beep.
 
-        threading.Thread(target=winsound.Beep, args=(freq, ms), daemon=True).start()
+    High asks rise (the mic opens, yes), low ones fall (nothing heard, no, not sent); played on a stream of
+    its own, so a cue never cuts the voice off.
+    """
+    if freq >= 800:
+        notes = ((freq * 0.75, 0.0), (freq, 0.06))  # up: listening, done, yes
+    elif freq >= 500:
+        notes = ((freq, 0.0),)
+    else:
+        notes = ((max(freq, 330.0) * 1.25, 0.0), (max(freq, 330.0), 0.07))  # down: nothing, no, not sent
+    try:
+        audio, rate = tone_audio(notes, 0.16, decay=14.0, tail=0.18)
+    except Exception:
+        return
+    threading.Thread(target=_play_apart, args=(audio, rate), daemon=True).start()
+
+
+def _play_apart(audio, rate: int) -> None:
+    """Play on a stream of its own (sounddevice's play() would stop the voice playing through it)."""
+    try:
+        import sounddevice as sd
+
+        with sd.OutputStream(samplerate=rate, channels=1, dtype="float32") as stream:
+            stream.write(audio.reshape(-1, 1))
+    except Exception:
+        log.debug("cue not played", exc_info=True)
 
 
 SPEEDS = (1.0, 1.25, 1.5, 1.75, 2.0)
@@ -105,28 +128,40 @@ RELEASES_API = "https://api.github.com/repos/ElMastho/agent-voice/releases/lates
 RELEASES_PAGE = "https://github.com/ElMastho/agent-voice/releases/latest"
 UPDATE_EVERY = 24 * 3600  # re-check for a release once a day (daemons stay up for weeks)
 
-# Chime mode: (frequency Hz, start s) notes. "done" rises, "attention" asks twice.
+# Chime mode: (frequency Hz, start s) notes, a soft mallet sound. "done" settles on a fifth (C5, G5); "attention"
+# asks, a little higher and twice (G5 then C6, repeated).
 CHIMES = {
-    "done": ((659.25, 0.0), (987.77, 0.13)),
-    "attention": ((880.0, 0.0), (1174.66, 0.16), (880.0, 0.42), (1174.66, 0.58)),
+    "done": ((523.25, 0.0), (783.99, 0.11)),
+    "attention": ((783.99, 0.0), (1046.5, 0.12), (783.99, 0.42), (1046.5, 0.54)),
 }
 
 
-def chime_audio(kind: str, volume: float = 0.35, rate: int = 44100):
-    """A soft bell-like jingle: sine + a quiet octave, fast attack, exponential decay."""
+def tone_audio(notes, volume: float = 0.35, rate: int = 44100, decay: float = 7.0, tail: float = 0.6):
+    """Soft mallet tones: a sine with a gentle attack, a warm low partial that fades first, a smooth tail.
+
+    No harmonics above the note and no clicks (eased in and out): nothing shrill, even on laptop speakers.
+    """
     import numpy as np
 
-    notes = CHIMES.get(kind, CHIMES["done"])
-    length = notes[-1][1] + 0.9
+    length = notes[-1][1] + tail
     t = np.arange(int(rate * length)) / rate
     out = np.zeros_like(t, dtype=np.float32)
     for freq, start in notes:
         u = t - start
         on = u >= 0
-        env = np.where(on, np.minimum(u / 0.008, 1.0) * np.exp(-np.clip(u, 0, None) * 5.5), 0.0)
-        out += (env * (np.sin(2 * np.pi * freq * u) + 0.25 * np.sin(4 * np.pi * freq * u))).astype(np.float32)
+        uu = np.clip(u, 0, None)
+        attack = np.minimum(uu / 0.012, 1.0) ** 2
+        body = np.sin(2 * np.pi * freq * uu) * np.exp(-uu * decay)
+        warmth = 0.18 * np.sin(np.pi * freq * uu) * np.exp(-uu * decay * 2.2)  # an octave below, brief
+        out += np.where(on, attack * (body + warmth), 0.0).astype(np.float32)
+    fade = int(rate * 0.03)
+    out[-fade:] *= np.linspace(1.0, 0.0, fade, dtype=np.float32)
     peak = float(np.max(np.abs(out))) or 1.0
     return (out / peak * max(0.0, min(1.0, volume))).astype(np.float32), rate
+
+
+def chime_audio(kind: str, volume: float = 0.35, rate: int = 44100):
+    return tone_audio(CHIMES.get(kind, CHIMES["done"]), volume, rate)
 
 
 # Spoken answers to a question: "the second one", "option 2", "la deuxième"...
@@ -427,6 +462,11 @@ class Daemon:
         self._fullscreen = ""  # "presenting" / "full screen" (focus)
         # Phone notifications (ntfy, opt-in) and scheduled prompts (kept across restarts).
         self.notifier = ntfy.Notifier(self._ntfy_settings)
+        # Other apps' sound, lowered under the voice and while you reply (a worker: fades never hold the mic loop).
+        self._ducker = None
+        self._duck_state = ""
+        self._duck_idle = 0.0
+        self._duck_jobs: queue.Queue = queue.Queue()
         self._schedules: list[dict] = [s for s in self.state.get("schedules") or [] if isinstance(s, dict)]
         self._limits_at: dict[str, float] = {}  # when each agent's numbers were measured (newest wins)
         # Claude's usage from its transcripts: an estimate between real readings (the desktop app reports none).
@@ -434,6 +474,7 @@ class Daemon:
         self._estimator = usage.Estimator(self._ledger, self.state.get("claude_usage"))
         self._claude_est: dict[str, dict] = {}
         self._claude_asked = 0.0  # the last time we ran `claude -p /usage`
+        self._limits_refreshing = False
         self._usage_line = ""  # Claude Code's status line: "on" (ours), "off" or "custom" (yours); cached with agents
         # The last finished turn's outcome (files changed, tests), shown for a while in the notch.
         self.last_result: dict | None = None
@@ -448,6 +489,8 @@ class Daemon:
         self.new_thread_opens = 0  # bumped by the hotkey: the widget opens its new-thread box
         # Bumped by the show/hide hotkey; the widget toggles when it sees the number change.
         self.widget_toggles = 0
+        self.widget_opens = 0  # bumped by `agent-voice open` (the Start menu): the widget shows its panel
+        self.boot = int(time.time() * 1000)
         if start_threads:
             threading.Thread(target=self._job_loop, name="jobs", daemon=True).start()
             threading.Thread(target=self._listen_monitor, name="listen", daemon=True).start()
@@ -457,6 +500,8 @@ class Daemon:
             threading.Thread(target=self._away_watch, name="away", daemon=True).start()
             threading.Thread(target=self._apps_watch, name="apps", daemon=True).start()
             threading.Thread(target=self._quota_watch, name="quota", daemon=True).start()
+            threading.Thread(target=self._duck_loop, name="ducking", daemon=True).start()
+            threading.Thread(target=self._ensure_start_menu, name="start-menu", daemon=True).start()
 
     def _job_loop(self) -> None:
         while True:
@@ -577,7 +622,7 @@ class Daemon:
 
         try:
             audio, rate = chime_audio(kind, float(self.config.get("chime", {}).get("volume", 0.35)))
-            sd.play(audio, rate)
+            threading.Thread(target=_play_apart, args=(audio, rate), daemon=True).start()
         except Exception:
             log.exception("chime failed")
 
@@ -1379,18 +1424,40 @@ class Daemon:
                 log.exception("codex limits check failed")
             time.sleep(60)
 
-    def _ask_claude_usage(self, now: float | None = None) -> bool:
+    def refresh_limits(self) -> None:
+        """The panel's ↻: ask Claude Code for its usage now, and re-read everything."""
+        self._limits_refreshing = True
+        try:
+            claude_json = Path.home() / ".claude.json"
+            if self._ask_claude_usage(force=True):
+                fetched, found = quota.claude_cached(claude_json)
+                if found:
+                    self._set_limits("claude", found, at=fetched)
+            self._estimate_claude()
+            self._read_usage_drops()
+            path = quota.latest_codex_log()
+            if path is not None:
+                found = quota.codex_limits(path)
+                if found:
+                    self._set_limits("codex", found)
+        except Exception:
+            log.exception("limits refresh failed")
+        finally:
+            self._limits_refreshing = False
+
+    def _ask_claude_usage(self, now: float | None = None, force: bool = False) -> bool:
         """Have Claude Code fetch its own usage (`claude -p /usage`: a local command, no model request), which it
         saves to ~/.claude.json. Every few minutes while Claude is in use, and once at start."""
         from agent_voice import launch
 
         now = time.time() if now is None else now
         minutes = float(self.config.get("limits", {}).get("claude_refresh_minutes", 10) or 0)
-        if minutes <= 0 or now - self._claude_asked < minutes * 60:
-            return False
-        last = self._ledger.items[-1][0] if self._ledger.items else 0.0
-        if self._claude_asked and now - last > 3600:
-            return False  # Claude not used in the last hour: nothing moved
+        if not force:
+            if minutes <= 0 or now - self._claude_asked < minutes * 60:
+                return False
+            last = self._ledger.items[-1][0] if self._ledger.items else 0.0
+            if self._claude_asked and now - last > 3600:
+                return False  # Claude not used in the last hour: nothing moved
         exe = launch.find_cli("claude")
         if not exe:
             return False
@@ -1946,11 +2013,72 @@ class Daemon:
         for job in jobs:
             self.speak(*job)
 
+    def _ensure_start_menu(self) -> None:
+        """Once (Windows): agent-voice in the Start menu, so it can be found and started like any app."""
+        if os.name != "nt" or self.state.get("start_menu"):
+            return
+        try:
+            log.info("start menu: %s", install.start_menu(True))
+        except Exception:
+            log.exception("start menu entry failed")
+        self.state["start_menu"] = True  # once: if you remove it, it stays removed
+        save_state(self.state)
+
+    # -- other apps' sound -----------------------------------------------------------
+    def _duck_loop(self) -> None:
+        """Runs the fades (one at a time, the latest wish wins); first puts back what a crash left lowered."""
+        from agent_voice import ducking
+
+        if not ducking.available():
+            return
+
+        def save(data: dict) -> None:
+            self.state["ducked"] = data
+            save_state(self.state)
+
+        self._ducker = ducking.Ducker(self.state.get("ducked"), on_save=save)
+        if self.state.get("ducked"):
+            self._ducker.restore()
+        while True:
+            job = self._duck_jobs.get()
+            while not self._duck_jobs.empty():
+                job = self._duck_jobs.get()  # only the latest matters
+            try:
+                if job[0] == "duck":
+                    self._ducker.duck(job[1], pause=job[2])
+                else:
+                    self._ducker.restore()
+            except Exception:
+                log.exception("ducking failed")
+
+    def _duck_tick(self, now: float) -> None:
+        """Every 100 ms: speaking -> others lowered; you speak -> silenced (a video paused); done -> as they were."""
+        cfg = self.config.get("ducking", {})
+        if not cfg.get("enabled", True) or self._ducker is None:
+            return
+        want = "listen" if (self._listening or self._ptt_active) else "voice" if self.speaker.busy else ""
+        if want:
+            self._duck_idle = 0.0
+            if want != self._duck_state:
+                self._duck_state = want
+                level = float(cfg.get("listen", 0.0) if want == "listen" else cfg.get("voice", 0.3))
+                self._duck_jobs.put(("duck", level, want == "listen" and bool(cfg.get("pause_media", True))))
+        elif self._duck_state:
+            # A pause between two sentences, or between the voice and the mic, isn't the end: wait a moment.
+            self._duck_idle = self._duck_idle or now
+            if now - self._duck_idle >= 1.2 and not self._listen_armed:
+                self._duck_state, self._duck_idle = "", 0.0
+                self._duck_jobs.put(("restore",))
+
     def _listen_monitor(self) -> None:
         idle_since = None
         queue_idle = None
         while True:
             time.sleep(0.1)
+            try:
+                self._duck_tick(time.time())
+            except Exception:
+                log.exception("ducking check failed")
             free = not (self.speaker.busy or self._listen_armed or self._listening or self._ptt_active
                         or self.question or self.permission)
             if free and self._queue and not self.muted:
@@ -2492,6 +2620,8 @@ class Daemon:
     def status(self) -> dict:
         return {
             "version": __version__,
+            "boot": self.boot,  # a new one: the service restarted, and the widget restarts with it
+            "widget_opens": self.widget_opens,
             "phase": self.phase(),
             "level": round(self.level, 4),
             "speaking_lang": self.speaker.current_spec[:2] if self.speaker.busy else "",
@@ -2520,6 +2650,7 @@ class Daemon:
             "needs": self._needs_status(),
             "limits": self._limits_status(),
             "usage_line": self._usage_line,
+            "limits_refreshing": self._limits_refreshing,
             "result": self.last_result if self.last_result and time.time() - self.last_result["at"] < 120 else None,
             "thread": self._thread_status(),
             "threads": self._threads_status(),
@@ -2838,6 +2969,12 @@ def _handler(daemon: Daemon):
             if self.path == "/limit_hit":
                 daemon.limit_hit(str(data.get("session") or ""), str(data.get("source") or ""),
                                  str(data.get("text") or "")[:400])
+                return self._json(200, {"ok": True})
+            if self.path == "/widget_open":
+                daemon.widget_opens += 1
+                return self._json(200, {"ok": True})
+            if self.path == "/limits_refresh":
+                threading.Thread(target=daemon.refresh_limits, daemon=True).start()
                 return self._json(200, {"ok": True})
             if self.path == "/usage_line":
                 threading.Thread(target=daemon.usage_line, args=(bool(data.get("enable", True)),), daemon=True).start()

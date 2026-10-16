@@ -55,6 +55,9 @@ agent-voice checks GitHub for a new release when it starts and once a day after 
 - **From source**: the chip tells you to `git pull`, `.venv/Scripts/pip install -e .`, then `agent-voice shutdown` and `agent-voice start`.
 - **By hand**: `agent-voice.exe shutdown`, tray → *Quit widget*, then extract the new zip over the folder, double-click `agent-voice.exe`.
 
+### Starting, restarting, quitting
+agent-voice is in the **Start menu** (it adds itself the first time it runs; `agent-voice shortcut on` if you removed it): search for *agent-voice* and it opens, starting the service if needed. The tray icon's menu has **Restart agent-voice** (after changing the config, or if anything looks stuck: the notch comes back with it) and **Quit agent-voice**. Same in a terminal: `agent-voice restart`, `agent-voice shutdown`, `agent-voice open`.
+
 ## 2. Your first conversation
 
 1. Open a **new** Claude Code session (hooks are loaded when a session starts).
@@ -117,6 +120,25 @@ Open the panel: on a wide enough screen the notch takes a third of it, with a se
 ### The daily recap
 At 18:00 (`recap.at`), once a day and only if something happened, a violet *Today* banner sums up the day: turns and tokens, each thread with its last summary, what's still waiting on you, and where your limits are; in Voice mode it's also said in a sentence or two. If you're away or in focus at that time, it waits for you. Ask for it any time: *"Hey Claude, daily recap"*, *"what did I do today?"*, *"résumé de la journée"*, the tray's *Today's recap*, or `agent-voice recap` in a terminal.
 
+### Your video turns down while it talks
+On Windows, while the voice speaks, every other app (a YouTube video, Spotify, a game) fades to 30% of its own volume and comes back when the voice is done. While you reply, they go quiet entirely and a video or song that's playing is **paused** (the media key, which browsers and players obey), then played again when you're done. Only what agent-voice paused is resumed; if you change an app's volume in the meantime, it's yours and stays as you set it. If agent-voice ever stops mid-way, the next start puts the volumes back. Settings: `ducking.voice` (0 to 1), `ducking.listen`, `ducking.pause_media`, or `ducking.enabled: false`.
+
+### Your phone (ntfy)
+Off until you turn it on. Click the **Phone** tile (or `agent-voice phone on`): a card with a QR code appears in the panel. Install the free [ntfy](https://ntfy.sh) app (iPhone or Android; the web works too) and scan it, and your phone is subscribed. Press **Test** to check.
+
+What reaches your phone, by default only while you're away from the PC (2 minutes without input, in focus, or away; `ntfy.when: "always"` for always): what needs you (approvals at high priority, questions, agents waiting), finished replies with their one-line summary, limits hit and resumed, scheduled prompts sent, and the daily recap. Events close together come as one notification. Choose with `ntfy.events`, and how much text with `ntfy.content`: `"titles"` (just *"Codex finished."*), `"summary"` (default), or `"full"`.
+
+**Privacy**: this is the one feature that sends something over the internet. It goes over HTTPS to the ntfy server (`ntfy.sh`, or yours with `ntfy.server` and `ntfy.token`), then to your phone. The QR code holds a long random channel name: anyone with it can read your notifications, so keep it private; **New link** makes a new one and the old one stops getting anything. On ntfy.sh, channels aren't protected by a password and messages stay on the server for a few hours; run your own ntfy server for full control. Your audio, prompts, files and transcripts are never sent.
+
+### Scheduled prompts
+Send a prompt later, to a thread or as a new thread:
+
+- **By voice**: *"Hey Claude, at 2 pm tell Codex to run the tests"*, *"in 20 minutes, new thread: add a health check"*, *"tomorrow at 9, review this"* (the current thread), *"à 14h dis à Codex de lancer les tests"*.
+- **From the reply box**: type the prompt, put a time in **When** (*14:00*, *2pm*, *in 30 min*, *tomorrow 9am*, *demain 9h*), press Enter. In the new-thread box, the new thread starts then.
+- **From a terminal**: `agent-voice schedule "Run the tests" --at 14:00 --thread Codex`, `--new --agent claude-app --cwd C:\work`, `--repeat daily` or `weekdays`; `--list`, `--cancel ID`.
+
+They wait in the panel's **Upcoming** list (× cancels one) and survive restarts. At that time the prompt is typed into the thread's own window and sent (saved prompts expand), and your phone hears about it if that's on. If the PC was off and it's more than 6 hours late, you're told and nothing is sent.
+
 ### Hand your selection or a screenshot to a thread
 Select some text (code, an error, a paragraph) in any app, or copy a screenshot (`Win+Shift+S`), then say *"Hey Claude, send this to Codex"*. It goes to that thread's message box, without being sent, so you can add your question; say *"... and ask it to explain it"* to send it at once. Screenshots are saved to `~/.agent-voice/shots/` (the last 20 are kept) and passed by path. Also *"give the screenshot to the notch redesign"*, *"envoie ça à Codex"*.
 
@@ -143,9 +165,12 @@ When a Claude Code conversation finishes, the notch says *Done · 3 files change
 
 The panel's **Limits** section shows each agent's **5-hour** and **weekly** limits (Pro, Max and ChatGPT plans) as bars, with when they reset; a note drops down once when one passes 90%. They're kept across restarts.
 
+- **Claude** (in a terminal and in the desktop app alike): every 10 minutes while you're using Claude, and once at start, agent-voice runs **`claude -p /usage`**, Claude Code's own usage command. It's local: no model request, nothing typed anywhere; Claude Code fetches your usage with your login, as its Usage page does, and saves it, and agent-voice reads that. The numbers are the ones on Claude's Usage page (which also counts claude.ai). Between two readings, the bars follow your requests from the token counts in your local transcripts (`~/.claude/projects`), weighted by model; those are marked *≈*. A terminal session's status line (`agent-voice usage on`, or *Turn on* in the row) reports exact numbers too. `limits.claude_refresh_minutes` sets how often (`0`: never).
 - **Codex** writes them in its session logs (`~/.codex/sessions`): they show after its first turn, nothing to set up.
-- **Claude Code** reports them to its status line: click *Turn on* in the Limits row, or run `agent-voice usage on` (it leaves your own status line alone if you have one). With a custom status line, Claude Code shows fewer of its footer hints; `agent-voice usage off` undoes it. The numbers refresh whenever Claude Code draws its status line (after each reply in a terminal session).
-- **Gemini CLI and Antigravity** don't write their quotas anywhere agent-voice can read without their private session token, so they aren't shown.
+- **Any other agent or script** can report its own: write `~/.agent-voice/usage/<agent>.json` with `{"agent": "Name", "five_hour": {"pct": 42, "resets": 1792188000}, "seven_day": {"pct": 69, "resets": 1792605600}}` (resets in epoch seconds; files older than 12 hours are ignored). It shows up within a minute.
+- **Gemini CLI and Antigravity** don't expose their quotas, so they aren't shown.
+
+Click **↻** next to *Limits* to refresh them all at once (it turns while Claude Code answers).
 
 ### Drop files on the notch
 Drag a screenshot, a log or any file onto the notch (it drops down as you get near the top edge): its path is typed into the last conversation's prompt, not sent, so you can add your question. Drop it on a thread in the open panel to pick the conversation. An image dragged from a browser is saved to `~/.agent-voice/drops/` first.
@@ -273,6 +298,11 @@ File: `~/.agent-voice/config.json`. Only put the keys you want to change; they'r
 | `focus.enabled` / `full_screen` / `calls` | `true` / `true` / `"hold"` | Hold replies in focus; `calls: "chimes"` for chimes during calls |
 | `recap.enabled` / `at` | `true` / `"18:00"` | The daily recap |
 | `shortcuts` | 6 saved prompts | `{"name": "prompt"}` |
+| `ducking.enabled` / `voice` / `listen` / `pause_media` | `true` / `0.3` / `0.0` / `true` | Other apps' volume under the voice and while you reply |
+| `limits.claude_refresh_minutes` | `10` | Run `claude -p /usage` this often while Claude is in use (`0`: never) |
+| `ntfy.server` / `token` | `"https://ntfy.sh"` / `""` | Your own ntfy server and its access token |
+| `ntfy.content` / `when` / `away_minutes` | `"summary"` / `"away"` / `2` | How much text; only while away, or `"always"` |
+| `ntfy.events` | `["needs", "done", "limit", "recap", "scheduled"]` | What reaches your phone |
 | `desktop_apps.enabled` / `apps` | `false` / `{chatgpt, copilot, perplexity}` | Read these desktop apps' notifications (app id fragment → name) |
 | `permissions.enabled` / `wait_seconds` | `true` / `60` | Approvals by voice and in the notch, and how long Claude waits |
 | `wake_word.phrases` | `["hey claude", ...]` | Phrases Whisper accepts as the wake word |

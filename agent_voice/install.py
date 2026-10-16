@@ -493,6 +493,39 @@ def _launch_agent(path: Path, enable: bool) -> str:
     return f"created {path}"
 
 
+def _start_menu_file() -> Path:
+    return Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "agent-voice.lnk"
+
+
+def start_menu(enable: bool = True) -> str:
+    """agent-voice in the Start menu: search for it, and it opens (starting the service when it isn't running)."""
+    if os.name != "nt":
+        return "the Start menu entry is for Windows"
+    path = _start_menu_file()
+    if not enable:
+        path.unlink(missing_ok=True)
+        return f"removed {path}"
+    import subprocess
+
+    exe, *args = self_command("open")
+    icon = Path(__file__).resolve().parent.parent / "packaging" / "agent-voice.ico"
+    icon_location = str(icon) if icon.is_file() else exe
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Through the environment, not the command line: paths with spaces and quotes need no escaping then.
+    env = {**os.environ, "AV_LNK": str(path), "AV_EXE": exe, "AV_ARGS": subprocess.list2cmdline(args),
+           "AV_ICON": icon_location, "AV_DIR": str(Path.home())}
+    script = ("$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:AV_LNK); $s.TargetPath = $env:AV_EXE; "
+              "$s.Arguments = $env:AV_ARGS; $s.IconLocation = $env:AV_ICON; $s.WorkingDirectory = $env:AV_DIR; "
+              "$s.Description = 'agent-voice: your AI agents, out loud'; $s.Save()")
+    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], env=env, capture_output=True,
+                   timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return f"created {path}" if path.exists() else "couldn't create the Start menu entry"
+
+
+def has_start_menu() -> bool:
+    return os.name == "nt" and _start_menu_file().exists()
+
+
 def autostart(enable: bool = True) -> str:
     if sys.platform == "darwin":
         return _launch_agent(_startup_file(), enable)

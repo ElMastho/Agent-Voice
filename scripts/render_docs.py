@@ -153,6 +153,11 @@ LIMITS = {"claude": {"five_hour": {"pct": 63, "resets": 51600}, "seven_day": {"p
           "codex": {"five_hour": {"pct": 18, "resets": 60000}, "seven_day": {"pct": 92, "resets": 1792300000}}}
 LIMIT_NEED = {"kind": "limit", "session": "b", "title": "API refactor", "color": "#34D399", "resume": True,
               "text": "Out of quota · resumes 15:20", "at": 0}
+PHONE = {"enabled": True, "url": "https://ntfy.sh/agent-voice-Qk3xV9yTn2LpWm8RzA4c", "when": "away", "sent": 12}
+SCHEDULES = [{"id": 1, "at": 54000, "title": "API refactor", "prompt": "Run the test suite and fix anything that fails.",
+              "repeat": ""},
+             {"id": 2, "at": 118800, "title": "New thread (Claude app)", "prompt": "Write the release notes for 0.6",
+              "repeat": "weekdays"}]
 DAY = {"turns": 23, "threads": 4, "tokens": 1840000,
        "hours": [0, 2, 0, 0, 0, 0, 0, 0, 1, 4, 6, 3, 1, 2, 5, 7, 4, 2, 0, 0, 0, 0, 0, 0]}
 AGENTS = {"claude": "on", "codex": "on", "gemini": "on", "cursor": "off", "cline": "missing", "antigravity": "on",
@@ -217,7 +222,7 @@ def render_states() -> None:
 def render_panel() -> None:
     st = status("idle", last_heard=HISTORY[0]["text"], last_heard_lang="en", history=HISTORY, agents=AGENTS,
                 threads=THREADS, needs=NEEDS + [LIMIT_NEED], limits=LIMITS, wake=True, approvals=True,
-                summary=True, last_reply={"session": "a"}, day=DAY,
+                summary=True, last_reply={"session": "a"}, day=DAY, phone=PHONE, schedules=SCHEDULES,
                 activity={"session": "a", "title": "Notch redesign", "color": "#F59E0B", "label": "Run pytest",
                           "steps": 9, "elapsed": 74, "others": 1})
     w, shot, k = notch_shot(st, expanded=True, hover=True)

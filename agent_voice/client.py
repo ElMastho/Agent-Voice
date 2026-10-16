@@ -10,7 +10,20 @@ import http.client
 import time
 from pathlib import Path
 
-from agent_voice.config import HOME, load_config
+from agent_voice.config import HOME, LOOPBACK, load_config
+
+
+_ADDRESS: tuple[str, int] | None = None
+
+
+def _address() -> tuple[str, int]:
+    """The daemon's address, read once per process (the widget asks for its status several times a second)."""
+    global _ADDRESS
+    if _ADDRESS is None:
+        cfg = load_config()
+        host = str(cfg["host"])
+        _ADDRESS = (host if host in LOOPBACK else "127.0.0.1", int(cfg["port"]))  # where the daemon listens
+    return _ADDRESS
 
 
 def request(path: str, payload: dict | None = None, timeout: float = 2.0) -> dict | None:
@@ -18,9 +31,9 @@ def request(path: str, payload: dict | None = None, timeout: float = 2.0) -> dic
 
     http.client rather than urllib: hooks run once per tool call, and urllib's import alone costs ~40 ms.
     """
-    cfg = load_config()
+    host, port = _address()
     body = None if payload is None else json.dumps(payload).encode("utf-8")
-    conn = http.client.HTTPConnection(cfg["host"], int(cfg["port"]), timeout=timeout)
+    conn = http.client.HTTPConnection(host, port, timeout=timeout)
     try:
         conn.request("GET" if body is None else "POST", path, body=body, headers={"Content-Type": "application/json"})
         resp = conn.getresponse()

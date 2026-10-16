@@ -19,9 +19,9 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from agent_voice import (__version__, calls, claudeapp, install, keys, ntfy, quota, schedule, textclean, updater,
-                         usage, winfocus)
-from agent_voice.config import HOME, LOG_DIR, load_config, load_state, save_state
+from agent_voice import (__version__, calls, claudeapp, install, keys, launch, ntfy, quota, schedule, textclean,
+                         updater, usage, winfocus)
+from agent_voice.config import HOME, LOG_DIR, LOOPBACK, load_config, load_state, save_state
 from agent_voice.hooks import strip_summary
 from agent_voice.textclean import result_label
 from agent_voice.tts import Speaker
@@ -93,7 +93,7 @@ def _acquire_instance(lock: InstanceLock, wait: float = 10.0) -> bool:
     return True
 
 
-def _beep(freq: int, ms: int = 90) -> None:
+def _beep(freq: int) -> None:
     """A short, soft cue (the mic opens, it heard you, it didn't): a gentle tone, not the system's square-wave beep.
 
     High asks rise (the mic opens, yes), low ones fall (nothing heard, no, not sent); played on a stream of
@@ -174,8 +174,6 @@ _ORDINALS = {
 }
 
 
-# Where a new thread can start (launch.targets), as said in the notch.
-TARGET_NAMES = {"claude-app": "Claude app", "claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI"}
 # How each agent is called when a conversation has no title of its own.
 AGENT_TITLES = {"claude": "Claude Code", "cline": "Cline", "claude-desktop": "Claude Desktop", "vscode": "VS Code",
                 "chatgpt": "ChatGPT", "claude-web": "Claude", "gemini-web": "Gemini", "aistudio": "AI Studio",
@@ -275,6 +273,17 @@ def parse_new_thread(text: str) -> tuple[str, str] | None:
     return agent, prompt[:1].upper() + prompt[1:]
 
 
+def _new_target(agent: str) -> str:
+    """Where a dictated new thread starts: the agent it names; Claude (or none) means where you last worked."""
+    return "" if agent in ("", "claude") else agent
+
+
+def _voice_line(text: str) -> str:
+    """The `Voice summary:` line an agent ended its reply with, '' when it wrote none."""
+    m = re.search(r"voice summary:\s*(.+)", text or "", re.I)
+    return m.group(1).strip() if m else ""
+
+
 def parse_route(text: str) -> tuple[str, str] | None:
     """'Tell Codex to run the tests.' -> ('Codex', 'run the tests.'); None for anything else."""
     text = text.strip()
@@ -335,10 +344,6 @@ def spoken_number(words: set[str], most: int) -> int | None:
 _ALL = {"all", "everything", "everyone", "both", "tout", "tous", "toutes", "les deux"}
 
 
-def _tokens_label(n: int) -> str:
-    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{round(n / 1e3)}k" if n >= 1e3 else str(n)
-
-
 def _names(label: str) -> set[str]:
     return {w for w in _plain(label).split() if w not in _FILLER and len(w) > 1}
 
@@ -366,11 +371,9 @@ def match_option(text: str, options: list[str]) -> int | None:
             return i
     words = said.split()
     if len(words) <= 5:  # a short answer that names a position, not a sentence that happens to contain "one"
-        found = [n for n, keys in _ORDINALS.items() if n <= len(options) and any(k in words for k in keys)]
-        if len(found) > 1:  # "the second one": "one" is just a filler word there
-            found = [n for n in found if not any(w in words for w in ("one", "un", "une")) or n != 1]
-        if found:
-            return found[0] - 1
+        n = spoken_number(set(words), len(options))
+        if n:
+            return n - 1
     return None
 
 
@@ -474,6 +477,9 @@ class Daemon:
         self._estimator = usage.Estimator(self._ledger, self.state.get("claude_usage"))
         self._claude_est: dict[str, dict] = {}
         self._claude_asked = 0.0  # the last time we ran `claude -p /usage`
+        self._claude_seen = 0.0  # ~/.claude.json's mtime when last read
+        self._codex_seen: tuple = (None, 0.0)  # Codex's latest log and its mtime when last read
+        self._limits_lock = threading.Lock()
         self._limits_refreshing = False
         self._usage_line = ""  # Claude Code's status line: "on" (ours), "off" or "custom" (yours); cached with agents
         # The last finished turn's outcome (files changed, tests), shown for a while in the notch.
@@ -618,8 +624,6 @@ class Daemon:
     def play_chime(self, kind: str) -> None:
         if self.muted:
             return
-        import sounddevice as sd
-
         try:
             audio, rate = chime_audio(kind, float(self.config.get("chime", {}).get("volume", 0.35)))
             threading.Thread(target=_play_apart, args=(audio, rate), daemon=True).start()
@@ -716,7 +720,7 @@ class Daemon:
                 winfocus.focus(hwnd)
         else:
             pyperclip.copy(label or text)
-            _beep(300, 150)
+            _beep(300)
             if title:  # let you click it yourself
                 winfocus.focus(hwnd)
                 claudeapp.select_session(hwnd, title)
@@ -861,24 +865,24 @@ class Daemon:
             log.info("no window known for %r: message not sent", title)
             self._show_banner(f"I don't know where {title} is yet: send it one message from its window first.",
                               session, "", kind="you", tag="not sent")
-            _beep(300, 150)
+            _beep(300)
             return
         self._heard(message, lang, session, tag="shortcut" if expanded else "sent")
         self._paste(message, hwnd, submit=True, session=session)
 
     # -- handoff ----------------------------------------------------------------
-    def _grab_selection(self) -> str:
-        """The text selected in the app in front (copied, then the clipboard put back)."""
+    def _copy_selection(self, settle: float = 0.25) -> tuple[str, str]:
+        """(the text selected in the app in front, what the clipboard held): copied, then the clipboard put back."""
         import pyperclip
 
         self._wait_modifiers_released()
         previous = pyperclip.paste()
         pyperclip.copy("")
         keys.copy()
-        time.sleep(0.25)
+        time.sleep(settle)
         selected = pyperclip.paste()
         pyperclip.copy(previous)
-        return selected.strip()
+        return selected, previous
 
     def handoff(self, name: str, message: str, lang: str) -> None:
         """'Send this to Codex': the selection (or the screenshot on the clipboard) goes to that conversation.
@@ -888,9 +892,9 @@ class Daemon:
         session = self._find_thread(name)
         if session is None:
             self._show_banner(f"I don't know a thread called {name}.", "", "", kind="note", tag="not sent")
-            _beep(300, 150)
+            _beep(300)
             return
-        content = self._grab_selection()
+        content = self._copy_selection()[0].strip()
         if not content:
             png = winfocus.clipboard_png()
             if png:
@@ -905,7 +909,7 @@ class Daemon:
         if not content:
             self._show_banner(f"Nothing to send to {title}: select some text or copy a screenshot first.", "", "",
                               kind="note", tag="not sent")
-            _beep(300, 150)
+            _beep(300)
             return
         message, _ = self._expand(message) if message else ("", False)
         text = f"{message}\n\n{content}" if message else content
@@ -1056,7 +1060,7 @@ class Daemon:
         prompt = prompt.strip()
         if not prompt or not at:
             raise ValueError("a prompt and a time")
-        title = (f"New thread ({TARGET_NAMES.get((new or {}).get('target', ''), 'where you last worked')})"
+        title = (f"New thread ({launch.LABELS.get((new or {}).get('target', ''), 'where you last worked')})"
                  if new is not None else self._title(session, self.threads.get(session, {}).get("source", "")))
         item = {"id": max((s["id"] for s in self._schedules), default=0) + 1, "at": int(at), "prompt": prompt[:4000],
                 "session": session, "new": new, "repeat": repeat if repeat in schedule.REPEATS else "",
@@ -1086,7 +1090,7 @@ class Daemon:
         at, rest = timed
         new = parse_new_thread(rest)
         if new:
-            self.add_schedule(new[1], at, new={"target": {"claude": "", "": ""}.get(new[0], new[0]), "cwd": ""})
+            self.add_schedule(new[1], at, new={"target": _new_target(new[0]), "cwd": ""})
             return True
         routed = self._routed(rest)
         if routed:
@@ -1164,7 +1168,7 @@ class Daemon:
         threads = sorted(day["threads"].items(), key=lambda kv: -kv[1]["turns"])
         lines = [f"{stats['turns']} turn{'s' if stats['turns'] != 1 else ''} in {stats['threads']} "
                  f"thread{'s' if stats['threads'] != 1 else ''}" +
-                 (f" · {_tokens_label(stats['tokens'])} tokens" if stats["tokens"] else "") + "."]
+                 (f" · {textclean.tokens_label(stats['tokens'])} tokens" if stats["tokens"] else "") + "."]
         for session, t in threads[:5]:
             title = self._title(session, t.get("source", "")) if session in self.threads else t.get("title") or "?"
             lines.append(f"{title} ({t['turns']}): {textclean.truncate(t['last'], 110) or 'done'}")
@@ -1175,7 +1179,7 @@ class Daemon:
         for source, windows in self._limits_status().items():
             parts = [f"{'5h' if k == 'five_hour' else 'week'} "
                      + (f"{'~' if w.get('est') else ''}{w['pct']}%" if w.get("pct") is not None
-                        else f"{_tokens_label(w.get('tokens', 0))} tokens") for k, w in sorted(windows.items())]
+                        else f"{textclean.tokens_label(w.get('tokens', 0))} tokens") for k, w in sorted(windows.items())]
             limits.append(f"{AGENT_TITLES.get(source, source.capitalize())} {', '.join(parts)}")
         if limits:
             lines.append("Limits: " + "; ".join(limits) + ".")
@@ -1353,6 +1357,9 @@ class Daemon:
         if not limits or at < self._limits_at.get(source, 0.0):
             return  # older than what we have (Claude's cache vs its status line)
         self._limits_at[source] = at
+        now = time.time()
+        # One window reported (a limit hit, a drop file): the other one still runs as it was.
+        limits = {**{k: v for k, v in (self.limits.get(source) or {}).items() if v.get("resets", 0) > now}, **limits}
         if limits == self.limits.get(source):
             return
         self.limits[source] = limits
@@ -1382,74 +1389,59 @@ class Daemon:
                                   kind="note", tag="limits")
 
     def _quota_watch(self) -> None:
-        """Codex writes its rate limits in its session logs, Claude caches its own: re-read them when they change."""
-        seen = (None, 0.0)
-        claude_seen = 0.0
-        claude_json = Path.home() / ".claude.json"
+        """Every minute: every agent's limits, re-read where they changed."""
         while True:
-            try:
-                self._ledger.refresh()  # first: a reading calibrates against the requests before it
-                mtime = claude_json.stat().st_mtime if claude_json.exists() else 0.0
-                if mtime != claude_seen:
-                    claude_seen = mtime
-                    fetched, found = quota.claude_cached(claude_json)
-                    if found:
-                        self._set_limits("claude", found, at=fetched)
-            except Exception:
-                log.exception("claude limits check failed")
-            try:
-                if self._ask_claude_usage():
-                    fetched, found = quota.claude_cached(claude_json)
-                    if found:
-                        claude_seen = claude_json.stat().st_mtime
-                        self._set_limits("claude", found, at=fetched)
-            except Exception:
-                log.exception("claude usage refresh failed")
-            try:
-                self._estimate_claude()
-            except Exception:
-                log.exception("claude usage estimate failed")
-            try:
-                self._read_usage_drops()
-            except Exception:
-                log.exception("usage folder check failed")
-            try:
-                path = quota.latest_codex_log()
-                if path is not None and (path, path.stat().st_mtime) != seen:
-                    seen = (path, path.stat().st_mtime)
-                    found = quota.codex_limits(path)
-                    if found:
-                        self._set_limits("codex", found)
-            except Exception:
-                log.exception("codex limits check failed")
+            self._read_limits()
             time.sleep(60)
 
     def refresh_limits(self) -> None:
         """The panel's ↻: ask Claude Code for its usage now, and re-read everything."""
         self._limits_refreshing = True
         try:
-            claude_json = Path.home() / ".claude.json"
-            if self._ask_claude_usage(force=True):
+            self._read_limits(force=True)
+        finally:
+            self._limits_refreshing = False
+
+    def _read_limits(self, force: bool = False) -> None:
+        """Claude's cache (fresh numbers asked of Claude Code when due, or now with `force`) and its estimate, the
+        usage folder, Codex's logs. One at a time: the minute's check and the refresh button share the ledger."""
+        with self._limits_lock:
+            for what, step in (("claude limits", lambda: self._read_claude(force)),
+                               ("claude usage estimate", self._estimate_claude),
+                               ("usage folder", self._read_usage_drops),
+                               ("codex limits", lambda: self._read_codex(force))):
+                try:
+                    step()
+                except Exception:
+                    log.exception("%s check failed", what)
+
+    def _read_claude(self, force: bool) -> None:
+        claude_json = Path.home() / ".claude.json"
+        self._ledger.refresh()  # first: a reading calibrates against the requests before it
+        for asked in (False, True):  # what's cached now, then (when due) what Claude Code fetches for us
+            if asked and not self._ask_claude_usage(force=force):
+                return
+            mtime = claude_json.stat().st_mtime if claude_json.exists() else 0.0
+            if mtime != self._claude_seen or asked:
+                self._claude_seen = mtime
                 fetched, found = quota.claude_cached(claude_json)
                 if found:
                     self._set_limits("claude", found, at=fetched)
-            self._estimate_claude()
-            self._read_usage_drops()
-            path = quota.latest_codex_log()
-            if path is not None:
-                found = quota.codex_limits(path)
-                if found:
-                    self._set_limits("codex", found)
-        except Exception:
-            log.exception("limits refresh failed")
-        finally:
-            self._limits_refreshing = False
+
+    def _read_codex(self, force: bool) -> None:
+        path = quota.latest_codex_log()
+        if path is None:
+            return
+        seen = (path, path.stat().st_mtime)
+        if seen != self._codex_seen or force:
+            self._codex_seen = seen
+            found = quota.codex_limits(path)
+            if found:
+                self._set_limits("codex", found)
 
     def _ask_claude_usage(self, now: float | None = None, force: bool = False) -> bool:
         """Have Claude Code fetch its own usage (`claude -p /usage`: a local command, no model request), which it
         saves to ~/.claude.json. Every few minutes while Claude is in use, and once at start."""
-        from agent_voice import launch
-
         now = time.time() if now is None else now
         minutes = float(self.config.get("limits", {}).get("claude_refresh_minutes", 10) or 0)
         if not force:
@@ -1642,12 +1634,10 @@ class Daemon:
             turn["result"] = result
         summary = text.strip() or self._turn_text(session)
         self._event("done", session, source, textclean.clean(summary) if summary else "")
-        said_line = re.search(r"voice summary:\s*(.+)", summary or "", re.I)
+        said = _voice_line(summary)  # its own one-line summary, if it wrote one
         full = textclean.clean(strip_summary(self._turn_text(session) or summary or ""))
-        self._push("done", self._title(session, source),
-                   said_line.group(1).strip() if said_line else full, full=full)
-        said = re.search(r"voice summary:\s*(.+)", summary or "", re.I)  # its own one-line summary, if it wrote one
-        self._log_turn(session, source, said.group(1).strip() if said else textclean.clean(summary) if summary else "")
+        self._push("done", self._title(session, source), said or full, full=full)
+        self._log_turn(session, source, said or (textclean.clean(summary) if summary else ""))
         if result and (result.get("files") or result.get("tests")):
             title = self._title(session, source)
             self.last_result = {"session": session, "title": title, "color": thread_color(session or title),
@@ -1757,8 +1747,6 @@ class Daemon:
 
     def new_targets(self) -> list[str]:
         """Where a new thread can start: the desktop app (if open), then the agent CLIs found. Cached 30 s."""
-        from agent_voice import launch
-
         if time.time() - self._targets_at > 30:
             self._targets, self._targets_at = launch.targets(bool(self._desktop_window())), time.time()
         return self._targets
@@ -1773,7 +1761,7 @@ class Daemon:
 
     def new_thread(self, prompt: str, target: str = "", cwd: str = "", lang: str = "") -> bool:
         """Start a new conversation with `prompt`: in the Claude desktop app, or a CLI agent in a new terminal tab."""
-        from agent_voice import lang as langmod, launch
+        from agent_voice import lang as langmod
 
         prompt = prompt.strip()
         if not prompt:
@@ -1804,7 +1792,7 @@ class Daemon:
             import pyperclip
 
             pyperclip.copy(prompt)
-            _beep(300, 150)
+            _beep(300)
         return ok
 
     def listen_new_thread(self, target: str = "", cwd: str = "") -> None:
@@ -2053,6 +2041,14 @@ class Daemon:
             except Exception:
                 log.exception("ducking failed")
 
+    def release_audio(self) -> None:
+        """Shutting down: other apps get their volume back now (and a paused video plays), not at the next start."""
+        if self._ducker is not None:
+            try:
+                self._ducker.restore()
+            except Exception:
+                log.exception("ducking restore failed")
+
     def _duck_tick(self, now: float) -> None:
         """Every 100 ms: speaking -> others lowered; you speak -> silenced (a video paused); done -> as they were."""
         cfg = self.config.get("ducking", {})
@@ -2117,7 +2113,7 @@ class Daemon:
         self._mic_phase = "waiting"
         self.speaker.hold()
         try:
-            _beep(700, 70)
+            _beep(700)
             time.sleep(0.15)  # don't record our own beep
             audio = listen_for_speech(
                 float(cfg["window_seconds"]),
@@ -2129,9 +2125,9 @@ class Daemon:
             )
             if audio is None or self._listen_cancel.is_set():
                 log.info("auto-listen: nothing heard")
-                _beep(400, 60)
+                _beep(400)
                 return
-            _beep(520, 60)
+            _beep(520)
             self._mic_phase = "transcribing"
             text, lang = self.transcriber.transcribe(audio)
             log.info("auto-listen lang=%s chars=%d", lang, len(text))
@@ -2141,30 +2137,32 @@ class Daemon:
                 pending, self._new_pending = self._new_pending, {}
                 self.new_thread(text, pending.get("target", ""), pending.get("cwd", ""), lang)
                 return
-            answering = (permission is not None and permission is self.permission) or (
-                question is not None and question is self.question)
-            routed = None if answering or match_command(text) else self._routed(text)
+            approving = permission is not None and permission is self.permission
+            answering = approving or (question is not None and question is self.question)
+            command = None if answering else match_command(text)
+            routed = None if answering or command else self._routed(text)
             if routed and routed[0] != session:
                 self._send_to(routed[0], routed[1], lang)  # "Tell Codex to ...": goes to Codex, not here
                 return
-            tag = ("answer" if answering else "command" if match_command(text)
+            tag = ("answer" if answering else "command" if command
                    else "sent" if self.hands_free or force_submit else "typed")
             self._heard(text, lang, session, tag=tag)
-            if permission is not None and permission is self.permission:
+            full, expanded = self._expand(text)
+            rest = strip_wake(text, list(self.config.get("wake_word", {}).get("phrases") or [])) if self.wake else None
+            if approving:
                 if not self._voice_approval(text):
                     log.info("permission answer unclear: %r", text)
-                    _beep(300, 150)
-            elif question is not None and question is self.question:
+                    _beep(300)
+            elif answering:
                 self.answer(text=text)
-            elif match_command(text):
-                self._run_command(match_command(text), session)
+            elif command:
+                self._run_command(command, session)
             elif session in self._limited and match_resume(text):
                 self.set_resume(session)
-            elif self._expand(text)[1]:  # a saved prompt's name: its full text, sent
-                self._paste(self._expand(text)[0], target, submit=True, session=session)
-            elif self.wake and strip_wake(text, list(self.config.get("wake_word", {}).get("phrases") or [])) is not None:
+            elif expanded:  # a saved prompt's name: its full text, sent
+                self._paste(full, target, submit=True, session=session)
+            elif rest is not None:
                 # "Hey Claude, ..." while the reply mic was open: the rest is the reply; the phrase alone is nothing.
-                rest = strip_wake(text, list(self.config.get("wake_word", {}).get("phrases") or []))
                 if rest.strip(" .!?,"):
                     self._paste(rest, target, submit=self.hands_free or force_submit, session=session)
                 else:
@@ -2187,7 +2185,7 @@ class Daemon:
         elif command in ("slower", "faster"):
             self.set_speed(self.speed_x + (0.25 if command == "faster" else -0.25))
         else:
-            _beep(400, 60)
+            _beep(400)
 
     def _paste(self, text: str, hwnd: int = 0, submit: bool = False, session: str = "") -> None:
         import pyperclip
@@ -2209,13 +2207,13 @@ class Daemon:
             # Don't type into whatever app is in front: leave the text on the clipboard instead.
             log.warning("could not focus target window %s (%s); text left on clipboard", hwnd, winfocus.title(hwnd))
             pyperclip.copy(text)
-            _beep(300, 150)
+            _beep(300)
             return
         # Desktop app: several conversations share one window; open the one this reply answers.
         if title and not claudeapp.select_session(hwnd, title):
             log.warning("could not open conversation %r; text left on clipboard", title)
             pyperclip.copy(text)
-            _beep(300, 150)
+            _beep(300)
             return
         time.sleep(0.1)
         # The text stays on the clipboard afterwards, so a reply that landed in the wrong place
@@ -2379,7 +2377,7 @@ class Daemon:
     def answer_permission(self, perm_id: int, allow: bool) -> None:
         self._perm_decisions[perm_id] = "allow" if allow else "deny"
         log.info("permission #%d: %s", perm_id, "allowed" if allow else "denied")
-        _beep(880 if allow else 440, 80)
+        _beep(880 if allow else 440)
         self._drop_permission(perm_id)
 
     def permission_state(self, perm_id: int, cancel: bool = False) -> str:
@@ -2532,13 +2530,11 @@ class Daemon:
                 continue
             try:
                 if listener is None:
-                    from agent_voice.stt import Transcriber
                     from agent_voice.wakeword import WakeListener
 
                     listener = WakeListener()
                     # Load (first time: download) the fallback model now, not on the first "Hey Claude".
-                    self._wake_transcriber = Transcriber({"stt": {**self.config["stt"], "model": "tiny"}})
-                    threading.Thread(target=self._wake_transcriber.warm_up, daemon=True).start()
+                    threading.Thread(target=self._wake_model().warm_up, daemon=True).start()
                 self._wake_cancel.clear()
                 heard = listener.listen(self._wake_cancel)
             except Exception:
@@ -2551,12 +2547,8 @@ class Daemon:
             if not spotted:
                 # A short phrase the spotter missed (an accent it doesn't know): the smallest Whisper
                 # decides, ~0.2 s of CPU. Only a confirmed wake word goes on to the accurate model.
-                if self._wake_transcriber is None:
-                    from agent_voice.stt import Transcriber
-
-                    self._wake_transcriber = Transcriber({"stt": {**self.config["stt"], "model": "tiny"}})
                 # The wake phrase is English: say so, a 1-second clip is easily taken for another language.
-                quick, _ = self._wake_transcriber.transcribe(audio, language="en")
+                quick, _ = self._wake_model().transcribe(audio, language="en")
                 woke = strip_wake(quick, phrases) is not None
                 log.info("wake fallback heard %r: %s", quick[:60], "wake" if woke else "no")
                 if not woke:
@@ -2589,7 +2581,7 @@ class Daemon:
                 continue
             new = parse_new_thread(command)
             if new:  # "Hey Claude, new thread: add a health check"
-                self.new_thread(new[1], {"claude": "", "": ""}.get(new[0], new[0]), lang=lang)
+                self.new_thread(new[1], _new_target(new[0]), lang=lang)
                 continue
             routed = self._routed(command)
             if routed:  # "Hey Claude, tell the notch redesign to run the tests"
@@ -2598,18 +2590,26 @@ class Daemon:
             full, expanded = self._expand(command)
             if expanded:  # "Hey Claude, commit this": a saved prompt, to the current thread
                 self._heard(full, lang, session, tag="shortcut")
-                _beep(880, 60)
+                _beep(880)
                 self._paste(full, self._hwnd_for(session), submit=True, session=session)
             elif len(command.split()) >= 3:
                 self._heard(command, lang, session, tag="sent")
-                _beep(880, 60)
+                _beep(880)
                 self._paste(command, self._hwnd_for(session), submit=True, session=session)
             else:
                 # Just "Hey Claude": open the mic for the prompt, and send it.
-                _beep(880, 60)
+                _beep(880)
                 self._reply_session = session
                 self._force_submit = True
                 self._auto_listen()
+
+    def _wake_model(self):
+        """Whisper tiny, made once: it confirms the short phrases the keyword spotter missed."""
+        if self._wake_transcriber is None:
+            from agent_voice.stt import Transcriber
+
+            self._wake_transcriber = Transcriber({"stt": {**self.config["stt"], "model": "tiny"}})
+        return self._wake_transcriber
 
     def _question_status(self) -> dict | None:
         q = self.question
@@ -2710,15 +2710,7 @@ class Daemon:
 
     def _read_selection(self) -> None:
         """Speak the selected text (any app, e.g. Antigravity), or the clipboard if nothing is selected."""
-        import pyperclip
-
-        self._wait_modifiers_released()
-        previous = pyperclip.paste()
-        pyperclip.copy("")
-        keys.copy()
-        time.sleep(0.2)
-        selected = pyperclip.paste()
-        pyperclip.copy(previous)
+        selected, previous = self._copy_selection(0.2)
         text = selected or previous
         if text.strip():
             self.speaker.stop()
@@ -2761,11 +2753,11 @@ class Daemon:
             rec = Recorder(on_level=self._set_level)
             rec.start()
             self._mic_phase = "recording"
-            _beep(660, 60)
+            _beep(660)
             # Safety net: a lost "release" (widget closed mid-press) must not record forever.
             self._ptt_release.wait(timeout=600)
             audio = rec.stop()
-            _beep(520, 60)
+            _beep(520)
             self._mic_phase = "transcribing"
             text, lang = self.transcriber.transcribe(audio)
             log.info("dictation lang=%s chars=%d", lang, len(text))
@@ -2801,6 +2793,16 @@ def status_tag(st: dict) -> str:
         shown["banner"] = {k: v for k, v in shown["banner"].items() if k != "age"}
     shown["threads"] = [{**t, "ago": t["ago"] // 60} for t in shown.get("threads") or []]  # "N min ago"
     return f"{zlib.crc32(json.dumps(shown, sort_keys=True, default=str).encode()):08x}"
+
+
+# On/off switches: the endpoint -> the daemon's property (set with set_<name>).
+TOGGLES = {"/summary": "summary", "/handsfree": "hands_free", "/chime": "chime", "/approvals": "approvals",
+           "/apps": "desktop_apps", "/wake": "wake", "/mute": "muted"}
+
+
+def _background(target, *args, **kwargs) -> None:
+    """Run it off the request thread: the caller gets its answer at once."""
+    threading.Thread(target=target, args=args, kwargs=kwargs, daemon=True).start()
 
 
 def _int(value) -> int:
@@ -2861,7 +2863,11 @@ def _handler(daemon: Daemon):
                     return self._json(200, {**st, "tag": status_tag(st)})
                 # Long poll: answer as soon as something changes (or after `timeout`), so a widget at
                 # rest makes one request every 20 s instead of several a second.
-                wait, end = query["wait"][0], time.time() + min(30.0, float(query.get("timeout", ["20"])[0]))
+                try:
+                    timeout = min(30.0, max(0.0, float(query.get("timeout", ["20"])[0])))
+                except ValueError:
+                    timeout = 20.0
+                wait, end = query["wait"][0], time.time() + timeout
                 while True:
                     st = daemon.status()
                     tag = status_tag(st)
@@ -2904,14 +2910,14 @@ def _handler(daemon: Daemon):
             if self.path == "/attach":
                 paths = [str(p) for p in data.get("paths") or []][:20]
                 args = (paths, str(data.get("text") or "")[:20000], str(data.get("session") or ""))
-                threading.Thread(target=daemon.attach, args=args, daemon=True).start()
+                _background(daemon.attach, *args)
                 return self._json(200, {"ok": True})
             if self.path == "/reply":
                 daemon.reply_now(str(data.get("session") or "") or None)
                 return self._json(200, {"ok": True})
             if self.path == "/send":
                 args = (str(data.get("session") or ""), str(data.get("text") or "")[:20000])
-                threading.Thread(target=daemon.send_text, args=args, daemon=True).start()
+                _background(daemon.send_text, *args)
                 return self._json(200, {"ok": True})
             if self.path == "/new_thread":
                 target, cwd = str(data.get("target") or ""), str(data.get("cwd") or "")
@@ -2919,7 +2925,7 @@ def _handler(daemon: Daemon):
                     daemon.listen_new_thread(target, cwd)
                 else:
                     args = (str(data.get("text") or "")[:20000], target, cwd)
-                    threading.Thread(target=daemon.new_thread, args=args, daemon=True).start()
+                    _background(daemon.new_thread, *args)
                 return self._json(200, {"ok": True})
             if self.path == "/listen_cancel":  # typing a reply: the open mic would hear the keyboard
                 daemon.cancel_listen()
@@ -2977,23 +2983,23 @@ def _handler(daemon: Daemon):
                 daemon.widget_opens += 1
                 return self._json(200, {"ok": True})
             if self.path == "/limits_refresh":
-                threading.Thread(target=daemon.refresh_limits, daemon=True).start()
+                _background(daemon.refresh_limits)
                 return self._json(200, {"ok": True})
             if self.path == "/usage_line":
-                threading.Thread(target=daemon.usage_line, args=(bool(data.get("enable", True)),), daemon=True).start()
+                _background(daemon.usage_line, bool(data.get("enable", True)))
                 return self._json(200, {"ok": True})
             if self.path == "/install":
                 agent = str(data.get("agent") or "")
                 if agent not in install.INSTALLERS:
                     return self._json(400, {"error": "unknown agent"})
-                threading.Thread(target=daemon.install_agent, args=(agent,), daemon=True).start()
+                _background(daemon.install_agent, agent)
                 return self._json(200, {"ok": True})
             if self.path == "/replay":
                 session = str(data.get("session") or "")
                 daemon.jobs.put(lambda: daemon.replay(session))
                 return self._json(200, {"ok": True})
             if self.path == "/read":
-                threading.Thread(target=daemon._read_selection, daemon=True).start()
+                _background(daemon._read_selection)
                 return self._json(200, {"ok": True})
             if self.path == "/prompt":
                 daemon.prompt_submitted(_int(data.get("hwnd")), str(data.get("session") or ""),
@@ -3024,18 +3030,11 @@ def _handler(daemon: Daemon):
                 except (TypeError, ValueError):
                     return self._json(400, {"error": "value must be a number"})
                 return self._json(200, {"speed_x": daemon.speed_x})
-            if self.path == "/summary":
+            if self.path in TOGGLES:  # {"mode": "on" | "off" | "toggle"} -> {its name: on?}
+                name = TOGGLES[self.path]
                 mode = data.get("mode", "toggle")
-                daemon.set_summary(not daemon.summary if mode == "toggle" else mode == "on")
-                return self._json(200, {"summary": daemon.summary})
-            if self.path == "/handsfree":
-                mode = data.get("mode", "toggle")
-                daemon.set_hands_free(not daemon.hands_free if mode == "toggle" else mode == "on")
-                return self._json(200, {"hands_free": daemon.hands_free})
-            if self.path == "/chime":
-                mode = data.get("mode", "toggle")
-                daemon.set_chime(not daemon.chime if mode == "toggle" else mode == "on")
-                return self._json(200, {"chime": daemon.chime})
+                getattr(daemon, f"set_{name}")(not getattr(daemon, name) if mode == "toggle" else mode == "on")
+                return self._json(200, {name: getattr(daemon, name)})
             if self.path == "/notify":
                 # Queued behind speech, so a question is never cleared by an older progress message.
                 kind = str(data.get("kind", "attention"))
@@ -3047,41 +3046,25 @@ def _handler(daemon: Daemon):
                                                     str(data.get("source") or "claude"))
                 return self._json(200, {"id": perm_id})
             if self.path == "/permission_state":
-                decision = daemon.permission_state(int(data.get("id") or 0), cancel=bool(data.get("cancel")))
+                decision = daemon.permission_state(_int(data.get("id")), cancel=bool(data.get("cancel")))
                 return self._json(200, {"decision": decision})
             if self.path == "/permission_answer":
-                daemon.answer_permission(int(data.get("id") or 0), bool(data.get("allow")))
+                daemon.answer_permission(_int(data.get("id")), bool(data.get("allow")))
                 return self._json(200, {"ok": True})
             if self.path == "/open_thread":
-                threading.Thread(target=daemon.open_thread, args=(str(data.get("session") or ""),), daemon=True).start()
+                _background(daemon.open_thread, str(data.get("session") or ""))
                 return self._json(200, {"ok": True})
-            if self.path == "/approvals":
-                mode = data.get("mode", "toggle")
-                daemon.set_approvals(not daemon.approvals if mode == "toggle" else mode == "on")
-                return self._json(200, {"approvals": daemon.approvals})
-            if self.path == "/apps":
-                mode = data.get("mode", "toggle")
-                daemon.set_desktop_apps(not daemon.desktop_apps if mode == "toggle" else mode == "on")
-                return self._json(200, {"desktop_apps": daemon.desktop_apps})
-            if self.path == "/wake":
-                mode = data.get("mode", "toggle")
-                daemon.set_wake(not daemon.wake if mode == "toggle" else mode == "on")
-                return self._json(200, {"wake": daemon.wake})
             if self.path == "/answer":
                 index = data.get("index")
                 kwargs = {"index": int(index)} if isinstance(index, int) else {"text": str(data.get("text") or "")}
-                threading.Thread(target=daemon.answer, kwargs=kwargs, daemon=True).start()
+                _background(daemon.answer, **kwargs)
                 return self._json(200, {"ok": True})
-            if self.path == "/mute":
-                mode = data.get("mode", "toggle")
-                daemon.set_muted(not daemon.muted if mode == "toggle" else mode == "on")
-                return self._json(200, {"muted": daemon.muted})
             if self.path == "/update":
                 threading.Thread(target=daemon.install_update, name="update-install", daemon=True).start()
                 return self._json(200, {"ok": True})
             if self.path == "/shutdown":
                 self._json(200, {"ok": True})
-                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                _background(self.server.shutdown)
                 return None
             self._json(404, {"error": "not found"})
 
@@ -3118,6 +3101,9 @@ def serve(foreground: bool = True) -> int:
         log.info("another agent-voice daemon is running (pid %s): exiting", os.getpid())
         return 1
     config = load_config()
+    if config["host"] not in LOOPBACK:
+        log.warning("host %r ignored: the API only ever listens on 127.0.0.1", config["host"])
+        config["host"] = "127.0.0.1"
     try:
         httpd = _Server((config["host"], int(config["port"])), None)
     except OSError:
@@ -3137,6 +3123,7 @@ def serve(foreground: bool = True) -> int:
         pass
     finally:
         httpd.server_close()
+        daemon.release_audio()
         try:
             keys.unhook_all()
         except Exception:

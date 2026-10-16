@@ -19,6 +19,26 @@ _LEAD = re.compile(
     r"minutes?))[\s,:]+(?P<rest>.+)$", re.I | re.S)
 
 
+def clock_hour(hour: int, ap: str) -> int:
+    """'3' + 'pm' -> 15, '12' + 'am' -> 0; a 24-hour clock stays as it is."""
+    ap = (ap or "").lower().replace(".", "")
+    if ap == "pm" and hour < 12:
+        return hour + 12
+    if ap == "am" and hour == 12:
+        return 0
+    return hour
+
+
+def next_at(hour: int, minute: int, now: float) -> float | None:
+    """The next time the clock shows hour:minute (today, or tomorrow once it's past); None if it isn't a time."""
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    when = datetime.fromtimestamp(now).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if when.timestamp() <= now:
+        when += timedelta(days=1)
+    return when.timestamp()
+
+
 def parse_when(text: str, now: float) -> float | None:
     """The moment `text` names, as epoch seconds (always in the future); None when it isn't a time."""
     said = " ".join(text.lower().replace("’", "'").split()).strip(" .,")
@@ -40,20 +60,12 @@ def parse_when(text: str, now: float) -> float | None:
         if not m:
             return None
         day = day or ("tomorrow" if (m["day"] or "").lower() in ("tomorrow", "demain") else "")
-        hour, minute = int(m["h"]), int(m["m"] or 0)
-        ap = (m["ap"] or "").lower().replace(".", "")
-        if ap == "pm" and hour < 12:
-            hour += 12
-        elif ap == "am" and hour == 12:
-            hour = 0
-    if hour > 23 or minute > 59:
+        hour, minute = clock_hour(int(m["h"]), m["ap"]), int(m["m"] or 0)
+    if day != "tomorrow":
+        return next_at(hour, minute, now)  # "at 9" said at 10: tomorrow
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
         return None
-    when = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if day == "tomorrow":
-        when += timedelta(days=1)
-    elif when.timestamp() <= now:
-        when += timedelta(days=1)  # "at 9" said at 10: tomorrow
-    return when.timestamp()
+    return (base.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(days=1)).timestamp()
 
 
 def split_when(text: str, now: float) -> tuple[float, str] | None:

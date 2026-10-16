@@ -364,3 +364,10 @@ def test_phone_card_folds_to_one_line(app, monkeypatch):
     w.grab()
     w._activate("phone:fold")
     assert not w.phone_folded and "phone:new" in w._rects()
+
+
+def test_button_tooltips_explain_once(app):
+    w = _widget({"phase": "idle", "threads": []})
+    assert w._tooltip("wake").startswith("Hey Claude · wake word\nHey Claude: while idle")  # its explanation shows
+    reply = w._tooltip("reply")
+    assert reply.count("Reply now") == 1  # the name once, with its shortcut

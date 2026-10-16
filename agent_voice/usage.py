@@ -9,9 +9,11 @@ one percent is worth; in between, the percentage is estimated. Read-only, nothin
 from __future__ import annotations
 
 import json
+import threading
 import time
-from datetime import datetime
 from pathlib import Path
+
+from agent_voice.quota import _stamp
 
 SPANS = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
 # Relative API prices per million tokens (input, output, cache write, cache read): only the ratios matter, the
@@ -29,13 +31,6 @@ def cost(model: str, usage: dict) -> float:
     return sum(n * p for n, p in zip(counts, prices)) / 1e6
 
 
-def _stamp(value) -> float:
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return 0.0
-
-
 class Ledger:
     """Every Claude request of the last nine days: (time, cost, new tokens). Files are read once, then only their end."""
 
@@ -44,55 +39,57 @@ class Ledger:
         self.items: list[tuple[float, float, int]] = []
         self._offsets: dict[Path, int] = {}
         self._seen: set[str] = set()
+        self._lock = threading.Lock()  # the minute's check and the panel's refresh button can run at once
 
     def refresh(self, now: float | None = None) -> int:
         """Read what was added since last time; returns how many requests were new."""
         now = time.time() if now is None else now
         if not self.root.is_dir():
             return 0
-        added = 0
-        for path in self.root.rglob("*.jsonl"):
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            if now - stat.st_mtime > KEEP or stat.st_size <= self._offsets.get(path, 0):
-                continue
-            added += self._read(path, self._offsets.get(path, 0), now)
-            self._offsets[path] = stat.st_size
-        if added:
-            self.items.sort()
-            cut = now - KEEP
-            self.items = [i for i in self.items if i[0] >= cut]
-        return added
+        with self._lock:
+            added = 0
+            for path in self.root.rglob("*.jsonl"):
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                if now - stat.st_mtime > KEEP or stat.st_size <= self._offsets.get(path, 0):
+                    continue
+                count, self._offsets[path] = self._read(path, self._offsets.get(path, 0), now)
+                added += count
+            if added:
+                self.items = sorted(i for i in self.items if i[0] >= now - KEEP)
+            return added
 
-    def _read(self, path: Path, offset: int, now: float) -> int:
-        added = 0
+    def _read(self, path: Path, offset: int, now: float) -> tuple[int, int]:
+        """(requests added, where to start next time): a line still being written is read once it's complete."""
         with path.open("rb") as f:
             f.seek(offset)
-            for raw in f:
-                if b'"usage"' not in raw or b'"assistant"' not in raw:
-                    continue  # most lines are tool results and prompts: skip them unparsed
-                try:
-                    entry = json.loads(raw)
-                except ValueError:
-                    continue
-                message = entry.get("message") if isinstance(entry, dict) else None
-                usage = message.get("usage") if isinstance(message, dict) else None
-                if entry.get("type") != "assistant" or not isinstance(usage, dict):
-                    continue
-                key = str(message.get("id") or entry.get("requestId") or entry.get("uuid") or "")
-                if not key or key in self._seen:
-                    continue  # one request is written as several entries (one per content block)
-                at = _stamp(entry.get("timestamp"))
-                if not at or now - at > KEEP:
-                    continue
-                self._seen.add(key)
-                tokens = sum(int(usage.get(k) or 0) for k in
-                             ("input_tokens", "output_tokens", "cache_creation_input_tokens"))
-                self.items.append((at, cost(str(message.get("model") or ""), usage), tokens))
-                added += 1
-        return added
+            data = f.read()
+        end = data.rfind(b"\n") + 1
+        added = 0
+        for raw in data[:end].splitlines():
+            if b'"usage"' not in raw or b'"assistant"' not in raw:
+                continue  # most lines are tool results and prompts: skip them unparsed
+            try:
+                entry = json.loads(raw)
+            except ValueError:
+                continue
+            message = entry.get("message") if isinstance(entry, dict) else None
+            usage = message.get("usage") if isinstance(message, dict) else None
+            if entry.get("type") != "assistant" or not isinstance(usage, dict):
+                continue
+            key = str(message.get("id") or entry.get("requestId") or entry.get("uuid") or "")
+            if not key or key in self._seen:
+                continue  # one request is written as several entries (one per content block)
+            at = _stamp(entry.get("timestamp"))
+            if not at or now - at > KEEP:
+                continue
+            self._seen.add(key)
+            tokens = sum(int(usage.get(k) or 0) for k in ("input_tokens", "output_tokens", "cache_creation_input_tokens"))
+            self.items.append((at, cost(str(message.get("model") or ""), usage), tokens))
+            added += 1
+        return added, offset + end
 
     def window(self, start: float, end: float) -> tuple[float, int]:
         """(cost, new tokens) of the requests in [start, end)."""

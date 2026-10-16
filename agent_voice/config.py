@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
+LOOPBACK = ("127.0.0.1", "localhost")  # the only addresses the local API listens on
 HOME = Path(os.environ.get("AGENT_VOICE_HOME", Path.home() / ".agent-voice"))
 CONFIG_PATH = HOME / "config.json"
 STATE_PATH = HOME / "state.json"
@@ -124,7 +128,7 @@ DEFAULTS: dict = {
 
 
 def _merge(base: dict, override: dict) -> dict:
-    out = dict(base)
+    out = copy.deepcopy(base)  # nested defaults are never shared: a caller may change its copy
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(out.get(key), dict):
             out[key] = _merge(out[key], value)
@@ -139,7 +143,7 @@ def load_config() -> dict:
             return _merge(DEFAULTS, json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError):
             pass
-    return dict(DEFAULTS)
+    return copy.deepcopy(DEFAULTS)
 
 
 def write_default_config() -> Path:
@@ -156,8 +160,29 @@ def load_state() -> dict:
         return {}
 
 
+_SAVING = threading.Lock()
+
+
 def save_state(state: dict) -> None:
-    HOME.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    os.replace(tmp, STATE_PATH)
+    """Write state.json atomically. The daemon saves from several threads, and hooks read the file all the time:
+    one writer at a time, and a retry when Windows refuses the swap while a hook has the file open."""
+    with _SAVING:
+        HOME.mkdir(parents=True, exist_ok=True)
+        for _ in range(5):
+            try:
+                text = json.dumps(state, indent=2)
+                break
+            except RuntimeError:  # another thread changed it mid-way: take it again
+                time.sleep(0.01)
+        else:
+            return
+        tmp = STATE_PATH.with_suffix(".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        for attempt in range(10):
+            try:
+                os.replace(tmp, STATE_PATH)
+                return
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.02)

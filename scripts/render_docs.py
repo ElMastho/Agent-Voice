@@ -13,6 +13,7 @@ import math
 import os
 import random
 import sys
+import tempfile
 from pathlib import Path
 
 os.environ.setdefault("QT_SCALE_FACTOR", "2")  # crisp 2x renders
@@ -46,6 +47,7 @@ class Clock:
 CLOCK = Clock()
 W.time = CLOCK  # the widget animates from time.time(); drive it frame by frame
 W.SCREEN_W = 1920  # a laptop screen: the open notch takes a third of it
+W.POS_FILE = Path(tempfile.mkdtemp()) / "widget.json"  # never your own position, folded cards or hidden notch
 
 
 def backdrop(w: int, h: int, seed: int = 7) -> Image.Image:

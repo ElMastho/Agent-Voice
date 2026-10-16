@@ -110,7 +110,8 @@ _LIMIT_IN = re.compile(r"\b(?:in|dans)\s+(?P<n>\d+)\s*(?P<unit>h|hours?|heures?|
 def limit_reset(text: str, now: float | None = None) -> float | None:
     """None: not a usage-limit message. Otherwise when it resets (epoch seconds), or 0.0 when it doesn't say."""
     import time
-    from datetime import datetime, timedelta
+
+    from agent_voice.schedule import clock_hour, next_at
 
     text = " ".join((text or "").split())
     if not text or len(text) > 300:
@@ -122,24 +123,19 @@ def limit_reset(text: str, now: float | None = None) -> float | None:
         return float(epoch.group(1))
     now = time.time() if now is None else now
     m = _LIMIT_AT.search(text)
-    if m:
-        hour, minute = int(m["h"]), int(m["m"] or 0)
-        ap = (m["ap"] or "").lower().replace(".", "")
-        if ap == "pm" and hour < 12:
-            hour += 12
-        elif ap == "am" and hour == 12:
-            hour = 0
-        if hour < 24 and minute < 60:
-            base = datetime.fromtimestamp(now)
-            when = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if when.timestamp() <= now:
-                when += timedelta(days=1)
-            return when.timestamp()
+    at = next_at(clock_hour(int(m["h"]), m["ap"]), int(m["m"] or 0), now) if m else None
+    if at:
+        return at
     m = _LIMIT_IN.search(text)
     if m:
         n = int(m["n"])
         return now + n * (3600 if m["unit"].lower().startswith("h") else 60)
     return 0.0
+
+
+def tokens_label(n: int) -> str:
+    """1840000 -> '1.8M', 5200 -> '5k'."""
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{round(n / 1e3)}k" if n >= 1e3 else str(n)
 
 
 def expand_shortcut(text: str, shortcuts: dict) -> str | None:

@@ -104,7 +104,7 @@ def test_speech_waits_while_mic_is_held(monkeypatch):
     sp = tts.Speaker({"voices": {"en": "x"}, "default_lang": "en", "speed": 1.0, "volume": 1.0, "max_chars": 0})
     sp.hold()  # auto-listen
     sp.hold()  # push-to-talk on top
-    sp._audio_q.put((sp._gen, tts.np.zeros(10, dtype="float32"), 16000, "x"))
+    sp._audio_q.put((sp._gen, tts.np.zeros(10, dtype="float32"), 16000, "x", "A sentence."))
     time.sleep(0.2)
     sp.release()  # auto-listen ends, push-to-talk still recording
     time.sleep(0.2)
@@ -1081,12 +1081,12 @@ def test_shortcuts_and_handoff(daemon, monkeypatch):
     assert server.parse_handoff("give the screenshot to the notch redesign") == ("the notch redesign", "")
     assert server.parse_handoff("envoie ça à Codex") == ("Codex", "")
     assert server.parse_handoff("send the tests to Codex") is None
-    monkeypatch.setattr(daemon, "_grab_selection", lambda: "def broken(): pass")
+    monkeypatch.setattr(daemon, "_copy_selection", lambda: ("def broken(): pass", ""))
     daemon.handoff("codex", "", "en")
     assert pasted[-1] == ("def broken(): pass ", False)  # in its box, waiting for your question
     daemon.handoff("codex", "review this", "en")
     assert pasted[-1][1] and pasted[-1][0].startswith("Review the changes") and pasted[-1][0].endswith("pass")
-    monkeypatch.setattr(daemon, "_grab_selection", lambda: "")
+    monkeypatch.setattr(daemon, "_copy_selection", lambda: ("", ""))
     monkeypatch.setattr(server.winfocus, "clipboard_png", lambda: b"\x89PNG fake")
     monkeypatch.setattr(server, "HOME", daemon_home := __import__("pathlib").Path(__import__("tempfile").mkdtemp()))
     daemon.handoff("codex", "what's wrong here", "en")
@@ -1265,7 +1265,7 @@ def test_scheduled_prompts(daemon, monkeypatch):
     assert daemon.schedule_said("in 20 minutes, new thread with codex: add logging", "en", "")
     assert daemon._schedules[-1]["new"] == {"target": "codex", "cwd": ""}
     assert not daemon.schedule_said("run the tests", "en", "")
-    assert one["id"] == 1 and server.TARGET_NAMES["claude-app"] == "Claude app"
+    assert one["id"] == 1 and server.launch.LABELS["claude-app"] == "Claude app"
 
 
 def test_schedule_times():
@@ -1310,3 +1310,81 @@ def test_limits_refresh_now(daemon, monkeypatch):
     monkeypatch.setattr(daemon, "_estimate_claude", lambda now=None: None)
     daemon.refresh_limits()
     assert asked == [True] and daemon.status()["limits_refreshing"] is False
+
+
+def test_a_single_window_reading_keeps_the_other_one(daemon):
+    far = 4102444800
+    daemon._set_limits("claude", {"five_hour": {"pct": 40, "resets": far}, "seven_day": {"pct": 70, "resets": far}},
+                       at=100.0)
+    daemon._set_limits("claude", {"five_hour": {"pct": 100, "resets": far}}, at=200.0)  # a limit hit: one window
+    assert daemon.limits["claude"] == {"five_hour": {"pct": 100, "resets": far}, "seven_day": {"pct": 70, "resets": far}}
+
+
+def test_the_ledger_waits_for_a_line_to_be_complete(tmp_path):
+    import time
+
+    from agent_voice import usage
+
+    now = time.time()
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 60))
+    line = json.dumps({"type": "assistant", "timestamp": stamp, "message": {
+        "id": "m1", "model": "claude-opus-5-5", "usage": {"input_tokens": 10, "output_tokens": 5}}})
+    log = tmp_path / "p" / "a.jsonl"
+    log.parent.mkdir()
+    log.write_text(line[:40], encoding="utf-8")  # Claude Code is still writing it
+    ledger = usage.Ledger(tmp_path)
+    assert ledger.refresh(now) == 0
+    log.write_text(line + "\n", encoding="utf-8")
+    assert ledger.refresh(now) == 1 and ledger.items[0][2] == 15
+
+
+def test_state_is_saved_despite_a_reader_holding_the_file(tmp_path, monkeypatch):
+    from agent_voice import config
+
+    monkeypatch.setattr(config, "HOME", tmp_path)
+    monkeypatch.setattr(config, "STATE_PATH", tmp_path / "state.json")
+    real, calls = config.os.replace, []
+
+    def busy_once(src, dst):
+        calls.append(dst)
+        if len(calls) == 1:
+            raise PermissionError("a hook is reading it")
+        real(src, dst)
+
+    monkeypatch.setattr(config.os, "replace", busy_once)
+    config.save_state({"muted": True})
+    assert len(calls) == 2 and config.load_state() == {"muted": True}
+
+
+def test_config_copies_never_share_the_defaults():
+    from agent_voice import config
+
+    a = config.load_config()
+    a["auto_listen"]["enabled"] = "changed"
+    assert config.load_config()["auto_listen"]["enabled"] != "changed"
+
+
+def test_toggles_answer_with_their_new_value(daemon):
+    from agent_voice import server
+
+    assert server.TOGGLES["/mute"] == "muted" and all(hasattr(daemon, f"set_{n}") for n in server.TOGGLES.values())
+
+
+def test_screenshot_conversion_handles_24_and_32_bits():
+    import struct
+
+    from agent_voice import winfocus
+
+    for bits in (24, 32):
+        step = bits // 8
+        row = bytes([10, 20, 30, 0][:step] * 3)  # three pixels, blue-green-red(-alpha)
+        stride = (3 * step + 3) & ~3
+        pixels = (row + b"\0" * (stride - len(row))) * 2
+        dib = struct.pack("<IiiHHIIiiII", 40, 3, 2, 1, bits, 0, len(pixels), 0, 0, 0, 0) + pixels
+        png = winfocus.dib_to_png(dib)
+        assert png.startswith(b"\x89PNG")
+        import zlib
+
+        idat = png[png.index(b"IDAT") + 4:]
+        raw = zlib.decompress(idat[:struct.unpack(">I", png[png.index(b"IDAT") - 4:png.index(b"IDAT")])[0]])
+        assert raw == (b"\0" + bytes([30, 20, 10]) * 3) * 2  # RGB, row by row

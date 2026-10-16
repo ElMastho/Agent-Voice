@@ -214,17 +214,10 @@ def main(argv: list[str] | None = None) -> int:
         result = client.request("/speed", {"value": args.value}) if args.value else client.request("/status")
         print("not running" if result is None else f"speed {result['speed_x']:g}x")
         return 0 if result else 1
-    if args.cmd == "summary":
-        result = client.request("/summary", {"mode": args.mode})
-        print("not running" if result is None else f"summary {'on' if result['summary'] else 'off (full answers)'}")
-        return 0 if result else 1
-    if args.cmd == "handsfree":
-        result = client.request("/handsfree", {"mode": args.mode})
-        print("not running" if result is None else f"hands-free {'on' if result['hands_free'] else 'off'}")
-        return 0 if result else 1
-    if args.cmd == "wake":
-        result = client.request("/wake", {"mode": args.mode})
-        print("not running" if result is None else f"wake word {'on' if result['wake'] else 'off'}")
+    if args.cmd in SWITCHES:
+        path, field, name, off = SWITCHES[args.cmd]
+        result = client.request(path, {"mode": args.mode})
+        print("not running" if result is None else f"{name} {'on' if result[field] else off}")
         return 0 if result else 1
     if args.cmd == "schedule":
         return _schedule(args, client)
@@ -260,14 +253,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "new":
         result = client.request("/new_thread", {"text": " ".join(args.prompt), "target": args.agent, "cwd": args.cwd})
         print("not running" if result is None else "starting a new thread")
-        return 0 if result else 1
-    if args.cmd == "apps":
-        result = client.request("/apps", {"mode": args.mode})
-        print("not running" if result is None else f"desktop apps {'on' if result['desktop_apps'] else 'off'}")
-        return 0 if result else 1
-    if args.cmd == "chime":
-        result = client.request("/chime", {"mode": args.mode})
-        print("not running" if result is None else f"chime mode {'on' if result['chime'] else 'off (voice)'}")
         return 0 if result else 1
     if args.cmd in ("mute", "unmute"):
         mode = "off" if args.cmd == "unmute" else args.mode
@@ -329,6 +314,12 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
+# On/off commands: (endpoint, the field it answers with, what it's called, how "off" reads).
+SWITCHES = {"summary": ("/summary", "summary", "summary", "off (full answers)"),
+            "handsfree": ("/handsfree", "hands_free", "hands-free", "off"),
+            "wake": ("/wake", "wake", "wake word", "off"),
+            "apps": ("/apps", "desktop_apps", "desktop apps", "off"),
+            "chime": ("/chime", "chime", "chime mode", "off (voice)")}
 
 
 def quickstart() -> int:
@@ -352,7 +343,7 @@ def quickstart() -> int:
         print()
         ok = main(["start"]) == 0
         if ok:
-            print("\nThe widget is at the top right of your screen; right-click it for options.")
+            print("\nThe notch is at the top of your screen: hover it to bring it down, right-click it for options.")
             print("Start with Windows: `agent-voice autostart on` (or tray icon > Start with Windows).")
     except Exception as exc:  # show it instead of a window that closes on its own
         print(f"\nSomething went wrong: {exc}")

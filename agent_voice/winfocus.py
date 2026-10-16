@@ -320,13 +320,14 @@ def dib_to_png(dib: bytes) -> bytes:
     rows = range(abs(height) - 1, -1, -1) if height > 0 else range(abs(height))  # bottom-up unless negative
     step = bits // 8
     raw = bytearray()
+    rgb = bytearray(width * 3)
     for y in rows:
         line = dib[offset + y * stride: offset + y * stride + width * step]
+        if len(line) != width * step:
+            return b""  # cut short
+        rgb[0::3], rgb[1::3], rgb[2::3] = line[2::step], line[1::step], line[0::step]  # BGR(A) -> RGB, a row at once
         raw.append(0)
-        for x in range(0, len(line), step):
-            raw += bytes((line[x + 2], line[x + 1], line[x]))  # BGR(A) -> RGB
-    if len(raw) != abs(height) * (1 + width * 3):
-        return b""
+        raw += rgb
 
     def chunk(kind: bytes, data: bytes) -> bytes:
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)

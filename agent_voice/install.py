@@ -484,7 +484,9 @@ def _launch_agent(path: Path, enable: bool) -> str:
     if not enable:
         path.unlink(missing_ok=True)
         return f"removed {path}"
-    args = "".join(f"<string>{a}</string>" for a in self_command("serve", "--background"))
+    from xml.sax.saxutils import escape
+
+    args = "".join(f"<string>{escape(a)}</string>" for a in self_command("serve", "--background"))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
                     '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>'
@@ -520,10 +522,6 @@ def start_menu(enable: bool = True) -> str:
     subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], env=env, capture_output=True,
                    timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     return f"created {path}" if path.exists() else "couldn't create the Start menu entry"
-
-
-def has_start_menu() -> bool:
-    return os.name == "nt" and _start_menu_file().exists()
 
 
 def autostart(enable: bool = True) -> str:

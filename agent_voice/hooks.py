@@ -6,6 +6,7 @@ Every adapter must exit quickly and never fail loudly: a broken voice must not b
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import os
@@ -43,12 +44,26 @@ ATTENTION_TOOLS = {"ExitPlanMode"}
 _SUMMARY_LINE = re.compile(r"^[\s>*_`#-]*voice summary\s*:[\s*_`]*(.+?)[\s*_`]*$", re.I | re.M)
 
 
+@functools.lru_cache(maxsize=1)
+def _config() -> dict:
+    """The config, read once per hook (a hook is one short process: it can't change under it)."""
+    return load_config()
+
+
 def summary_enabled() -> bool:
     """Runtime toggle (state.json, written by the daemon) wins over the config default."""
     state = load_state()
     if "summary" in state:
         return bool(state["summary"])
-    return bool(load_config().get("summary", {}).get("enabled", True))
+    return bool(_config().get("summary", {}).get("enabled", True))
+
+
+def _spoken(text: str) -> str:
+    """What a final reply becomes when it's read out: its summary (when they're on), else all of it, minus the
+    summary line."""
+    if text.strip() and summary_enabled():
+        return summarize(text, int(_config().get("summary", {}).get("max_chars", 280)))
+    return strip_summary(text)
 
 
 def summarize(text: str, max_chars: int = 280) -> str:
@@ -121,14 +136,15 @@ def _is_real_user_prompt(entry: dict) -> bool:
     return isinstance(content, list) and not any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
 
 
+def _turn_start(entries: list[dict]) -> int:
+    """Where the current turn starts: just after the last real user prompt."""
+    return next((i + 1 for i in range(len(entries) - 1, -1, -1) if _is_real_user_prompt(entries[i])), 0)
+
+
 def turn_texts(entries: list[dict]) -> list[str]:
     """Assistant text blocks of the current turn (since the last real user prompt), main thread only."""
-    start = 0
-    for i, entry in enumerate(entries):
-        if _is_real_user_prompt(entry):
-            start = i + 1
     texts = []
-    for entry in entries[start:]:
+    for entry in entries[_turn_start(entries):]:
         if entry.get("type") == "assistant" and not entry.get("isSidechain"):
             texts.extend(t for t in _text_blocks(entry.get("message") or {}) if t.strip())
     return texts
@@ -163,12 +179,8 @@ def _tool_output(block: dict) -> str:
 
 def claude_turn_result(entries: list[dict]) -> dict:
     """What the current turn did: files edited, and whether its last test run passed."""
-    start = 0
-    for i, entry in enumerate(entries):
-        if _is_real_user_prompt(entry):
-            start = i + 1
     files, tests, runs = set(), "", {}
-    for entry in entries[start:]:
+    for entry in entries[_turn_start(entries):]:
         content = (entry.get("message") or {}).get("content")
         if not isinstance(content, list) or entry.get("isSidechain"):
             continue
@@ -318,7 +330,7 @@ def permission_decision(data: dict) -> dict:
 
     No answer in time, or no daemon: no decision, so Claude Code shows its own dialog.
     """
-    cfg = load_config().get("permissions", {})
+    cfg = _config().get("permissions", {})
     if not cfg.get("enabled", True) or not load_state().get("approvals", True):
         return {}
     tool = str(data.get("tool_name", ""))
@@ -391,7 +403,7 @@ def hook_claude(raw: str) -> None:
     if event == "PreToolUse" and data.get("tool_name") in ATTENTION_TOOLS:
         client.request("/notify", {"kind": "attention"}, timeout=1.0)
     asking = event == "PreToolUse" and data.get("tool_name") == "AskUserQuestion"
-    if event == "PreToolUse" and not asking and not load_config().get("speak_progress", True):
+    if event == "PreToolUse" and not asking and not _config().get("speak_progress", True):
         return
     texts: list[str] = []
     result = None
@@ -423,13 +435,10 @@ def hook_claude(raw: str) -> None:
                 header=str(q.get("header", "")),
                 options=[str(o.get("label", "")) for o in q.get("options") or [] if isinstance(o, dict)],
                 more=len(questions) - 1,
-                preface=strip_summary(text) if load_config().get("speak_progress", True) else "",
+                preface=strip_summary(text) if _config().get("speak_progress", True) else "",
             )
             return
-    if final and text.strip() and summary_enabled():
-        text = summarize(text, int(load_config().get("summary", {}).get("max_chars", 280)))
-    else:
-        text = strip_summary(text)
+    text = _spoken(text) if final else strip_summary(text)
     # On Stop, call even with nothing new to say: it marks the end of the turn (arms auto-listen).
     if text.strip() or final:
         # The session id lets the daemon type your spoken reply into this conversation (desktop app).
@@ -482,10 +491,7 @@ def hook_cline(raw: str) -> dict:
         elif question.strip():
             client.speak(question, source="cline", final=True, session=task)
     elif tool in CLINE_SPOKEN:
-        text = str(params.get(CLINE_SPOKEN[tool], ""))
-        if text.strip() and summary_enabled():
-            text = summarize(text, int(load_config().get("summary", {}).get("max_chars", 280)))
-        client.speak(strip_summary(text), source="cline", final=True, session=task)
+        client.speak(_spoken(str(params.get(CLINE_SPOKEN[tool], ""))), source="cline", final=True, session=task)
     return {}
 
 
@@ -522,10 +528,7 @@ def hook_payload(agent: str, raw: str) -> None:
             return
     text = extract_text(payload)
     if text.strip():
-        if summary_enabled():
-            text = summarize(text, int(load_config().get("summary", {}).get("max_chars", 280)))
-        else:
-            text = strip_summary(text)
+        text = _spoken(text)
         # The terminal the agent runs in: messages you send it by name ("tell Codex to...") are typed there.
         client.speak(text, source=agent, final=True, session=session, hwnd=winfocus.console_window())
 

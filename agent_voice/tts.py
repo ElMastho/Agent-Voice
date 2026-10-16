@@ -57,7 +57,6 @@ class Speaker:
         self._synthesizing = threading.Event()
         self.current_spec = ""
         self.current_text = ""  # the sentence being played, for the widget's live caption
-        self._captions: dict[int, str] = {}
         threading.Thread(target=self._synth_loop, name="synth", daemon=True).start()
         threading.Thread(target=self._play_loop, name="play", daemon=True).start()
 
@@ -152,8 +151,7 @@ class Speaker:
                 audio = np.concatenate([c.audio_float_array for c in chunks]).astype(np.float32)
                 # A short pause between sentences sounds more natural.
                 audio = np.concatenate([audio, np.zeros(int(chunks[0].sample_rate * 0.12), dtype=np.float32)])
-                self._captions[id(audio)] = sentence
-                self._audio_q.put((gen, audio, int(chunks[0].sample_rate * pitch), spec))
+                self._audio_q.put((gen, audio, int(chunks[0].sample_rate * pitch), spec, sentence))
             except Exception:  # never let one bad sentence kill the worker
                 log.exception("synthesis failed for %r", sentence)
             finally:
@@ -161,12 +159,12 @@ class Speaker:
 
     def _play_loop(self) -> None:
         while True:
-            gen, audio, rate, spec = self._audio_q.get()
+            gen, audio, rate, spec, sentence = self._audio_q.get()
             self._allowed.wait()
             if gen != self._gen:  # stopped (e.g. a new prompt was sent) while on hold
                 continue
             self.current_spec = spec
-            self.current_text = self._captions.pop(id(audio), "")
+            self.current_text = sentence
             self._playing.set()
             try:
                 sd.play(audio, rate)

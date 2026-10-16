@@ -19,7 +19,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from agent_voice import __version__, calls, claudeapp, install, keys, textclean, updater, winfocus
+from agent_voice import __version__, calls, claudeapp, install, keys, quota, textclean, updater, winfocus
 from agent_voice.config import HOME, LOG_DIR, load_config, load_state, save_state
 from agent_voice.textclean import result_label
 from agent_voice.tts import Speaker
@@ -359,9 +359,12 @@ class Daemon:
         # Answers to questions asked through the MCP server (ask_user), collected by its polling.
         self._answers: dict[int, str] = {}
         self._ask_seq = 0
-        # Context used per conversation, and each agent's rate limits (Claude Code's status line).
+        # Context used per conversation, and each agent's rate limits (Claude Code's status line, Codex's logs).
+        # Limits are kept across restarts: Claude only reports them while its status line runs.
         self.usage: dict[str, dict] = {}
-        self.limits: dict[str, dict] = {}
+        self.limits: dict[str, dict] = {k: v for k, v in (self.state.get("limits") or {}).items() if isinstance(v, dict)}
+        self._limit_warned: set[str] = set()
+        self._usage_line = ""  # Claude Code's status line: "on" (ours), "off" or "custom" (yours); cached with agents
         # The last finished turn's outcome (files changed, tests), shown for a while in the notch.
         self.last_result: dict | None = None
         # What happened recently (turns done, agents asking for you), told when you come back.
@@ -383,6 +386,7 @@ class Daemon:
             threading.Thread(target=self._call_watch, name="calls", daemon=True).start()
             threading.Thread(target=self._away_watch, name="away", daemon=True).start()
             threading.Thread(target=self._apps_watch, name="apps", daemon=True).start()
+            threading.Thread(target=self._quota_watch, name="quota", daemon=True).start()
 
     def _job_loop(self) -> None:
         while True:
@@ -808,17 +812,76 @@ class Daemon:
             self.usage[session] = {"context": max(0, min(100, round(float(context)))), "at": time.time()}
             self.usage = dict(list(self.usage.items())[-50:])
         limits = {}
-        for window in ("five_hour", "seven_day"):
+        for window in quota.WINDOWS:
             w = data.get(window)
             if isinstance(w, dict) and isinstance(w.get("pct"), (int, float)):
                 limits[window] = {"pct": round(float(w["pct"])), "resets": int(w.get("resets") or 0)}
         if limits:
-            self.limits[source] = limits
+            self._set_limits(source, limits)
+
+    def _set_limits(self, source: str, limits: dict) -> None:
+        """Keep an agent's latest windows; warn once when one gets close to full."""
+        limits = {k: {"pct": max(0, min(100, int(v["pct"]))), "resets": int(v.get("resets") or 0)}
+                  for k, v in limits.items() if k in quota.WINDOWS}
+        if not limits or limits == self.limits.get(source):
+            return
+        self.limits[source] = limits
+        self.state["limits"] = self.limits
+        save_state(self.state)
+        for window, w in limits.items():
+            key = f"{source}:{window}:{w['resets'] // 600}"  # once per window (its reset time, give or take)
+            if w["pct"] >= 90 and key not in self._limit_warned:
+                self._limit_warned.add(key)
+                name = AGENT_TITLES.get(source, source.capitalize())
+                span = "5-hour" if window == "five_hour" else "weekly"
+                when = f", it resets at {_clock(w['resets'], window)}" if w["resets"] else ""
+                log.info("%s %s limit at %d%%", source, window, w["pct"])
+                self._show_banner(f"{name} has used {w['pct']}% of its {span} limit{when}.", "", "", kind="note",
+                                  tag="limits")
+
+    def _quota_watch(self) -> None:
+        """Codex writes its rate limits in its session logs: read the newest one when it changes (every minute)."""
+        seen = (None, 0.0)
+        while True:
+            try:
+                path = quota.latest_codex_log()
+                if path is not None and (path, path.stat().st_mtime) != seen:
+                    seen = (path, path.stat().st_mtime)
+                    found = quota.codex_limits(path)
+                    if found:
+                        self._set_limits("codex", found)
+            except Exception:
+                log.exception("codex limits check failed")
+            time.sleep(60)
 
     def _limits_status(self) -> dict:
+        """Each agent's windows still running (a window past its reset starts again at zero: dropped)."""
         now = time.time()
-        return {source: {k: v for k, v in windows.items() if not v["resets"] or v["resets"] > now}
-                for source, windows in self.limits.items()}
+        out = {source: {k: v for k, v in windows.items() if not v["resets"] or v["resets"] > now}
+               for source, windows in self.limits.items()}
+        return {source: windows for source, windows in out.items() if windows}
+
+    def usage_line(self, enable: bool) -> None:
+        """Turn Claude Code's status line (its limits, for the notch) on or off from the widget."""
+        try:
+            result = install.usage_line(enable)
+        except Exception as exc:
+            log.exception("usage line failed")
+            result = f"failed: {exc}"
+        log.info("usage line: %s", result)
+        self._agents_at = 0.0
+        if result.startswith("skipped"):
+            text = "Claude Code already has your own status line: agent-voice leaves it alone."
+        elif result.startswith("failed"):
+            text = f"Couldn't change Claude Code's status line ({result[8:]})."
+        elif enable:
+            text = "Claude Code's limits will show here after its next reply (from its status line)."
+        else:
+            self.limits.pop("claude", None)
+            self.state["limits"] = self.limits
+            save_state(self.state)
+            text = "Claude Code's limits are off; its status line is back to normal."
+        self._show_banner(text, "", "", kind="note", tag="limits")
 
     def set_muted(self, muted: bool) -> None:
         self.state["muted"] = muted
@@ -967,6 +1030,7 @@ class Daemon:
         """
         if time.time() - self._agents_at > 30:
             self._agents, self._agents_at = install.agent_states(), time.time()
+            self._usage_line = install.usage_line_state()
             if self._agents.get("browser") == "on" and not self.state.get("browser_seen"):
                 self._agents["browser"] = "setup"
         return self._agents
@@ -1794,6 +1858,7 @@ class Daemon:
             "question": self._question_status(),
             "needs": self._needs_status(),
             "limits": self._limits_status(),
+            "usage_line": self._usage_line,
             "result": self.last_result if self.last_result and time.time() - self.last_result["at"] < 120 else None,
             "thread": self._thread_status(),
             "threads": self._threads_status(),
@@ -1921,6 +1986,14 @@ class Daemon:
             self.speaker.release()
             self._mic_phase = ""
             self.level = 0.0
+
+
+def _clock(at: float, window: str) -> str:
+    """A reset time: '15:20' today, 'Mon 09:00' further away."""
+    from datetime import datetime
+
+    when = datetime.fromtimestamp(at)
+    return when.strftime("%H:%M" if window == "five_hour" and at - time.time() < 20 * 3600 else "%a %H:%M")
 
 
 def status_tag(st: dict) -> str:
@@ -2062,6 +2135,9 @@ def _handler(daemon: Daemon):
                     daemon.ptt_stop()
                 else:
                     daemon.ptt_start()
+                return self._json(200, {"ok": True})
+            if self.path == "/usage_line":
+                threading.Thread(target=daemon.usage_line, args=(bool(data.get("enable", True)),), daemon=True).start()
                 return self._json(200, {"ok": True})
             if self.path == "/install":
                 agent = str(data.get("agent") or "")

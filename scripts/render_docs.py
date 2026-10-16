@@ -148,7 +148,8 @@ NEEDS = [
      "text": "run npm run migrate", "at": 0},
     {"kind": "input", "session": "g", "title": "Gemini", "color": "#A78BFA", "text": "Apply these edits? (y/n)", "at": 0},
 ]
-LIMITS = {"claude": {"five_hour": {"pct": 63, "resets": 1792072800}, "seven_day": {"pct": 41, "resets": 1792500000}}}
+LIMITS = {"claude": {"five_hour": {"pct": 63, "resets": 51600}, "seven_day": {"pct": 41, "resets": 1792500000}},
+          "codex": {"five_hour": {"pct": 18, "resets": 60000}, "seven_day": {"pct": 92, "resets": 1792300000}}}
 AGENTS = {"claude": "on", "codex": "on", "gemini": "on", "cursor": "off", "cline": "missing", "antigravity": "on",
           "claude-desktop": "on", "windsurf": "missing", "vscode": "off", "browser": "on"}
 HISTORY = [

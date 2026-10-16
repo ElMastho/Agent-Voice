@@ -41,6 +41,8 @@ BAR_H = 64
 SPEEDS = (1.0, 1.25, 1.5, 1.75, 2.0)
 MODES = (("voice", "Voice"), ("chime", "Chimes"), ("silent", "Silent"))
 HIST_ROWS, THREAD_ROWS, ROW_H = 5, 4, 22
+LIMIT_H = 22  # a Limits row: the agent, then its 5-hour and weekly bars
+LIMIT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
 THREAD_H = 36  # a thread row: its title and state, then the start of its last reply
 # Tiles that only matter when replies are spoken: hidden in chime mode.
 VOICE_ONLY = {"read", "wake", "replay"}
@@ -120,6 +122,18 @@ PHASES = {
     "offline": ("#64748B", "Offline", "Voice service isn't running"),
 }
 
+
+
+def _limit_color(pct: int) -> QColor:
+    return QColor("#34D399" if pct < 70 else "#FBBF24" if pct < 90 else "#F87171")
+
+
+def _reset_text(at: float) -> str:
+    """When a window resets: '15:20' within the day, 'Mon' further away."""
+    from datetime import datetime
+
+    soon = at - time.time() < 20 * 3600
+    return datetime.fromtimestamp(at).strftime("%H:%M" if soon else "%a")
 
 
 def _round_pen(brush, width: float) -> QPen:
@@ -1155,6 +1169,9 @@ class VoiceWidget(QWidget):
                 r[f"hist:{i}"] = self._history_row(i)
             r.update(self._agent_rects())
             r["newthread"] = self._new_rect()
+            on = self._limit_on_rect()
+            if on:
+                r["limits:on"] = on
         return r
 
     def _needs_h(self) -> float:
@@ -1177,8 +1194,34 @@ class VoiceWidget(QWidget):
     def _threads_y(self) -> float:
         return self._mode_y() + 36
 
-    def _agents_y(self) -> float:
+    def _limits_y(self) -> float:
         return self._hist_y() + 16 + max(1, len(self._history())) * ROW_H + 8
+
+    def _limit_rows(self) -> list[tuple[str, dict]]:
+        """(agent, its windows) per row; Claude Code without its status line gets a row to turn it on."""
+        limits = self.st.get("limits") or {}
+        rows = [(s, limits[s]) for s in sorted(limits, key=lambda s: (s not in LIMIT_NAMES, s))]
+        if ("claude" not in limits and self.st.get("usage_line") == "off"
+                and self._agent_state("claude") == "on"):
+            rows.append(("claude", {}))
+        return rows
+
+    def _limit_row(self, i: int) -> QRectF:
+        return QRectF(10, self._limits_y() + 16 + i * LIMIT_H, self.pw - 20, LIMIT_H - 2)
+
+    def _limits_h(self) -> float:
+        n = len(self._limit_rows())
+        return 16 + n * LIMIT_H + 8 if n else 0
+
+    def _limit_on_rect(self) -> QRectF | None:
+        for i, (_source, windows) in enumerate(self._limit_rows()):
+            if not windows:
+                row = self._limit_row(i)
+                return QRectF(row.right() - 64, row.y() + (row.height() - 16) / 2, 60, 16)
+        return None
+
+    def _agents_y(self) -> float:
+        return self._limits_y() + self._limits_h()
 
     def _agent_rects(self) -> dict[str, QRectF]:
         keys = [f"agent:{a}" for a, _ in AGENT_LABELS] + ["guide"]
@@ -1206,7 +1249,7 @@ class VoiceWidget(QWidget):
 
     def _expanded_h(self) -> int:
         """The open panel fits what it shows: no empty rows."""
-        rows = -(-(len(AGENT_LABELS) + 1) // AGENTS_PER_ROW)
+        rows = -(-(len(AGENT_LABELS) + 1) // AGENTS_PER_ROW)  # (the Limits section is in _agents_y)
         return int(self._agents_y() + 18 + rows * 30 - 6 + 12)
 
     def _question_layout(self) -> tuple[QRectF, QRectF, list[QRectF], float]:
@@ -1680,6 +1723,7 @@ class VoiceWidget(QWidget):
 
         self._paint_threads(p, progress)
         self._paint_history(p, progress)
+        self._paint_limits(p, progress)
         self._paint_agents(p, progress)
 
     def _paint_needs(self, p: QPainter, rects: dict[str, QRectF]) -> None:
@@ -1800,10 +1844,9 @@ class VoiceWidget(QWidget):
         p.setFont(self.f_hint)
         p.setPen(QColor(226, 232, 240, 105))
         queued = int(self.st.get("queued") or 0)
-        limits = self._limits_label()
         new = self._new_rect()
         p.drawText(QRectF(14, self._threads_y(), new.x() - 22, 16), Qt.AlignRight | Qt.AlignVCenter,
-                   f"{queued} waiting to speak" if queued else limits or ("click to open" if threads else "none yet"))
+                   f"{queued} waiting to speak" if queued else "click to open" if threads else "none yet")
         ht = self.hover_t.get("newthread", 0.0)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(16, 224, 160, int(40 + 70 * ht)))
@@ -1863,18 +1906,63 @@ class VoiceWidget(QWidget):
                 p.drawText(rect, Qt.AlignCenter, ICONS["check"] if done else ICONS[icons[key.split(":")[0]]])
         p.restore()
 
-    def _limits_label(self) -> str:
-        """Claude Code's rate limits, when its status line reports them: '5h 63% · resets 15:20'."""
-        windows = (self.st.get("limits") or {}).get("claude") or {}
-        parts = []
-        for key, name in (("five_hour", "5h"), ("seven_day", "week")):
-            w = windows.get(key)
-            if w:
-                from datetime import datetime
-
-                reset = datetime.fromtimestamp(w["resets"]).strftime("%H:%M") if w.get("resets") else ""
-                parts.append(f"{name} {w['pct']}%" + (f" · resets {reset}" if reset and key == "five_hour" else ""))
-        return " · ".join(parts)
+    def _paint_limits(self, p: QPainter, progress: float) -> None:
+        """How much of each agent's 5-hour and weekly limits is used, and when they reset."""
+        rows = self._limit_rows()
+        appear = max(0.0, min(1.0, (progress - 0.58) / 0.42))
+        if not rows or appear <= 0:
+            return
+        p.save()
+        p.setOpacity(appear)
+        y = self._limits_y()
+        p.setFont(self.f_tile)
+        p.setPen(QColor(226, 232, 240, 170))
+        p.drawText(QRectF(14, y, self.pw - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, "Limits")
+        p.setFont(self.f_hint)
+        p.setPen(QColor(226, 232, 240, 105))
+        p.drawText(QRectF(14, y, self.pw - 28, 16), Qt.AlignRight | Qt.AlignVCenter, "used · resets")
+        fm = QFontMetrics(self.f_hint)
+        for i, (source, windows) in enumerate(rows):
+            row = self._limit_row(i)
+            name_w = 84
+            p.setFont(self.f_sub)
+            p.setPen(QColor(226, 232, 240, 210))
+            p.drawText(QRectF(row.x() + 4, row.y(), name_w - 6, row.height()), Qt.AlignLeft | Qt.AlignVCenter,
+                       QFontMetrics(self.f_sub).elidedText(LIMIT_NAMES.get(source, source.capitalize()),
+                                                           Qt.ElideRight, name_w - 6))
+            if not windows:  # Claude Code: its status line isn't ours yet
+                on = self._limit_on_rect()
+                ht = self.hover_t.get("limits:on", 0.0)
+                p.setFont(self.f_hint)
+                p.setPen(QColor(226, 232, 240, 120))
+                p.drawText(QRectF(row.x() + name_w, row.y(), on.x() - row.x() - name_w - 6, row.height()),
+                           Qt.AlignLeft | Qt.AlignVCenter, "Show its 5-hour and weekly limits")
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(16, 224, 160, int(40 + 70 * ht)))
+                p.drawRoundedRect(on, on.height() / 2, on.height() / 2)
+                p.setFont(self.f_chip)
+                p.setPen(QColor(255, 255, 255, 235))
+                p.drawText(on, Qt.AlignCenter, "Turn on")
+                continue
+            half = (row.width() - name_w - 8) / 2
+            for j, (key, label) in enumerate((("five_hour", "5h"), ("seven_day", "week"))):
+                x = row.x() + name_w + j * (half + 8)
+                w = windows.get(key)
+                p.setFont(self.f_hint)
+                p.setPen(QColor(226, 232, 240, 120))
+                p.drawText(QRectF(x, row.y(), 28, row.height()), Qt.AlignLeft | Qt.AlignVCenter, label)
+                text = f"{w['pct']}%" + (f" · {_reset_text(w['resets'])}" if w.get("resets") else "") if w else "–"
+                tw = fm.horizontalAdvance("100% · 00:00") + 2  # the same for every row: the bars line up
+                bar = QRectF(x + 30, row.center().y() - 2, max(10.0, half - 30 - tw - 6), 4)
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(255, 255, 255, 26))
+                p.drawRoundedRect(bar, 2, 2)
+                if w:
+                    p.setBrush(_limit_color(w["pct"]))
+                    p.drawRoundedRect(QRectF(bar.x(), bar.y(), max(4.0, bar.width() * w["pct"] / 100), 4), 2, 2)
+                p.setPen(QColor(226, 232, 240, 200 if w else 90))
+                p.drawText(QRectF(bar.right() + 6, row.y(), tw, row.height()), Qt.AlignLeft | Qt.AlignVCenter, text)
+        p.restore()
 
     def _paint_history(self, p: QPainter, progress: float) -> None:
         """The last few things you said, newest first; click one to copy it."""
@@ -1992,6 +2080,9 @@ class VoiceWidget(QWidget):
                 QToolTip.hideText()
 
     def _tooltip(self, key: str | None) -> str:
+        if key == "limits:on":
+            return ("Adds agent-voice's status line to Claude Code: it reports the limits after each reply. "
+                    "Undo: agent-voice usage off")
         if key == "primary":
             prim = self._primary()
             return prim[2] if prim else ""
@@ -2189,6 +2280,9 @@ class VoiceWidget(QWidget):
             else:
                 self._note(f"{name[:1].upper()}{name[1:]} isn't installed on this PC. Install it, then click "
                            "here to connect it. The ? opens the setup guide.")
+        elif key == "limits:on":
+            _post("/usage_line", {"enable": True})
+            self.st["usage_line"] = "on"  # the row goes until the first reply brings the numbers
         elif key == "guide":
             QDesktopServices.openUrl(QUrl(GUIDE_URL))
         elif key == "openchat":

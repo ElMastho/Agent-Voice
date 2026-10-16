@@ -38,6 +38,7 @@ agent_voice/
   native_host.py  browser extension bridge (Chrome native messaging: 4-byte length + JSON)
   browser/      the extension (MV3): sites.js (per-site selectors + pure reply detection), content.js, background.js
   watch.py      `agent-voice watch`: pseudo-terminal + pyte screen; Tracker turns screen changes into turns
+  quota.py      agents' rate limits (5-hour, weekly): Codex's session logs; Claude's come through hooks.statusline
   apps.py       desktop AI apps' Windows notifications (wpndatabase.db, read-only, filtered in SQL)
   updater.py    release check helpers + one-click update of the Windows build (verified download, file swap)
   widget.py     notch / floating bar, banner (read along, chimes), tray icon, animations

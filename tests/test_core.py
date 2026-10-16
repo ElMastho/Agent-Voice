@@ -316,6 +316,7 @@ def daemon(monkeypatch):
     monkeypatch.setattr(server, "load_state", lambda: {})
     monkeypatch.setattr(server, "save_state", lambda state: None)
     monkeypatch.setattr(server.install, "agent_states", lambda: {})
+    monkeypatch.setattr(server.install, "usage_line_state", lambda: "off")
     monkeypatch.setattr(server.claudeapp, "session_title", lambda session: "")
     monkeypatch.setattr(server.winfocus, "is_window", lambda hwnd: True)
     d = server.Daemon(config.load_config(), start_threads=False)
@@ -537,6 +538,45 @@ def test_turn_result_shows_in_the_notch(daemon):
                       "five_hour": {"pct": 40, "resets": 4102444800}})
     st = daemon.status()
     assert st["threads"][0]["context"] == 81 and st["limits"]["claude"]["five_hour"]["pct"] == 40
+
+
+def test_codex_limits_come_from_its_session_log(tmp_path):
+    import json
+
+    from agent_voice import quota
+
+    day = tmp_path / "sessions" / "2026" / "10" / "16"
+    day.mkdir(parents=True)
+    old = {"timestamp": "2026-10-16T10:00:00Z", "type": "event_msg",
+           "payload": {"type": "token_count", "rate_limits": {
+               "primary": {"used_percent": 12.0, "window_minutes": 300, "resets_in_seconds": 600},
+               "secondary": {"used_percent": 30.0, "window_minutes": 10080, "resets_in_seconds": 86400}}}}
+    new = {"timestamp": "2026-10-16T11:00:00Z", "type": "event_msg",
+           "payload": {"type": "token_count", "info": None, "rate_limits": {
+               "primary": {"used_percent": 47.5, "window_minutes": 300, "resets_at": 1792150000},
+               "secondary": {"used_percent": 31.0, "window_minutes": 10080, "resets_at": 1792600000}}}}
+    log = day / "rollout-2026-10-16T10-00-00-abc.jsonl"
+    log.write_text("\n".join(json.dumps(x) for x in (old, {"type": "response_item", "payload": {}}, new)) + "\n",
+                   encoding="utf-8")
+    assert quota.latest_codex_log(tmp_path) == log
+    assert quota.codex_limits(log) == {"five_hour": {"pct": 48, "resets": 1792150000},
+                                       "seven_day": {"pct": 31, "resets": 1792600000}}
+    at = quota._stamp(old["timestamp"])
+    assert quota.codex_limits_from(old)["five_hour"] == {"pct": 12, "resets": int(at + 600)}
+    assert quota.latest_codex_log(tmp_path / "nothing") is None
+
+
+def test_limits_are_kept_and_warn_once_near_full(daemon):
+    far = 4102444800
+    daemon._set_limits("codex", {"five_hour": {"pct": 91, "resets": far}, "seven_day": {"pct": 20, "resets": far}})
+    assert daemon.banner["text"].startswith("Codex has used 91% of its 5-hour limit")
+    assert daemon.state["limits"]["codex"]["seven_day"]["pct"] == 20  # survives a restart
+    daemon.banner = None
+    daemon._set_limits("codex", {"five_hour": {"pct": 95, "resets": far}, "seven_day": {"pct": 21, "resets": far}})
+    assert daemon.banner is None  # the same window: warned already
+    daemon._set_limits("claude", {"five_hour": {"pct": 10, "resets": 1}})  # already reset
+    st = daemon.status()
+    assert set(st["limits"]) == {"codex"} and st["usage_line"] == "off"
 
 
 def test_mcp_installers_are_idempotent_and_reversible(tmp_path, monkeypatch):

@@ -118,7 +118,11 @@ After 5 minutes without touching the keyboard or mouse (`catch_up.away_minutes`)
 ### What a turn changed, and how much context is left
 When a Claude Code conversation finishes, the notch says *Done · 3 files changed · tests passed* (the files it edited, and its last test run: pytest, npm test, cargo test, go test...). Click it to open the conversation. Each thread in the panel shows its last result and how much of its context is used; the notch warns with *Context 86%* past 80%.
 
-Claude Code's **rate limits** (5-hour and weekly, for Pro and Max plans) come from its status line: `agent-voice usage on` installs one (it leaves yours alone if you have one). They then show in the panel's *Threads* header. Note that with a custom status line, Claude Code shows fewer of its footer hints.
+The panel's **Limits** section shows each agent's **5-hour** and **weekly** limits (Pro, Max and ChatGPT plans) as bars, with when they reset; a note drops down once when one passes 90%. They're kept across restarts.
+
+- **Codex** writes them in its session logs (`~/.codex/sessions`): they show after its first turn, nothing to set up.
+- **Claude Code** reports them to its status line: click *Turn on* in the Limits row, or run `agent-voice usage on` (it leaves your own status line alone if you have one). With a custom status line, Claude Code shows fewer of its footer hints; `agent-voice usage off` undoes it. The numbers refresh whenever Claude Code draws its status line (after each reply in a terminal session).
+- **Gemini CLI and Antigravity** don't write their quotas anywhere agent-voice can read without their private session token, so they aren't shown.
 
 ### Drop files on the notch
 Drag a screenshot, a log or any file onto the notch (it drops down as you get near the top edge): its path is typed into the last conversation's prompt, not sent, so you can add your question. Drop it on a thread in the open panel to pick the conversation. An image dragged from a browser is saved to `~/.agent-voice/drops/` first.

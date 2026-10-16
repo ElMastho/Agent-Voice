@@ -44,7 +44,7 @@ Everything runs **locally on the CPU**: no cloud, no API key, no audio leaving y
 | 🗂️ **While you were away** | Back at your desk (or out of a call): *"Notch redesign finished; Codex needs you."* |
 | ➕ **Start a new thread** | `Ctrl+Alt+N`, *+ New* in the panel, or *"Hey Claude, new thread: add a health check"*: a new Claude Code session in the desktop app, or Claude Code / Codex / Gemini CLI in a new terminal tab. |
 | 📣 **Talk to any thread by name** | *"Tell Codex to run the tests"* is typed into Codex's window and sent, wherever you are. |
-| 📊 **Results and usage** | *Done · 3 files changed · tests passed*, each conversation's context, Claude's 5-hour and weekly limits. |
+| 📊 **Results and usage** | *Done · 3 files changed · tests passed*, each conversation's context, and a **Limits** section: Claude Code's and Codex's 5-hour and weekly limits as bars, with when they reset (a heads-up at 90%). |
 | 📎 **Drop files on the notch** | Screenshots, logs, files: dropped on the notch, they land in the conversation's prompt. |
 | 🗣️ **Speaks every reply** | Final answers and the progress notes between tool calls, never twice. Markdown, code and paths are cleaned out so it sounds natural. |
 | 📖 **Read along** | The text being spoken hangs under the notch, from the sentence you're hearing, and leaves 5 seconds after the voice stops. |
@@ -168,7 +168,8 @@ Open the chevron for the full panel:
 
 - **Actions** with their shortcuts: reply now, hold to talk, stop, auto-send, silent, read selection, *Hey Claude*, approvals, summaries, and the last reply's **Replay**, **Copy** and **Open chat**. Buttons that only matter for the voice hide themselves in Chimes and Silent.
 - **Speed** (1× to 2×) and **Mode**: *Voice / Chimes / Silent*.
-- **Threads**: your recent conversations, what each is doing (*working*, *speaking*, *asks you*, *needs approval*, *waiting for you*, *next up*), what its last turn changed, its context, and the start of its last reply. Its buttons: 🎙️ **talk to it** (what you say is sent to that conversation), ⌨️ **type to it**, replay and copy. Click the row to open it. With `agent-voice usage on`, Claude Code's 5-hour and weekly limits show in the header.
+- **Threads**: your recent conversations, what each is doing (*working*, *speaking*, *asks you*, *needs approval*, *waiting for you*, *next up*), what its last turn changed, its context, and the start of its last reply. Its buttons: 🎙️ **talk to it** (what you say is sent to that conversation), ⌨️ **type to it**, replay and copy. Click the row to open it.
+- **Limits**: how much of each agent's **5-hour** and **weekly** limits is used, and when each resets. Codex's come from its own session logs (nothing to set up); Claude Code's from its status line: click *Turn on* in the row (or `agent-voice usage on`). A note drops down once when a window passes 90%.
 - **You said**: the last 5 things it heard from you; click to copy.
 - **Needs you** (when something waits on you): approve, deny or open, for every agent.
 - **Agents**: which agents are connected (green dot): Claude Code, Codex, Gemini CLI, Cursor, Cline, Antigravity, the Claude desktop app, Windsurf, VS Code and the browser. Click one that isn't to connect it, or **?** for the setup guide.

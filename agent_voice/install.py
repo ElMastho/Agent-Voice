@@ -109,6 +109,12 @@ def usage_line(enable: bool = True) -> str:
     return f"usage {'on' if enable else 'off'} ({path})"
 
 
+def usage_line_state() -> str:
+    """Claude Code's status line: 'on' (ours, its limits reach the notch), 'off', or 'custom' (yours)."""
+    command = str((_read_json(Path.home() / ".claude" / "settings.json").get("statusLine") or {}).get("command", ""))
+    return "on" if _ours(command) else "custom" if command else "off"
+
+
 # -- Gemini CLI: ~/.gemini/settings.json --------------------------------------------------
 def gemini(remove: bool = False) -> str:
     path = Path.home() / ".gemini" / "settings.json"

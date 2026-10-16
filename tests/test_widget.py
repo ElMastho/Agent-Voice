@@ -236,3 +236,17 @@ def test_update_chip_installs_and_the_widget_quits(app, monkeypatch):
     assert posted == ["/update"] and not quits
     w._on_status({**w.st, "update": {**w.st["update"], "state": "installing"}})
     assert w._update_label() == "Restarting…" and quits == [widget.QApplication.quit]
+
+
+def test_limits_rows_and_turning_claude_on(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    far = 4102444800
+    w = _widget({"phase": "idle", "threads": [], "agents": {"claude": "on"}, "usage_line": "off",
+                 "limits": {"codex": {"five_hour": {"pct": 48, "resets": far}}}})
+    assert [s for s, _ in w._limit_rows()] == ["codex", "claude"]  # Claude: a row to turn it on
+    assert w._agents_y() == w._limits_y() + 16 + 2 * widget.LIMIT_H + 8
+    w._activate("limits:on")
+    assert posted == [("/usage_line", {"enable": True})] and "limits:on" not in w._rects()
+    w.grab()  # paints the section without errors
+    assert widget._limit_color(95).name() == "#f87171"

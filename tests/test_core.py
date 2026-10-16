@@ -504,7 +504,7 @@ def test_catch_up_after_being_away(daemon):
     daemon._events[-1]["at"] = 800
     daemon._check_away(idle=1, now=1500)
     assert daemon.banner["kind"] == "catchup"
-    assert daemon.banner["text"].startswith("Claude Code finished; Gemini needs you.")
+    assert daemon.banner["text"] == "Claude Code finished: All tests pass. Gemini needs you."
     assert daemon.speaker.said[-1][0] == "While you were away: Claude Code finished; Gemini needs you."
 
 

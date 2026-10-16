@@ -210,3 +210,15 @@ def test_new_thread_box_types_or_dictates(app, monkeypatch):
     box.open_new(["claude-app"], {"target": "claude-app", "cwd": "C:/work"}, QRectF(0, 0, 440, 44), 422)
     box.talk.click()
     assert posted[-1] == ("/new_thread", {"listen": True, "target": "claude-app", "cwd": "C:/work"})
+
+
+def test_notifications_drop_below_the_reply_box(app):
+    from PySide6.QtCore import QRectF
+
+    w = _widget({"phase": "idle", "threads": []})
+    w.reply_box.open(ITEM, QRectF(w.geometry()), int(w.pw))
+    w.banner.present(ITEM, int(w.pw))
+    for _ in range(40):
+        w._tick()
+    assert w.banner.y() >= w.reply_box.geometry().bottom()
+    w.reply_box.hide()

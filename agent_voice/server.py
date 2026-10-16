@@ -733,13 +733,14 @@ class Daemon:
         if not events:
             return
         waiting = {item["session"] for item in self._needs_status()}
-        done, needs, lines = [], [], []
+        done, needs, summaries = [], [], {}
         for e in events:
             title = self._title(e["session"], e["source"])
-            if e["kind"] == "done" and title not in done:
-                done.append(title)
+            if e["kind"] == "done":
+                if title not in done:
+                    done.append(title)
                 if e["text"]:
-                    lines.append(f"{title}: {e['text']}")
+                    summaries[title] = e["text"]  # its latest turn
             elif e["kind"] == "needs" and e["session"] in waiting and title not in needs:
                 needs.append(title)
         parts = ([f"{_join(done)} finished"] if done else []) + (
@@ -748,8 +749,14 @@ class Daemon:
             return
         said = f"While you were away: {'; '.join(parts)}."
         log.info("catch-up: %s", said)
-        # The banner's header already says "While you were away": the body goes straight to the news.
-        self._show_banner(" ".join([f"{'; '.join(parts)}.", *lines[-3:]]), "", "", kind="catchup")
+        # The banner's header already says "While you were away": the body goes straight to the news. One
+        # conversation finished: its summary right after its name, not the name twice.
+        if len(done) == 1 and done[0] in summaries:
+            body = [f"{done[0]} finished: {summaries[done[0]]}"] + (
+                [f"{_join(needs)} need{'s' if len(needs) == 1 else ''} you."] if needs else [])
+        else:
+            body = [f"{'; '.join(parts)}."] + [f"{t}: {x}" for t, x in list(summaries.items())[-3:]]
+        self._show_banner(" ".join(body), "", "", kind="catchup")
         if not self.quiet:
             self._wake_cancel.set()
             self.speaker.speak(said, "en")

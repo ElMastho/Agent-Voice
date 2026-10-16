@@ -940,7 +940,9 @@ class VoiceWidget(QWidget):
         if time.time() - self._topmost_at > 1.0:
             self._topmost_at = time.time()
             _keep_on_top(int(self.winId()))
-        self._banner_busy = self.banner.step(QRectF(self.geometry()))
+        # While you type in the reply box, notifications drop below it instead of over it.
+        anchor = self.reply_box.geometry() if self.reply_box.isVisible() else self.geometry()
+        self._banner_busy = self.banner.step(QRectF(anchor))
         # Discreet when nothing happens, fully visible when active or hovered (the notch is always solid).
         active = (self.phase not in ("idle", "offline", "muted") or self._hovering or self.expanded
                   or self.notch or self._question())

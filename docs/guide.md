@@ -92,6 +92,15 @@ Approvals, questions and agents waiting for input, from every agent, are counted
 - **Approvals** (Claude Code; and any agent that asks through agent-voice): *Allow* or *Deny* with a click. When several agents ask at once, the first one is read out and the others wait in the list; answer any of them by voice by naming it: *"approve Codex"*, *"deny the notch one"*, *"yes"*. With the reply mic closed, *"Hey Claude, approve Codex"* works too (wake word on).
 - **Waiting for you** (Gemini CLI asking to confirm a tool, Claude Code idle on your input, a terminal agent's *(y/n)*, an MCP app's `notify`): *Open* brings its window to the front.
 
+### Start a new thread
+Press **`Ctrl+Alt+N`** (or *+ New* in the panel's Threads header, or the tray menu): a box opens under the notch.
+
+- **Where it runs**: *Claude app* starts a new Claude Code session in the desktop app (in the group of the folder below, like its "New session in …" button; the app doesn't come forward), *Claude Code*, *Codex* or *Gemini CLI* open a new Windows Terminal tab running that agent in the folder. Only what's installed is offered; the default is where your last conversation was.
+- **Folder**: the one you last prompted from; change it if you like.
+- **The first prompt**: type it and press Enter, or press **Talk** and say it.
+
+By voice, with the wake word on: *"Hey Claude, new thread: add a health check"*, *"start a new conversation with Codex to …"*, *"nouvelle session : …"*. The new thread joins the Threads list as soon as it starts.
+
 ### Messages to any conversation, by name
 *"Hey Claude, tell Codex to run the tests"*, or in the reply window *"tell the notch redesign to commit"* (*"dis à Codex de lancer les tests"*), types *"Run the tests"* into that conversation's own window, sends it, and brings you back to what you were doing. The name is the conversation's title or its agent (*Codex*, *Gemini*, *Aider*...). agent-voice needs to know the window first: for Claude Code that's the one you prompted from; terminal agents (Codex, Gemini CLI, `agent-voice watch`) are found from their terminal.
 

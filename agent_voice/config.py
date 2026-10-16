@@ -44,6 +44,8 @@ DEFAULTS: dict = {
         "read_selection": "ctrl+alt+r",
         # Show / hide the floating widget (also from the tray icon).
         "widget": "ctrl+alt+w",
+        # Start a new thread: type (or dictate) its first prompt.
+        "new_thread": "ctrl+alt+n",
         "push_to_talk": "ctrl+alt+space",
     },
     "stt": {

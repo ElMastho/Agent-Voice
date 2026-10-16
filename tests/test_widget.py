@@ -193,3 +193,20 @@ def test_agents_always_answer_a_click(app, monkeypatch):
     assert "isn't installed" in w.banner.item["text"]
     w._activate("agent:browser")  # bridge ready, extension not loaded: the steps again
     assert posted == [("/install", {"agent": "browser"})]
+
+
+def test_new_thread_box_types_or_dictates(app, monkeypatch):
+    from PySide6.QtCore import QRectF
+
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    box = widget.ReplyBox()
+    box.open_new(["claude-app", "claude"], {"target": "claude", "cwd": "C:/work"}, QRectF(0, 0, 440, 44), 422)
+    assert box.target == "claude" and not box.chips["codex"].isVisibleTo(box)
+    box.chips["claude-app"].click()
+    QTest.keyClicks(box.edit, "Add a health check")
+    QTest.keyClick(box.edit, Qt.Key_Return)
+    assert posted[-1] == ("/new_thread", {"text": "Add a health check", "target": "claude-app", "cwd": "C:/work"})
+    box.open_new(["claude-app"], {"target": "claude-app", "cwd": "C:/work"}, QRectF(0, 0, 440, 44), 422)
+    box.talk.click()
+    assert posted[-1] == ("/new_thread", {"listen": True, "target": "claude-app", "cwd": "C:/work"})

@@ -53,6 +53,15 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("watch", help="run a terminal agent (aider, opencode...) and announce when it waits for you")
     p.add_argument("command", nargs=argparse.REMAINDER)
 
+    p = sub.add_parser("launch", help=argparse.SUPPRESS)  # a new thread's terminal tab: agent + prompt file
+    p.add_argument("agent")
+    p.add_argument("prompt_file")
+
+    p = sub.add_parser("new", help="start a new thread: in the Claude desktop app, or an agent CLI in a new tab")
+    p.add_argument("prompt", nargs="+")
+    p.add_argument("--agent", default="", help="claude-app | claude | codex | gemini (default: like your last thread)")
+    p.add_argument("--cwd", default="", help="its folder (default: the one you last worked in)")
+
     p = sub.add_parser("native-host", help=argparse.SUPPRESS)  # browser extension bridge (Chrome native messaging)
     p.add_argument("origin", nargs="*")
 
@@ -87,6 +96,10 @@ def main(argv: list[str] | None = None) -> int:
         from agent_voice.watch import run
 
         return run(args.command)
+    if args.cmd == "launch":
+        from agent_voice.launch import run
+
+        return run(args.agent, args.prompt_file)
     if args.cmd == "native-host":
         from agent_voice.native_host import run
 
@@ -142,6 +155,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "wake":
         result = client.request("/wake", {"mode": args.mode})
         print("not running" if result is None else f"wake word {'on' if result['wake'] else 'off'}")
+        return 0 if result else 1
+    if args.cmd == "new":
+        result = client.request("/new_thread", {"text": " ".join(args.prompt), "target": args.agent, "cwd": args.cwd})
+        print("not running" if result is None else "starting a new thread")
         return 0 if result else 1
     if args.cmd == "apps":
         result = client.request("/apps", {"mode": args.mode})

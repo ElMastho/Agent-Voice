@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import zlib
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -216,6 +217,24 @@ _ROUTES = (
 _FILLER = {"the", "a", "an", "le", "la", "les", "l", "agent", "thread", "conversation", "one", "code", "please"}
 
 
+# "New thread: fix the login bug", "start a new conversation with Codex to ...", "nouvelle session : ..."
+_NEW_THREAD = re.compile(
+    r"^(?:please\s+)?(?:start\s+)?(?:a\s+)?(?:new|nouvelle|nouveau)\s+(?:thread|conversation|session|chat|discussion|fil)"
+    r"(?:\s+(?:with|in|avec|dans)\s+(?P<agent>claude(?:\s+code)?|codex|gemini))?\s*[:,.]?\s*(?:to\s+|pour\s+)?"
+    r"(?P<prompt>.+)$", re.I | re.S)
+NEW_THREAD = "__new__"  # the "session" a dictated new-thread prompt goes to
+
+
+def parse_new_thread(text: str) -> tuple[str, str] | None:
+    """'New thread with Codex: add a health check' -> ('codex', 'Add a health check'); None otherwise."""
+    m = _NEW_THREAD.match(text.strip())
+    if not m or len(m["prompt"].split()) < 2:
+        return None
+    agent = (m["agent"] or "").lower().split()[0] if m["agent"] else ""
+    prompt = m["prompt"].strip()
+    return agent, prompt[:1].upper() + prompt[1:]
+
+
 def parse_route(text: str) -> tuple[str, str] | None:
     """'Tell Codex to run the tests.' -> ('Codex', 'run the tests.'); None for anything else."""
     text = text.strip()
@@ -349,6 +368,12 @@ class Daemon:
         # What happened recently (turns done, agents asking for you), told when you come back.
         self._events: list[dict] = []
         self._away_since = 0.0
+        # New threads: where they can start (cached), the folder you last worked in, and the one being dictated.
+        self._targets: list[str] = []
+        self._targets_at = 0.0
+        self._new_pending: dict = {}
+        self._new_window: dict = {}  # a session started in the desktop app: its window, for the first prompt
+        self.new_thread_opens = 0  # bumped by the hotkey: the widget opens its new-thread box
         # Bumped by the show/hide hotkey; the widget toggles when it sees the number change.
         self.widget_toggles = 0
         if start_threads:
@@ -978,6 +1003,72 @@ class Daemon:
                 os.startfile(install.extension_dir())  # the folder to pick in "Load unpacked"
         self._show_banner(text, "", "", kind="note", tag="agents")
 
+    # -- new threads ------------------------------------------------------------
+    def _desktop_window(self) -> int:
+        """The Claude desktop app's window: one a conversation was prompted from, else any open one."""
+        for hwnd in [*self._session_hwnd.values(), self._target_hwnd]:
+            if hwnd and winfocus.is_window(hwnd) and claudeapp.is_desktop_app(hwnd):
+                return hwnd
+        found = winfocus.find_window("Claude")
+        return found if found and claudeapp.is_desktop_app(found) else 0
+
+    def new_targets(self) -> list[str]:
+        """Where a new thread can start: the desktop app (if open), then the agent CLIs found. Cached 30 s."""
+        from agent_voice import launch
+
+        if time.time() - self._targets_at > 30:
+            self._targets, self._targets_at = launch.targets(bool(self._desktop_window())), time.time()
+        return self._targets
+
+    def _default_target(self) -> str:
+        """Where your last conversation was: the desktop app or a terminal."""
+        targets = self.new_targets()
+        last = self._session_hwnd.get(self._last_session) or self._target_hwnd
+        if "claude-app" in targets and last and claudeapp.is_desktop_app(last):
+            return "claude-app"
+        return next((t for t in ("claude", "claude-app", "codex", "gemini") if t in targets), "")
+
+    def new_thread(self, prompt: str, target: str = "", cwd: str = "", lang: str = "") -> bool:
+        """Start a new conversation with `prompt`: in the Claude desktop app, or a CLI agent in a new terminal tab."""
+        from agent_voice import lang as langmod, launch
+
+        prompt = prompt.strip()
+        if not prompt:
+            return False
+        target = target or self._default_target()
+        cwd = launch.default_cwd(cwd or self.state.get("last_cwd", ""))
+        label = launch.LABELS.get(target, target or "an agent")
+        log.info("new thread in %s (%s)", label, cwd)
+        ok = False
+        try:
+            if target == "claude-app":
+                hwnd = self._desktop_window()
+                ok = bool(hwnd) and claudeapp.new_session(hwnd, prompt, Path(cwd).name)
+                if ok:
+                    self._new_window = {"hwnd": hwnd, "at": time.time()}
+            elif target in launch.CLIS:
+                launch.open_terminal(target, prompt, cwd)
+                ok = True
+        except Exception:
+            log.exception("new thread failed")
+        if ok:
+            self._show_banner(prompt, "", "", kind="you", tag=f"new · {label}")
+            self.history = [{"text": prompt, "lang": lang or langmod.detect(prompt), "at": round(time.time())},
+                            *self.history][:5]
+        else:
+            self._show_banner(f"Couldn't start a new thread in {label}. Your prompt is on the clipboard.", "", "",
+                              kind="note", tag="new thread")
+            import pyperclip
+
+            pyperclip.copy(prompt)
+            _beep(300, 150)
+        return ok
+
+    def listen_new_thread(self, target: str = "", cwd: str = "") -> None:
+        """Dictate a new thread's first prompt: what you say next starts it."""
+        self._new_pending = {"target": target, "cwd": cwd}
+        self.reply_now(NEW_THREAD)
+
     def send_text(self, session: str, text: str) -> None:
         """A reply typed in the notch: into that conversation's window, sent, and back to where you were."""
         from agent_voice import lang
@@ -1028,6 +1119,8 @@ class Daemon:
         if session:
             self._reply_session = session
             self._force_submit = True  # you picked the thread: send it, there's no prompt in front of you
+            if session != NEW_THREAD:
+                self._new_pending = {}
         threading.Thread(target=self._auto_listen, daemon=True).start()
 
     def _set_level(self, value: float) -> None:
@@ -1043,13 +1136,20 @@ class Daemon:
         self.state["history"] = self.history
         save_state(self.state)
 
-    def prompt_submitted(self, hwnd: int, session: str = "", source: str = "", title: str = "") -> None:
+    def prompt_submitted(self, hwnd: int, session: str = "", source: str = "", title: str = "", cwd: str = "") -> None:
         """The user sent a new prompt: remember its window (and conversation), and stop talking/listening.
 
         `title`: the conversation's name when the caller knows it (a browser tab's title).
         """
         if session and title:
             self._file_titles[session] = title
+        if cwd and cwd != self.state.get("last_cwd"):
+            self.state["last_cwd"] = cwd  # where a new thread starts by default
+            save_state(self.state)
+        pending = self._new_window
+        if session and pending and session not in self._session_hwnd and time.time() - pending["at"] < 60:
+            hwnd = pending["hwnd"]  # a session we just started in the desktop app: it lives in that window
+            self._new_window = {}
         if hwnd and hwnd != self._target_hwnd:
             self._target_hwnd = hwnd
             self.state["target_hwnd"] = hwnd
@@ -1220,6 +1320,10 @@ class Daemon:
             text, lang = self.transcriber.transcribe(audio)
             log.info("auto-listen lang=%s chars=%d", lang, len(text))
             if self._listen_cancel.is_set() or is_hallucination(text):
+                return
+            if session == NEW_THREAD:  # dictating a new thread's first prompt
+                pending, self._new_pending = self._new_pending, {}
+                self.new_thread(text, pending.get("target", ""), pending.get("cwd", ""), lang)
                 return
             answering = (permission is not None and permission is self.permission) or (
                 question is not None and question is self.question)
@@ -1559,6 +1663,10 @@ class Daemon:
             if self._perms and self._voice_approval(command):  # "Hey Claude, approve Codex"
                 self._heard(command, lang, "", tag="answer")
                 continue
+            new = parse_new_thread(command)
+            if new:  # "Hey Claude, new thread: add a health check"
+                self.new_thread(new[1], {"claude": "", "": ""}.get(new[0], new[0]), lang=lang)
+                continue
             routed = self._routed(command)
             if routed:  # "Hey Claude, tell the notch redesign to run the tests"
                 self._send_to(routed[0], routed[1], lang)
@@ -1591,6 +1699,9 @@ class Daemon:
             "caption": self.speaker.current_text if self.speaker.busy else "",
             "awaiting_reply": self._listen_armed,
             "widget_toggles": self.widget_toggles,
+            "new_thread_opens": self.new_thread_opens,
+            "new_targets": self.new_targets(),
+            "new_default": {"target": self._default_target(), "cwd": self.state.get("last_cwd", "")},
             "last_heard": self.last_heard[-160:],
             "last_heard_lang": self.last_heard_lang,
             "history": self.history,
@@ -1637,6 +1748,7 @@ class Daemon:
             "stop": self.stop,
             "reply": self.reply_now,
             "widget": lambda: setattr(self, "widget_toggles", self.widget_toggles + 1),
+            "new_thread": lambda: setattr(self, "new_thread_opens", self.new_thread_opens + 1),
             "hands_free": lambda: self.set_hands_free(not self.hands_free),
             "mute": lambda: self.set_muted(not self.muted),
             "chime": lambda: self.set_chime(not self.chime),
@@ -1853,6 +1965,14 @@ def _handler(daemon: Daemon):
                 args = (str(data.get("session") or ""), str(data.get("text") or "")[:20000])
                 threading.Thread(target=daemon.send_text, args=args, daemon=True).start()
                 return self._json(200, {"ok": True})
+            if self.path == "/new_thread":
+                target, cwd = str(data.get("target") or ""), str(data.get("cwd") or "")
+                if data.get("listen"):
+                    daemon.listen_new_thread(target, cwd)
+                else:
+                    args = (str(data.get("text") or "")[:20000], target, cwd)
+                    threading.Thread(target=daemon.new_thread, args=args, daemon=True).start()
+                return self._json(200, {"ok": True})
             if self.path == "/listen_cancel":  # typing a reply: the open mic would hear the keyboard
                 daemon.cancel_listen()
                 return self._json(200, {"ok": True})
@@ -1880,7 +2000,8 @@ def _handler(daemon: Daemon):
                 return self._json(200, {"ok": True})
             if self.path == "/prompt":
                 daemon.prompt_submitted(_int(data.get("hwnd")), str(data.get("session") or ""),
-                                        str(data.get("source") or ""), str(data.get("title") or "")[:80])
+                                        str(data.get("source") or ""), str(data.get("title") or "")[:80],
+                                        str(data.get("cwd") or ""))
                 return self._json(200, {"ok": True})
             if self.path == "/activity":
                 if data.get("done"):

@@ -29,8 +29,8 @@ from PySide6.QtGui import (
     QRadialGradient,
 )
 from PySide6.QtCore import QEvent
-from PySide6.QtWidgets import (QApplication, QFrame, QLabel, QMenu, QPlainTextEdit, QSystemTrayIcon, QToolTip,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPlainTextEdit,
+                               QPushButton, QSystemTrayIcon, QToolTip, QVBoxLayout, QWidget)
 
 from agent_voice import client
 from agent_voice.config import HOME, load_config
@@ -483,8 +483,14 @@ class Banner(QWidget):
             self.dismiss()
 
 
+TARGET_LABELS = {"claude-app": "Claude app", "claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI"}
+NEW = "__new__"  # the box's "session" while it starts a new thread
+
+
 class ReplyBox(QWidget):
-    """Type a reply to one conversation: Enter sends it there, Shift+Enter starts a new line, Esc closes.
+    """Type a reply to one conversation (Enter sends it there, Shift+Enter starts a new line, Esc closes), or
+    the first prompt of a new thread: where it runs (the Claude app, a CLI agent in a new tab) and in which
+    folder, typed or dictated.
 
     Unlike the notch, this window does take the keyboard (you type in it); it closes as soon as you click
     elsewhere, and what you typed stays for next time.
@@ -501,11 +507,34 @@ class ReplyBox(QWidget):
         layout.setContentsMargins(16, 10, 16, 8)
         layout.setSpacing(6)
         self.title = QLabel()
+        # New thread: where it runs, and in which folder.
+        self.options = QWidget()
+        row = QHBoxLayout(self.options)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        self.chips: dict[str, QPushButton] = {}
+        for key, label in TARGET_LABELS.items():
+            chip = QPushButton(label)
+            chip.setCheckable(True)
+            chip.setCursor(Qt.PointingHandCursor)
+            chip.clicked.connect(lambda _=False, k=key: self._pick(k))
+            self.chips[key] = chip
+            row.addWidget(chip)
+        row.addStretch(1)
+        self.talk = QPushButton(f"{ICONS['mic']}  Talk")
+        self.talk.setObjectName("talk")
+        self.talk.setCursor(Qt.PointingHandCursor)
+        self.talk.clicked.connect(self._dictate)
+        row.addWidget(self.talk)
+        self.folder = QLineEdit()
+        self.folder.setPlaceholderText("Folder")
+        self.folder.installEventFilter(self)
+        self.target = ""
         self.edit = QPlainTextEdit()
         self.edit.setPlaceholderText("Your reply")
         self.edit.installEventFilter(self)
-        hint = QLabel("Enter to send · Shift+Enter for a new line · Esc to close")
-        for w in (self.title, self.edit, hint):
+        self.hint = QLabel("Enter to send · Shift+Enter for a new line · Esc to close")
+        for w in (self.title, self.options, self.folder, self.edit, self.hint):
             layout.addWidget(w)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -515,15 +544,53 @@ class ReplyBox(QWidget):
             "#box{background:#000;border:1.5px solid #10E0A0;border-radius:18px;}"
             f"QLabel{{color:rgba(255,255,255,150);font-size:{_font(FONT_TEXT, 8).pointSize()}pt;{head}}}"
             f"QPlainTextEdit{{background:transparent;border:none;color:#fff;font-size:"
-            f"{_font(FONT_TEXT, 10).pointSize()}pt;{text}selection-background-color:#10E0A0;}}")
-        hint.setStyleSheet("color:rgba(255,255,255,90);")
+            f"{_font(FONT_TEXT, 10).pointSize()}pt;{text}selection-background-color:#10E0A0;}}"
+            f"QLineEdit{{background:rgba(255,255,255,14);border:none;border-radius:8px;padding:3px 8px;"
+            f"color:rgba(255,255,255,200);font-size:{_font(FONT_TEXT, 8).pointSize()}pt;{text}}}"
+            f"QPushButton{{background:rgba(255,255,255,18);border:none;border-radius:10px;padding:3px 10px;"
+            f"color:rgba(255,255,255,190);font-size:{_font(FONT_TEXT, 8).pointSize()}pt;{text}}}"
+            "QPushButton:hover{background:rgba(255,255,255,40);}"
+            "QPushButton:checked{background:rgba(16,224,160,70);color:#fff;}"
+            f"#talk{{font-family:'{ICON_FONT}','{FONT_TEXT}';}}")
+        self.hint.setStyleSheet("color:rgba(255,255,255,90);")
 
     def open(self, item: dict, anchor: QRectF, width: int) -> None:
         if item.get("session") != self.session:
             self.edit.clear()  # a draft belongs to its conversation
         self.session = item.get("session", "")
         self.title.setText(f"Reply to {item.get('title') or 'the conversation'}")
-        self.resize(width, 132)
+        self.options.hide()
+        self.folder.hide()
+        self.edit.setPlaceholderText("Your reply")
+        self._show(anchor, width, 132)
+
+    def open_new(self, targets: list[str], default: dict, anchor: QRectF, width: int) -> None:
+        """A new thread: pick where it runs (like your last one by default) and its folder, then type or talk."""
+        if self.session != NEW:
+            self.edit.clear()
+            self.folder.setText(default.get("cwd", ""))
+        self.session = NEW
+        self.title.setText("New thread")
+        for key, chip in self.chips.items():
+            chip.setVisible(key in targets)
+        self._pick(default.get("target") if default.get("target") in targets else (targets or [""])[0])
+        self.options.show()
+        self.edit.setPlaceholderText("What should it do?" if targets else "No agent found to start a thread with")
+        self._show(anchor, width, 196)
+
+    def _pick(self, key: str) -> None:
+        self.target = key
+        for k, chip in self.chips.items():
+            chip.setChecked(k == key)
+        # The desktop app picks the folder's group; a terminal opens in it. Both use the folder.
+        self.folder.setVisible(bool(key))
+
+    def _dictate(self) -> None:
+        self.hide()
+        _post("/new_thread", {"listen": True, "target": self.target, "cwd": self.folder.text().strip()})
+
+    def _show(self, anchor: QRectF, width: int, height: int) -> None:
+        self.resize(width, height)
         geo = QApplication.primaryScreen().geometry()
         y = int(max(geo.top() + 4, anchor.bottom() + 8))
         self.move(int(anchor.center().x() - width / 2), y)
@@ -535,12 +602,22 @@ class ReplyBox(QWidget):
 
     def send(self) -> None:
         text = self.edit.toPlainText().strip()
-        if text:
-            self.hide()  # first: the reply goes to the agent's window, then you're brought back
+        if not text:
+            return
+        self.hide()  # first: the reply goes to the agent's window, then you're brought back
+        if self.session == NEW:
+            _post("/new_thread", {"text": text, "target": self.target, "cwd": self.folder.text().strip()})
+        else:
             _post("/send", {"session": self.session, "text": text})
-            self.edit.clear()
+        self.edit.clear()
 
     def eventFilter(self, obj, ev):
+        if obj is self.folder and ev.type() == QEvent.KeyPress and ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.edit.setFocus()  # Enter in the folder line moves on to the prompt
+            return True
+        if obj is self.folder and ev.type() == QEvent.KeyPress and ev.key() == Qt.Key_Escape:
+            self.hide()
+            return True
         if obj is self.edit and ev.type() == QEvent.KeyPress:
             if ev.key() in (Qt.Key_Return, Qt.Key_Enter) and not ev.modifiers() & Qt.ShiftModifier:
                 self.send()
@@ -638,6 +715,7 @@ class VoiceWidget(QWidget):
         self.poller = Poller()
         self.poller.status.connect(self._on_status)
         self._toggles_seen: int | None = None
+        self._opens_seen: int | None = None
         self.tray: Tray | None = None
         self.frame = QTimer(self, interval=33, timeout=self._tick)
         self.frame.start()
@@ -814,6 +892,11 @@ class VoiceWidget(QWidget):
             if self._toggles_seen is not None and toggles != self._toggles_seen:
                 self.toggle_visible()
             self._toggles_seen = toggles
+        opens = self.st.get("new_thread_opens")  # the new-thread hotkey (the daemon owns global hotkeys)
+        if opens is not None:
+            if self._opens_seen is not None and opens != self._opens_seen:
+                self.open_new_thread()
+            self._opens_seen = opens
         if self.tray:
             self.tray.refresh()
 
@@ -1043,6 +1126,7 @@ class VoiceWidget(QWidget):
             for i in range(len(self._history())):
                 r[f"hist:{i}"] = self._history_row(i)
             r.update(self._agent_rects())
+            r["newthread"] = self._new_rect()
         return r
 
     def _needs_h(self) -> float:
@@ -1090,7 +1174,7 @@ class VoiceWidget(QWidget):
 
     def _hist_y(self) -> float:
         n = len(self._threads())
-        return self._threads_y() + (16 + n * THREAD_H + 8 if n else 0)
+        return self._threads_y() + 16 + n * THREAD_H + 8  # the header stays: it holds "+ New"
 
     def _expanded_h(self) -> int:
         """The open panel fits what it shows: no empty rows."""
@@ -1658,11 +1742,12 @@ class VoiceWidget(QWidget):
                        Qt.AlignLeft | Qt.AlignVCenter, fm.elidedText(label, Qt.ElideRight, int(room + 6)))
         p.restore()
 
+    def _new_rect(self) -> QRectF:
+        return QRectF(self.pw - 14 - 52, self._threads_y() + 1, 52, 15)
+
     def _paint_threads(self, p: QPainter, progress: float) -> None:
-        """Recent conversations with what each is doing; click one to open it."""
+        """Recent conversations with what each is doing; click one to open it. "+ New" starts another."""
         threads = self._threads()
-        if not threads:
-            return
         appear = max(0.0, min(1.0, (progress - 0.5) / 0.5))
         if appear <= 0:
             return
@@ -1675,8 +1760,16 @@ class VoiceWidget(QWidget):
         p.setPen(QColor(226, 232, 240, 105))
         queued = int(self.st.get("queued") or 0)
         limits = self._limits_label()
-        p.drawText(QRectF(14, self._threads_y(), self.pw - 28, 16), Qt.AlignRight | Qt.AlignVCenter,
-                   f"{queued} waiting to speak" if queued else limits or "click to open")
+        new = self._new_rect()
+        p.drawText(QRectF(14, self._threads_y(), new.x() - 22, 16), Qt.AlignRight | Qt.AlignVCenter,
+                   f"{queued} waiting to speak" if queued else limits or ("click to open" if threads else "none yet"))
+        ht = self.hover_t.get("newthread", 0.0)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(16, 224, 160, int(40 + 70 * ht)))
+        p.drawRoundedRect(new, new.height() / 2, new.height() / 2)
+        p.setFont(self.f_chip)
+        p.setPen(QColor(255, 255, 255, 235))
+        p.drawText(new, Qt.AlignCenter, "+ New")
         labels = {"speaking": "speaking", "listening": "listening", "queued": "next up",
                   "question": "asks you", "permission": "needs approval", "working": "working",
                   "input": "waiting for you"}
@@ -1865,6 +1958,8 @@ class VoiceWidget(QWidget):
             return "Collapse" if self.expanded else "All actions"
         if key == "tuck":
             return "Tuck away until something new happens"
+        if key == "newthread":
+            return f"Start a new thread: type or say its first prompt ({_hotkey_label(self.hotkeys.get('new_thread', ''))})"
         if key == "guide":
             return "Setup guide: every agent, step by step"
         if key and key.startswith("pill:"):
@@ -1977,6 +2072,8 @@ class VoiceWidget(QWidget):
             self.toggle_expanded()
         elif key == "tuck":
             self.tuck()
+        elif key == "newthread":
+            self.open_new_thread()
         elif key.startswith("pill:"):
             pills = self._pills()
             i = int(key.split(":", 1)[1])
@@ -2126,6 +2223,11 @@ class VoiceWidget(QWidget):
         if paths or text.strip():
             e.acceptProposedAction()
             _post("/attach", {"paths": paths, "text": text, "session": target["session"]})
+
+    def open_new_thread(self) -> None:
+        """Start a new thread: the box under the notch, with where it can run."""
+        self.reply_box.open_new(list(self.st.get("new_targets") or []), self.st.get("new_default") or {},
+                                QRectF(self.geometry()), int(self.pw))
 
     def open_reply(self, item: dict) -> None:
         """Type a reply to a conversation (from its banner or its thread row)."""
@@ -2290,6 +2392,7 @@ class Tray(QSystemTrayIcon):
         add("Compact widget (orb only)", w.toggle_compact, checked=w.compact)
         add("Notch (top of the screen)", w.toggle_notch, checked=w.notch)
         m.addSeparator()
+        add("New thread…", w.open_new_thread, online, key=hk.get("new_thread", ""))
         add("Reply now", lambda: _post("/reply"), online, key=hk.get("reply", ""))
         add("Stop", lambda: _post("/stop"), online, key=hk.get("stop", ""))
         add("Read selection", lambda: _post("/read"), online, key=hk.get("read_selection", ""))

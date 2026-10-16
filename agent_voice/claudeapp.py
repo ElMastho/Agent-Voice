@@ -82,6 +82,23 @@ def pick_option(names: list[str], label: str) -> int:
     return -1
 
 
+# The sidebar's "new session" buttons, in the app's languages: "New session" opens one with no folder,
+# "New session in <folder>, added to group <group>" one in that folder.
+NEW_SESSION = ("new session", "nouvelle session")
+_IN_FOLDER = (" in ", " dans ")
+
+
+def pick_new_session(names: list[str], folder: str = "") -> int:
+    """Index of the button that starts a new session (in `folder` when one is given and listed), else -1."""
+    lowered = [n.lower().strip() for n in names]
+    if folder:
+        want = folder.lower()
+        for i, n in enumerate(lowered):
+            if n.startswith(NEW_SESSION) and any(f"{sep}{want}," in n or n.endswith(f"{sep}{want}") for sep in _IN_FOLDER):
+                return i
+    return next((i for i, n in enumerate(lowered) if n in NEW_SESSION), -1)
+
+
 if sys.platform == "win32":
     import ctypes
     from ctypes import wintypes
@@ -245,30 +262,66 @@ if sys.platform == "win32":
             if i < 0:
                 log.warning("no prompt box found in session %r", title)
                 return False
-            prompt = controls[i][0]
-            _set_text(UIA, prompt, text)
-            deadline = time.time() + 2.0
-            sent = False
-            while not sent and time.time() < deadline:  # the send button enables once the editor has text
-                after = _controls(uia, UIA, root)
-                j = _prompt(after)
-                send = next((e for e, edit, name in after[j + 1:]
-                             if not edit and is_send(name) and e.CurrentIsEnabled), None)
-                sent = send is not None and _invoke(UIA, send)
-                if not sent:
-                    time.sleep(0.1)
-            if not sent:
-                log.warning("no enabled send button in session %r", title)
-                return False
-            deadline = time.time() + 3.0
-            while time.time() < deadline:
-                if not _text(UIA, prompt).strip():
-                    return True
-                time.sleep(0.1)
-            log.warning("message to %r was not taken", title)
-            return False
+            return _type_and_send(uia, UIA, root, controls[i][0], text, title)
         except Exception:
             log.exception("could not send to session %r", title)
+            return False
+
+    def _type_and_send(uia, UIA, root, prompt, text: str, what: str) -> bool:
+        """Fill the prompt box and press its send button; True once the box has emptied (the app took it)."""
+        _set_text(UIA, prompt, text)
+        deadline = time.time() + 2.0
+        sent = False
+        while not sent and time.time() < deadline:  # the send button enables once the editor has text
+            after = _controls(uia, UIA, root)
+            j = _prompt(after)
+            send = next((e for e, edit, name in after[j + 1:]
+                         if not edit and is_send(name) and e.CurrentIsEnabled), None)
+            sent = send is not None and _invoke(UIA, send)
+            if not sent:
+                time.sleep(0.1)
+        if not sent:
+            log.warning("no enabled send button in %r", what)
+            return False
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if not _text(UIA, prompt).strip():
+                return True
+            time.sleep(0.1)
+        log.warning("message to %r was not taken", what)
+        return False
+
+    def new_session(hwnd: int, text: str, folder: str = "", timeout: float = 8.0) -> bool:
+        """Start a new Claude Code session in the desktop app (in `folder`'s group when it has one) with `text`.
+
+        Works without bringing the window forward. True once the app took the first message.
+        """
+        try:
+            UIA, uia = _uia()
+            root = uia.ElementFromHandle(hwnd)
+            before = _document_name(uia, UIA, root)
+            deadline = time.time() + timeout
+            while True:
+                buttons = [b for b in _find(uia, UIA, root, UIA.UIA_ButtonControlTypeId)
+                           if b.GetCurrentPattern(UIA.UIA_InvokePatternId)]
+                i = pick_new_session([b.CurrentName or "" for b in buttons], folder)
+                if i >= 0:
+                    break
+                if time.time() >= deadline:
+                    log.warning("no new-session button in the desktop app (sidebar hidden?)")
+                    return False
+                time.sleep(0.25)
+            _invoke(UIA, buttons[i])
+            while time.time() < deadline:  # the new session's page, with an empty prompt box
+                controls = _controls(uia, UIA, root)
+                j = _prompt(controls)
+                if j >= 0 and _document_name(uia, UIA, root) != before and not _text(UIA, controls[j][0]).strip():
+                    return _type_and_send(uia, UIA, root, controls[j][0], text, "a new session")
+                time.sleep(0.15)
+            log.warning("the new session did not open")
+            return False
+        except Exception:
+            log.exception("could not start a new session")
             return False
 
     def _card(uia, UIA, root) -> list[tuple]:
@@ -337,6 +390,9 @@ else:
         return False
 
     def send_message(hwnd: int, title: str, text: str, timeout: float = 3.0) -> bool:  # noqa: ARG001
+        return False
+
+    def new_session(hwnd: int, text: str, folder: str = "", timeout: float = 8.0) -> bool:  # noqa: ARG001
         return False
 
     def answer_question(hwnd: int, title: str, label: str = "", other: str = "",  # noqa: ARG001

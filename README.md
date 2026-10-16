@@ -42,6 +42,7 @@ Everything runs **locally on the CPU**: no cloud, no API key, no audio leaving y
 | 🙋 **Needs you** | Approvals, questions and agents waiting for input, from every agent, in one list: *Allow* / *Deny* with a click, or say *"approve Codex"*. |
 | 🔵 **A dot per conversation** | Who's working, who waits on you, who just finished, at a glance; click a dot to jump to it. |
 | 🗂️ **While you were away** | Back at your desk (or out of a call): *"Notch redesign finished; Codex needs you."* |
+| ➕ **Start a new thread** | `Ctrl+Alt+N`, *+ New* in the panel, or *"Hey Claude, new thread: add a health check"*: a new Claude Code session in the desktop app, or Claude Code / Codex / Gemini CLI in a new terminal tab. |
 | 📣 **Talk to any thread by name** | *"Tell Codex to run the tests"* is typed into Codex's window and sent, wherever you are. |
 | 📊 **Results and usage** | *Done · 3 files changed · tests passed*, each conversation's context, Claude's 5-hour and weekly limits. |
 | 📎 **Drop files on the notch** | Screenshots, logs, files: dropped on the notch, they land in the conversation's prompt. |
@@ -174,6 +175,7 @@ Right-click the notch → *Float the widget again*: the same black island, round
 - **Push-to-talk** (hold `Ctrl+Alt+Space`): dictate into any app.
 - **Voice commands** in the reply window: *"repeat that"*, *"slower"*, *"faster"*, *"never mind"* (or *"répète"*, *"plus lentement"*, *"plus vite"*, *"annule"*) drive agent-voice instead of being sent.
 - **Approvals**: when Claude Code asks to run a command or edit a file, the request is read out and shown with *Allow once* / *Deny*. Say *"yes"* / *"no"* (*"oui"* / *"non"*) or click; with no answer within a minute, Claude shows its own dialog. Voice never grants more than once. Several agents can ask at once: the first is read out, the others wait in **Needs you**, and *"approve Codex"* answers the one you name.
+- **New threads**: `Ctrl+Alt+N` (or *+ New* in the panel's Threads, or the tray) opens a box under the notch: pick where it runs (**Claude app**: a new Claude Code session in the desktop app, in your folder's group; or **Claude Code**, **Codex**, **Gemini CLI** in a new Windows Terminal tab), check the folder (the one you last worked in), then type the first prompt or press **Talk** and say it. By voice: *"Hey Claude, new thread: add a health check"*, *"start a new conversation with Codex to …"*, *"nouvelle session : …"*. From a script: `agent-voice new "prompt" [--agent claude-app|claude|codex|gemini] [--cwd DIR]`.
 - **Messages by name**: *"Hey Claude, tell Codex to run the tests"* (or *"dis à Codex de lancer les tests"*, or in the reply window *"tell the notch redesign to commit"*) types *"Run the tests"* into that conversation's own window, sends it, and brings you back.
 - **Questions**: when the agent asks you to choose (Claude Code's questions, Cline's follow-ups), the options appear in the notch and are read out. Click one or say it: *"the second one"*, *"option 3"*, or its name; anything else is sent as your own answer.
 - **Several conversations**: when a second one finishes while another is talking (or waiting for you), it waits its turn and is announced by name. Each speaks a little lower or higher than the others (`thread_voices`), so you can tell them apart without looking.
@@ -193,6 +195,7 @@ Right-click the notch → *Float the widget again*: the same black island, round
 | `Ctrl+Alt+M` | **Silent** on/off |
 | `Ctrl+Alt+R` | **Read** the selected text aloud |
 | `Ctrl+Alt+W` | **Show / hide** the notch |
+| `Ctrl+Alt+N` | **New thread**: type or say its first prompt |
 
 All of them can be changed in `~/.agent-voice/config.json`.
 
@@ -326,6 +329,7 @@ agent-voice widget                              reopen the notch + tray icon
 agent-voice install | uninstall [claude codex gemini cursor cline antigravity claude-desktop windsurf vscode browser | all]
 agent-voice mcp [--client NAME]                 the MCP server (MCP apps start it themselves)
 agent-voice watch <command>                     run a terminal agent with a voice
+agent-voice new "prompt" [--agent A] [--cwd D]  start a new thread (Claude app, or a CLI agent in a new tab)
 agent-voice apps [on|off|toggle]                read ChatGPT / Copilot / Perplexity desktop notifications
 agent-voice usage on|off                        Claude Code's rate limits in the notch (adds a status line)
 agent-voice autostart on|off                    start with Windows (a LaunchAgent on macOS)

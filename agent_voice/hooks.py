@@ -337,7 +337,7 @@ def hook_claude(raw: str) -> None:
         from agent_voice import winfocus
 
         client.request("/prompt", {"hwnd": winfocus.foreground(), "session": str(data.get("session_id", "")),
-                                   "source": "claude"}, timeout=1.0)
+                                   "source": "claude", "cwd": str(data.get("cwd") or "")}, timeout=1.0)
         if summary_enabled():
             # Claude Code adds this to the model's context for the turn.
             out = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": SUMMARY_INSTRUCTION}}

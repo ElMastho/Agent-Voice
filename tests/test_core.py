@@ -828,3 +828,56 @@ def test_connecting_an_agent_says_how_it_went(daemon, monkeypatch):
     monkeypatch.setitem(server.install.INSTALLERS, "cursor", broken)
     daemon.install_agent("cursor")
     assert daemon.banner["text"] == "Couldn't connect Cursor: bad JSON"
+
+
+def test_new_thread_phrases():
+    from agent_voice.server import parse_new_thread
+
+    assert parse_new_thread("New thread: fix the login bug") == ("", "Fix the login bug")
+    assert parse_new_thread("start a new conversation with Codex to add a health check") == ("codex", "Add a health check")
+    assert parse_new_thread("nouvelle session : ajoute des tests") == ("", "Ajoute des tests")
+    assert parse_new_thread("new thread") is None and parse_new_thread("I need a new thread soon") is None
+
+
+def test_new_session_button_in_the_desktop_app():
+    from agent_voice.claudeapp import pick_new_session
+
+    names = ["New", "New session with no folder selected, added to group CV",
+             "New session in agent-voice, added to group Agent Voice", "New session"]
+    assert pick_new_session(names, "agent-voice") == 2  # in that folder's group
+    assert pick_new_session(names, "elsewhere") == 3 and pick_new_session(names) == 3
+    assert pick_new_session(["Nouvelle session dans agent-voice, ajoutée au groupe Agent Voice"], "agent-voice") == 0
+    assert pick_new_session(["Settings"]) == -1
+
+
+def test_new_thread_goes_to_the_app_or_a_terminal(daemon, monkeypatch, tmp_path):
+    from agent_voice import launch, server
+
+    started = []
+    monkeypatch.setattr(server.claudeapp, "new_session", lambda hwnd, text, folder: started.append(("app", hwnd, text, folder)) or True)
+    monkeypatch.setattr(server.claudeapp, "is_desktop_app", lambda hwnd: hwnd == 7)
+    monkeypatch.setattr(launch, "open_terminal", lambda agent, prompt, cwd: started.append(("tab", agent, prompt, cwd)))
+    monkeypatch.setattr(launch, "targets", lambda app: (["claude-app"] if app else []) + ["claude"])
+    daemon._session_hwnd["a"] = 7
+    daemon._last_session = "a"
+    daemon.state["last_cwd"] = str(tmp_path)
+    assert daemon._default_target() == "claude-app"  # your last thread was in the app
+    assert daemon.new_thread("Add a health check")
+    assert started[-1] == ("app", 7, "Add a health check", tmp_path.name)
+    assert daemon.banner["kind"] == "you" and daemon.banner["tag"] == "new · Claude app"
+    daemon.prompt_submitted(0, "fresh", "claude")  # the new session's first prompt: it lives in the app's window
+    assert daemon._session_hwnd["fresh"] == 7
+    daemon.new_thread("Fix the build", "claude", str(tmp_path))
+    assert started[-1] == ("tab", "claude", "Fix the build", str(tmp_path))
+
+
+def test_launch_trampoline_reads_and_removes_the_prompt(tmp_path, monkeypatch):
+    from agent_voice import launch
+
+    ran = []
+    monkeypatch.setattr(launch, "find_cli", lambda agent: "C:/bin/gemini.exe")
+    monkeypatch.setattr(launch.subprocess, "call", lambda cmd: ran.append(cmd) or 0)
+    prompt = tmp_path / "p.txt"
+    prompt.write_text('Fix "quotes" & pipes | ; too', encoding="utf-8")
+    assert launch.run("gemini", str(prompt)) == 0
+    assert ran == [["C:/bin/gemini.exe", "-i", 'Fix "quotes" & pipes | ; too']] and not prompt.exists()

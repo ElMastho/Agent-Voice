@@ -1889,6 +1889,8 @@ class Daemon:
             self._file_titles[session] = title
         if cwd and cwd != self.state.get("last_cwd"):
             self.state["last_cwd"] = cwd  # where a new thread starts by default
+            recent = [c for c in self.state.get("recent_cwds") or [] if c != cwd]
+            self.state["recent_cwds"] = [cwd, *recent][:8]  # offered in the new-thread box
             save_state(self.state)
         pending = self._new_window
         if session and pending and session not in self._session_hwnd and time.time() - pending["at"] < 60:
@@ -2630,7 +2632,8 @@ class Daemon:
             "widget_toggles": self.widget_toggles,
             "new_thread_opens": self.new_thread_opens,
             "new_targets": self.new_targets(),
-            "new_default": {"target": self._default_target(), "cwd": self.state.get("last_cwd", "")},
+            "new_default": {"target": self._default_target(), "cwd": self.state.get("last_cwd", ""),
+                            "recent": self.state.get("recent_cwds") or []},
             "last_heard": self.last_heard[-160:],
             "last_heard_lang": self.last_heard_lang,
             "history": self.history,

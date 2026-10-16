@@ -149,7 +149,7 @@ Prompts you use all the time get a short name: *"Hey Claude, run the tests"* sen
 Press **`Ctrl+Alt+N`** (or *+ New* in the panel's Threads header, or the tray menu): a box opens under the notch.
 
 - **Where it runs**: *Claude app* starts a new Claude Code session in the desktop app (in the group of the folder below, like its "New session in …" button; the app doesn't come forward), *Claude Code*, *Codex* or *Gemini CLI* open a new Windows Terminal tab running that agent in the folder. Only what's installed is offered; the default is where your last conversation was.
-- **Folder**: the one you last prompted from; change it if you like.
+- **Folder**: the one you last prompted from. **Folders** next to it lists the ones you worked in lately, and *Browse…* opens the folder picker; typing a path completes it as you go.
 - **The first prompt**: type it and press Enter, or press **Talk** and say it.
 
 By voice, with the wake word on: *"Hey Claude, new thread: add a health check"*, *"start a new conversation with Codex to …"*, *"nouvelle session : …"*. The new thread joins the Threads list as soon as it starts.

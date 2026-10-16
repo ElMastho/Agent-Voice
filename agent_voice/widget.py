@@ -94,6 +94,7 @@ def _font(family: str, size: int) -> QFont:
 
 ICONS = {
     "phone": "\ue8ea",
+    "folder": "\ue838",
     "clock": "\ue823",
     "mic": "",
     "stop": "",
@@ -120,7 +121,7 @@ ICONS = {
 }
 
 if sys.platform != "win32":
-    ICONS.update({"phone": "☏", "clock": "◷"})
+    ICONS.update({"phone": "☏", "clock": "◷", "folder": "▤"})
     ICONS.update({"mic": "●", "stop": "■", "skip": "⏭", "chat": "✎", "send": "➤", "volume": "♪", "mute": "✕",
                   "read": "☰", "power": "⏻", "bell": "♫", "copy": "⧉", "check": "✓", "bolt": "ϟ", "list": "≡",
                   "shield": "✓", "down": "⌄", "up": "⌃", "replay": "↻", "open": "↗", "help": "?", "keyboard": "⌨", "tuck": "–"})
@@ -696,8 +697,21 @@ class ReplyBox(QWidget):
         self.talk.clicked.connect(self._dictate)
         row.addWidget(self.talk)
         self.folder = QLineEdit()
-        self.folder.setPlaceholderText("Folder")
+        self.folder.setPlaceholderText("Folder: pick one with the button, or type its path")
         self.folder.installEventFilter(self)
+        self._picking = False  # the folder dialog is open: losing the focus to it mustn't close the box
+        self.recent: list[str] = []
+        self._complete_folders()
+        self.pick = QPushButton(f"{ICONS['folder']}  Folders")
+        self.pick.setObjectName("pick")
+        self.pick.setCursor(Qt.PointingHandCursor)
+        self.pick.clicked.connect(self._folder_menu)
+        self.folder_row = QWidget()
+        frow = QHBoxLayout(self.folder_row)
+        frow.setContentsMargins(0, 0, 0, 0)
+        frow.setSpacing(6)
+        frow.addWidget(self.folder, 1)
+        frow.addWidget(self.pick)
         self.target = ""
         self.edit = QPlainTextEdit()
         self.edit.setPlaceholderText("Your reply")
@@ -713,7 +727,7 @@ class ReplyBox(QWidget):
         foot.setContentsMargins(0, 0, 0, 0)
         foot.addWidget(self.hint, 1)
         foot.addWidget(self.when)
-        for w in (self.title, self.options, self.folder, self.edit, bottom):
+        for w in (self.title, self.options, self.folder_row, self.edit, bottom):
             layout.addWidget(w)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -730,7 +744,7 @@ class ReplyBox(QWidget):
             f"color:rgba(255,255,255,190);font-size:{_font(FONT_TEXT, 8).pointSize()}pt;{text}}}"
             "QPushButton:hover{background:rgba(255,255,255,40);}"
             "QPushButton:checked{background:rgba(16,224,160,70);color:#fff;}"
-            f"#talk{{font-family:'{ICON_FONT}','{FONT_TEXT}';}}")
+            f"#talk, #pick{{font-family:'{ICON_FONT}','{FONT_TEXT}';}}")
         self.hint.setStyleSheet("color:rgba(255,255,255,90);")
 
     def open(self, item: dict, anchor: QRectF, width: int) -> None:
@@ -739,7 +753,7 @@ class ReplyBox(QWidget):
         self.session = item.get("session", "")
         self.title.setText(f"Reply to {item.get('title') or 'the conversation'}")
         self.options.hide()
-        self.folder.hide()
+        self.folder_row.hide()
         self.edit.setPlaceholderText("Your reply")
         self._show(anchor, width, 132)
 
@@ -748,6 +762,7 @@ class ReplyBox(QWidget):
         if self.session != NEW:
             self.edit.clear()
             self.folder.setText(default.get("cwd", ""))
+        self.recent = [c for c in default.get("recent") or [] if c]
         self.session = NEW
         self.title.setText("New thread")
         for key, chip in self.chips.items():
@@ -762,7 +777,54 @@ class ReplyBox(QWidget):
         for k, chip in self.chips.items():
             chip.setChecked(k == key)
         # The desktop app picks the folder's group; a terminal opens in it. Both use the folder.
-        self.folder.setVisible(bool(key))
+        self.folder_row.setVisible(bool(key))
+
+    def _complete_folders(self) -> None:
+        """Typing a path completes it, folders only, like the address bar of the file explorer."""
+        from PySide6.QtCore import QDir
+        from PySide6.QtWidgets import QCompleter, QFileSystemModel
+
+        model = QFileSystemModel(self)
+        model.setFilter(QDir.AllDirs | QDir.NoDotAndDotDot | QDir.Drives)
+        model.setRootPath("")
+        completer = QCompleter(model, self)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.folder.setCompleter(completer)
+
+    def _folder_menu(self) -> None:
+        """The folders you worked in lately, and Browse… for any other."""
+        menu = QMenu(self)
+        menu.setStyleSheet(MENU_STYLE)
+        for path in self.recent[:8]:
+            act = menu.addAction(path)
+            act.triggered.connect(lambda _=False, p=path: self._use_folder(p))
+        if self.recent:
+            menu.addSeparator()
+        menu.addAction("Browse…").triggered.connect(self._browse)
+        self._picking = True
+        menu.exec(self.pick.mapToGlobal(self.pick.rect().bottomLeft()))
+        self._picking = False
+
+    def _browse(self) -> None:
+        from pathlib import Path
+
+        from PySide6.QtWidgets import QFileDialog
+
+        self._picking = True
+        try:
+            start = self.folder.text().strip() or str(Path.home())
+            chosen = QFileDialog.getExistingDirectory(self, "Where should the new thread work?", start)
+        finally:
+            self._picking = False
+        if chosen:
+            self._use_folder(str(Path(chosen)))
+        self.show()
+        self.activateWindow()
+        self.edit.setFocus()
+
+    def _use_folder(self, path: str) -> None:
+        self.folder.setText(path)
+        self.edit.setFocus()
 
     def _dictate(self) -> None:
         self.hide()
@@ -808,6 +870,8 @@ class ReplyBox(QWidget):
         self.edit.clear()
 
     def eventFilter(self, obj, ev):
+        if not hasattr(self, "when"):
+            return super().eventFilter(obj, ev)  # still being built (the folder completer sends events early)
         if obj is self.when and ev.type() == QEvent.KeyPress and ev.key() in (Qt.Key_Return, Qt.Key_Enter):
             self.send()
             return True
@@ -830,7 +894,8 @@ class ReplyBox(QWidget):
         return super().eventFilter(obj, ev)
 
     def changeEvent(self, ev):
-        if ev.type() == QEvent.ActivationChange and not self.isActiveWindow() and self.isVisible():
+        if (ev.type() == QEvent.ActivationChange and not self.isActiveWindow() and self.isVisible()
+                and not self._picking):
             self.hide()  # clicked elsewhere: out of the way (the draft stays)
         super().changeEvent(ev)
 

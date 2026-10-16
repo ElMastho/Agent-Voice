@@ -329,3 +329,20 @@ def test_banner_follows_the_notch_width(app, monkeypatch):
     assert w.banner.y() >= w.visual_rect().bottom()  # right under the notch
     w.banner.step(QRectF(0, 0, 500, 44), widget.FRAME, 400)
     assert w.banner.width() == 400
+
+
+def test_new_thread_folder_from_recent_or_browse(app, monkeypatch):
+    from PySide6.QtCore import QRectF
+
+    box = widget.ReplyBox()
+    box.open_new(["claude"], {"target": "claude", "cwd": "C:/a", "recent": ["C:/a", "C:/b"]},
+                 QRectF(0, 0, 440, 44), 422)
+    assert box.folder_row.isVisibleTo(box) and box.recent == ["C:/a", "C:/b"] and box.folder.completer() is not None
+    box._use_folder("C:/b")
+    assert box.folder.text() == "C:/b"
+    from PySide6.QtWidgets import QFileDialog
+
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a: "C:/picked"))
+    box._browse()
+    assert box.folder.text().replace("\\", "/") == "C:/picked" and not box._picking
+    box.hide()

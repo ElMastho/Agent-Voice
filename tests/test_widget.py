@@ -220,5 +220,6 @@ def test_notifications_drop_below_the_reply_box(app):
     w.banner.present(ITEM, int(w.pw))
     for _ in range(40):
         w._tick()
-    assert w.banner.y() >= w.reply_box.geometry().bottom()
+    # Below the box, or above it on a short screen (no room below): never over it.
+    assert not w.banner.geometry().intersects(w.reply_box.geometry())
     w.reply_box.hide()

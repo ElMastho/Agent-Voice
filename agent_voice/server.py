@@ -335,6 +335,18 @@ _TAKE_BACK = {
 }
 
 
+# Said over the voice to make it stop (and then correct it): not a reply in itself.
+_INTERRUPT = re.compile(r"^(?:stop|stop it|stop talking|wait|no|no no|no wait|wait wait|hold on|hang on|enough|that's enough|"
+                        r"shut up|quiet|be quiet|ok stop|okay stop|actually|arrête|arrête-toi|stop stop|attends|non|"
+                        r"non attends|chut|tais-toi|ça suffit|en fait)$")
+
+
+def match_interrupt(text: str) -> bool:
+    """'No, wait!' -> True: you cut the voice off to say something else, so the mic opens for it."""
+    plain = re.sub(r"[^\w\s'-]", "", text.lower().replace("’", "'"))
+    return bool(_INTERRUPT.match(" ".join(plain.split())))
+
+
 def match_take_back(text: str) -> str | None:
     """'Wait!' -> 'hold', 'cancel that' -> 'cancel', 'send it' -> 'send'; None for anything else (more words)."""
     plain = re.sub(r"[^\w\s'-]", "", text.lower().replace("’", "'")).strip()
@@ -545,6 +557,10 @@ class Daemon:
         # Headphones or speakers: on speakers (if you asked), chimes instead of the voice. You can still pick Voice.
         self._output = outputs.OutputWatch()
         self._speaker_override = False
+        # Talking over the voice (barge-in): the mic listens while it speaks, in headphones (no echo to hear).
+        self._barge_cancel = threading.Event()
+        self._barging = False  # listening for you while it speaks
+        self._barged = False  # ... and you spoke
         if start_threads:
             threading.Thread(target=self._job_loop, name="jobs", daemon=True).start()
             threading.Thread(target=self._listen_monitor, name="listen", daemon=True).start()
@@ -555,6 +571,7 @@ class Daemon:
             threading.Thread(target=self._apps_watch, name="apps", daemon=True).start()
             threading.Thread(target=self._quota_watch, name="quota", daemon=True).start()
             threading.Thread(target=self._duck_loop, name="ducking", daemon=True).start()
+            threading.Thread(target=self._barge_loop, name="barge-in", daemon=True).start()
             threading.Thread(target=self._ensure_start_menu, name="start-menu", daemon=True).start()
 
     def _job_loop(self) -> None:
@@ -2354,6 +2371,8 @@ class Daemon:
                 self._duck_tick(time.time())
             except Exception:
                 log.exception("ducking check failed")
+            if self._barging and not self._barged and not self.speaker.busy:
+                self._barge_cancel.set()  # the voice finished without you cutting in
             free = not (self.speaker.busy or self._listen_armed or self._listening or self._ptt_active
                         or self.question or self.permission)
             if free and self._queue and not self.muted:
@@ -2410,46 +2429,7 @@ class Daemon:
             log.info("auto-listen lang=%s chars=%d", lang, len(text))
             if self._listen_cancel.is_set() or is_hallucination(text):
                 return
-            if session == NEW_THREAD:  # dictating a new thread's first prompt
-                pending, self._new_pending = self._new_pending, {}
-                self.new_thread(text, pending.get("target", ""), pending.get("cwd", ""), lang)
-                return
-            approving = permission is not None and permission is self.permission
-            answering = approving or (question is not None and question is self.question)
-            command = None if answering else match_command(text)
-            look = None if answering or command else parse_look(text)
-            if look is not None:  # "Look at this and tell me what's wrong"
-                self.look_at(session or self._last_session, look, lang)
-                return
-            routed = None if answering or command else self._routed(text)
-            if routed and routed[0] != session:
-                self._send_to(routed[0], routed[1], lang, spoken=True)  # "Tell Codex to ...": goes to Codex, not here
-                return
-            tag = ("answer" if answering else "command" if command
-                   else "sent" if self.hands_free or force_submit else "typed")
-            self._heard(text, lang, session, tag=tag)
-            full, expanded = self._expand(text)
-            rest = strip_wake(text, list(self.config.get("wake_word", {}).get("phrases") or [])) if self.wake else None
-            if approving:
-                if not self._voice_approval(text):
-                    log.info("permission answer unclear: %r", text)
-                    _beep(300)
-            elif answering:
-                self.answer(text=text)
-            elif command:
-                self._run_command(command, session)
-            elif session in self._limited and match_resume(text):
-                self.set_resume(session)
-            elif expanded:  # a saved prompt's name: its full text, sent
-                self._send_spoken(full, target, session, lang)
-            elif rest is not None:
-                # "Hey Claude, ..." while the reply mic was open: the rest is the reply; the phrase alone is nothing.
-                if rest.strip(" .!?,"):
-                    self._dictated(rest, target, session, lang, self.hands_free or force_submit)
-                else:
-                    log.info("reply was only the wake phrase: nothing sent")
-            else:
-                self._dictated(text, target, session, lang, self.hands_free or force_submit)
+            self._handle_heard(text, lang, session, target, question, permission, force_submit)
         except Exception:
             log.exception("auto-listen failed")
         finally:
@@ -2457,6 +2437,116 @@ class Daemon:
             self.speaker.release()
             self._mic_phase = ""
             self.level = 0.0
+
+    def _handle_heard(self, text: str, lang: str, session: str, target: int, question, permission,
+                      force_submit: bool) -> None:
+        """What you said back to a conversation: an answer, a command, a message for another thread, or the reply."""
+        if session == NEW_THREAD:  # dictating a new thread's first prompt
+            pending, self._new_pending = self._new_pending, {}
+            self.new_thread(text, pending.get("target", ""), pending.get("cwd", ""), lang)
+            return
+        approving = permission is not None and permission is self.permission
+        answering = approving or (question is not None and question is self.question)
+        command = None if answering else match_command(text)
+        look = None if answering or command else parse_look(text)
+        if look is not None:  # "Look at this and tell me what's wrong"
+            self.look_at(session or self._last_session, look, lang)
+            return
+        routed = None if answering or command else self._routed(text)
+        if routed and routed[0] != session:
+            self._send_to(routed[0], routed[1], lang, spoken=True)  # "Tell Codex to ...": goes to Codex, not here
+            return
+        tag = ("answer" if answering else "command" if command
+               else "sent" if self.hands_free or force_submit else "typed")
+        self._heard(text, lang, session, tag=tag)
+        full, expanded = self._expand(text)
+        rest = strip_wake(text, list(self.config.get("wake_word", {}).get("phrases") or [])) if self.wake else None
+        if approving:
+            if not self._voice_approval(text):
+                log.info("permission answer unclear: %r", text)
+                _beep(300)
+        elif answering:
+            self.answer(text=text)
+        elif command:
+            self._run_command(command, session)
+        elif session in self._limited and match_resume(text):
+            self.set_resume(session)
+        elif expanded:  # a saved prompt's name: its full text, sent
+            self._send_spoken(full, target, session, lang)
+        elif rest is not None:
+            # "Hey Claude, ..." while the reply mic was open: the rest is the reply; the phrase alone is nothing.
+            if rest.strip(" .!?,"):
+                self._dictated(rest, target, session, lang, self.hands_free or force_submit)
+            else:
+                log.info("reply was only the wake phrase: nothing sent")
+        else:
+            self._dictated(text, target, session, lang, self.hands_free or force_submit)
+
+    # -- talking over the voice ------------------------------------------------------
+    def _barge_ok(self) -> bool:
+        """Listen while it speaks? Voice on, a mic model, and headphones (speakers would let it hear itself)."""
+        cfg = self.config.get("barge_in", {})
+        if not cfg.get("enabled", True) or self.transcriber is None or self.quiet:
+            return False
+        if self._listening or self._ptt_active:
+            return False
+        return self._output.kind == "headphones" or bool(cfg.get("speakers", False))
+
+    def _barge_loop(self) -> None:
+        """While the voice speaks, listen: talk over it and it stops. "Stop" or "no, wait" opens the mic for what
+        you want to say instead; anything longer is your reply, as if the mic had opened after it."""
+        while True:
+            time.sleep(0.2)
+            if self.speaker.busy and self._barge_ok():
+                try:
+                    self._barge_once()
+                except Exception:
+                    log.exception("barge-in failed")
+                    time.sleep(30)
+
+    def _barge_once(self) -> None:
+        from agent_voice import stt
+
+        cfg = self.config["auto_listen"]
+        session = self._voice_session
+        self._barge_cancel.clear()
+        self._barging, self._barged = True, False
+        try:
+            audio = stt.listen_for_speech(3600, float(cfg["silence_seconds"]), float(cfg["max_seconds"]),
+                                          self._barge_cancel, on_level=self._set_level, on_start=self._barge_in,
+                                          start_blocks=10)  # 300 ms: a cough or a click doesn't cut it off
+        finally:
+            self._barging = False
+        if not self._barged:
+            return
+        handed_over = False  # the mic opened for your correction: it owns the listening state from here
+        try:
+            if audio is None:
+                return
+            self._mic_phase = "transcribing"
+            text, lang = self.transcriber.transcribe(audio)
+            log.info("barge-in: %d chars", len(text))
+            if not text or stt.is_hallucination(text):
+                return
+            if match_interrupt(text):  # "No, wait": say what you want instead
+                self._listening, self._mic_phase, self.level = False, "", 0.0
+                handed_over = True
+                self.reply_now(session or None)
+                return
+            target = self._hwnd_for(session) or winfocus.foreground()
+            self._handle_heard(text, lang, session, target, self.question, self.permission, False)
+        finally:
+            self._barged = False
+            if not handed_over and not self._ptt_active:
+                self._listening, self._mic_phase, self.level = False, "", 0.0
+
+    def _barge_in(self) -> None:
+        """You started talking over the voice: it stops at once (and what was queued with it)."""
+        self._barged = True
+        self.speaker.stop()
+        self._listen_armed = False
+        self._listening, self._mic_phase = True, "recording"
+        log.info("barge-in: you talked over the voice")
 
     def _dictated(self, text: str, hwnd: int, session: str, lang: str, submit: bool) -> None:
         """What you said: sent (after the take-back), or typed into the input for you to send."""
@@ -2937,6 +3027,7 @@ class Daemon:
             "output": self.output,
             "in_call": self.in_call,
             "focus": self.focus if self._holding() else "",
+            "barge_in": self._barging,
             "headphones_only": self.headphones_only,
             "dnd_from": self.dnd_from,
             "speakers": self.on_speakers,

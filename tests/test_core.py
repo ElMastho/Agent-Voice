@@ -1515,3 +1515,35 @@ def test_the_natural_voice_kokoro(daemon, monkeypatch, tmp_path):
     with pytest.raises(ValueError):
         kokoro.download()
     assert not list(tmp_path.iterdir())
+
+
+def test_talking_over_the_voice_stops_it(daemon, monkeypatch):
+    from agent_voice import server, stt
+
+    assert server.match_interrupt("No, wait!") and server.match_interrupt("arrête") and not server.match_interrupt(
+        "no I meant the other file")
+    daemon.transcriber = type("T", (), {"transcribe": lambda self, audio: (said[0], "en")})()
+    daemon._output.kind = "speakers"
+    assert not daemon._barge_ok()  # it would hear itself
+    daemon._output.kind = "headphones"
+    assert daemon._barge_ok()
+    stopped, replies, handled = [], [], []
+    monkeypatch.setattr(daemon.speaker, "stop", lambda: stopped.append(1))
+    monkeypatch.setattr(daemon, "reply_now", lambda session=None: replies.append(session))
+    monkeypatch.setattr(daemon, "_handle_heard", lambda text, *a: handled.append(text))
+
+    def you_talk(*args, on_start=None, **kwargs):
+        on_start()
+        return stt.np.zeros(16000, dtype="float32")
+
+    monkeypatch.setattr(stt, "listen_for_speech", you_talk)
+    daemon._voice_session = "a"
+    said = ["No, wait."]
+    daemon._barge_once()
+    assert stopped and replies == ["a"] and not handled  # cut off, then the mic opens for the correction
+    said[0] = "Use the staging database instead."
+    daemon._barge_once()
+    assert handled == ["Use the staging database instead."] and not daemon._listening
+    monkeypatch.setattr(stt, "listen_for_speech", lambda *a, **k: None)  # the voice finished first
+    daemon._barge_once()
+    assert len(handled) == 1 and len(replies) == 1

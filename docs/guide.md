@@ -76,6 +76,9 @@ If you say nothing for 15 s, a low beep closes the mic. Nothing is typed.
 ### Answer without waiting: *reply now*
 Press **`Ctrl+Alt+A`** (or the ⏭️ button on the widget while it speaks). The voice stops immediately and the mic opens.
 
+### Talk over it
+In headphones, the mic listens while the voice speaks: start talking and it stops at once, with whatever was queued after it. Say *"stop"* or *"no, wait"* (*"attends"*, *"arrête"*, *"tais-toi"*) and the mic opens for what you want to say instead; say a whole sentence (*"use the staging database instead"*) and it's your reply, as if you had waited. It takes about a third of a second of speech to cut in, so a cough or a click doesn't. Through the laptop's speakers it's off, since the mic would hear the voice itself; `barge_in.speakers: true` turns it on anyway (with a headset, or a quiet voice), `barge_in.enabled: false` turns it off.
+
 ### Hands-free: *auto-send*
 **`Ctrl+Alt+H`** toggles it; the voice confirms "Auto-send on/off". When on, everything you dictate (auto-listen *and* push-to-talk) is followed by **Enter**. The notch shows an *Auto* chip, and the *Auto-send* tile is green.
 
@@ -310,6 +313,7 @@ File: `~/.agent-voice/config.json`. Only put the keys you want to change; they'r
 | `focus.enabled` / `full_screen` / `calls` | `true` / `true` / `"hold"` | Hold replies in focus; `calls: "chimes"` for chimes during calls |
 | `recap.enabled` / `at` | `true` / `"18:00"` | The daily recap |
 | `shortcuts` | 6 saved prompts | `{"name": "prompt"}` |
+| `barge_in.enabled` / `speakers` | `true` / `false` | Talk over the voice to stop it; through speakers too if `speakers` |
 | `take_back.seconds` | `5` | What you dictate waits this long before it's sent (0: at once) |
 | `headphones.only` | `false` | The voice only in headphones; chimes and banners through speakers |
 | `ducking.enabled` / `voice` / `listen` / `pause_media` | `true` / `0.3` / `0.0` / `true` | Other apps' volume under the voice and while you reply |

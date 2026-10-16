@@ -222,6 +222,7 @@ Right-click the notch → *Float the widget again*: the same black island, round
 ## 💬 Talking to your agents
 
 - **Reply**: after each answer the mic opens for 15 s (`Ctrl+Alt+A` to skip the voice and answer right away). Your reply goes to the window and the conversation it answers, even if it's minimized or another app is in front; once sent, you're returned to where you were. In the **Claude desktop app**, with auto-send on, it's sent **without bringing the app forward**. The text also stays on the clipboard.
+- **Talk over it** (in headphones): you don't have to wait for the voice to finish. Start talking and it stops at once; *"stop"* or *"no, wait"* (*"attends"*, *"arrête"*) opens the mic for what you want to say instead, and a whole sentence is taken as your reply. Through speakers it stays off (the mic would hear the voice itself) unless you set `barge_in.speakers: true`.
 - **Auto-send** (`Ctrl+Alt+H`): your spoken replies are submitted for you.
 - **Push-to-talk** (hold `Ctrl+Alt+Space`): dictate into any app.
 - **Voice commands** in the reply window: *"repeat that"*, *"slower"*, *"faster"*, *"never mind"* (or *"répète"*, *"plus lentement"*, *"plus vite"*, *"annule"*) drive agent-voice instead of being sent.
@@ -364,6 +365,7 @@ sequenceDiagram
 | `focus` | `enabled: true`, `full_screen: true`, `calls: "hold"` | Hold replies in calls, presentations and full screen apps (`calls: "chimes"`: chimes in calls) |
 | `recap` | `enabled: true`, `at: "18:00"` | The daily recap's time |
 | `shortcuts` | *run the tests*, *commit this*, … | Saved prompts: `{"name you say": "prompt sent"}` |
+| `barge_in` | `enabled: true`, `speakers: false` | Talk over the voice to stop it (in headphones; through speakers only if `speakers`) |
 | `take_back.seconds` | `5` | How long what you dictate waits under the notch before it's sent (0: at once) |
 | `headphones.only` | `false` | The voice only in headphones; chimes and banners on speakers |
 | `ducking` | `enabled: true`, `voice: 0.3`, `listen: 0.0`, `pause_media: true` | Other apps' volume under the voice and while you reply, and pausing what's playing |

@@ -95,11 +95,13 @@ def is_hallucination(text: str) -> bool:
 
 
 def listen_for_speech(
-    window: float, silence: float, max_seconds: float, cancel: threading.Event, on_level=None, on_start=None
+    window: float, silence: float, max_seconds: float, cancel: threading.Event, on_level=None, on_start=None,
+    start_blocks: int = 4,
 ) -> np.ndarray | None:
     """Open the mic for up to `window` seconds; if speech starts, record until `silence` seconds of quiet.
 
-    Returns the recorded audio, or None if nobody spoke (or it was cancelled).
+    Returns the recorded audio, or None if nobody spoke (or it was cancelled). `start_blocks` (30 ms each) of sound
+    count as speech starting: more for talking over the voice, where a cough mustn't cut it off.
     Energy-based detection with an adaptive noise floor; Whisper's VAD cleans up afterwards.
     """
     block = int(RATE * 0.03)  # 30 ms
@@ -132,7 +134,7 @@ def listen_for_speech(
             if not started:
                 preroll = (preroll + [b])[-10:]
                 loud_run = loud_run + 1 if loud else 0
-                if loud_run >= 4:  # ~120 ms of sound: someone is talking
+                if loud_run >= start_blocks:  # ~120 ms of sound (by default): someone is talking
                     started, recorded, elapsed = True, list(preroll), 0.0
                     if on_start:
                         on_start()

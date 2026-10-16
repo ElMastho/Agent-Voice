@@ -116,3 +116,80 @@ def test_dropped_files_go_to_the_conversation(app, monkeypatch, tmp_path):
     w.dropEvent(Drop())
     assert posted == [("/attach", {"paths": [str(shot).replace("\\", "/")], "text": "", "session": "a"})]
     assert w._drop is None
+
+
+def test_tuck_hides_until_something_new(app):
+    w = _widget({"phase": "idle", "threads": [],
+                 "activity": {"session": "a", "title": "Notch", "color": "#F59E0B", "label": "Run pytest",
+                              "steps": 3, "elapsed": 9, "others": 0}})
+    w._hovering = True
+    w._activate("tuck")
+    w._place_notch()
+    assert w._reveal_until == 0.0  # working, mouse still on it: it goes up anyway
+    w.leaveEvent(None)
+    w._on_status({**w.st, "phase": "idle"})
+    w._place_notch()
+    assert w._tucked is not None and w._reveal_until == 0.0  # the same activity: still tucked
+    w._on_status({**w.st, "phase": "speaking"})  # news: it comes back down
+    w._place_notch()
+    assert w._tucked is None and w._reveal_until > 0
+
+
+def test_banner_reply_and_talk_buttons(app, monkeypatch):
+    posted, replies = [], []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    b = widget.Banner()
+    b.on_reply = replies.append
+    b.present(ITEM, 420)
+    buttons = b._buttons()
+    assert set(buttons) == {"type", "talk"}
+    QTest.mouseClick(b, Qt.LeftButton, Qt.NoModifier, buttons["type"].center().toPoint())
+    assert replies == [ITEM] and posted == []
+    b.present(ITEM, 420)
+    QTest.mouseClick(b, Qt.LeftButton, Qt.NoModifier, b._buttons()["talk"].center().toPoint())
+    assert posted == [("/reply", {"session": "a"})]
+    b.present({**ITEM, "kind": "you"}, 420)
+    assert b._buttons() == {}  # your own words: nothing to answer
+
+
+def test_reply_box_sends_to_its_conversation(app, monkeypatch):
+    from PySide6.QtCore import QRectF
+
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    box = widget.ReplyBox()
+    box.open(ITEM, QRectF(0, 0, 440, 44), 422)
+    QTest.keyClicks(box.edit, "Ship it")
+    QTest.keyClick(box.edit, Qt.Key_Return, Qt.ShiftModifier)  # a new line, not sent
+    QTest.keyClicks(box.edit, "and tag it")
+    QTest.keyClick(box.edit, Qt.Key_Return)
+    assert posted == [("/listen_cancel", None), ("/send", {"session": "a", "text": "Ship it\nand tag it"})]
+    assert not box.isVisible() and box.edit.toPlainText() == ""
+
+
+def test_thread_buttons_talk_and_type(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    threads = [{"session": "a", "title": "Notch", "color": "#F59E0B", "state": "", "ago": 5, "reply": "Done."},
+               {"session": "b", "title": "API", "color": "#34D399", "state": "working", "ago": 5}]
+    w = _widget({"phase": "idle", "threads": threads})
+    rects = w._rects()
+    assert {"thrtalk:0", "thrtype:0", "thrplay:0", "thrcopy:0", "thrtalk:1", "thrtype:1"} <= set(rects)
+    assert "thrplay:1" not in rects  # nothing to replay yet
+    opened = []
+    monkeypatch.setattr(w, "open_reply", opened.append)
+    w._activate("thrtalk:1")
+    w._activate("thrtype:0")
+    assert posted == [("/reply", {"session": "b"})] and opened == [threads[0]]
+
+
+def test_agents_always_answer_a_click(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    w = _widget({"phase": "idle", "threads": [], "agents": {"claude": "on", "codex": "missing", "browser": "setup"}})
+    w._activate("agent:claude")
+    assert "is connected" in w.banner.item["text"]
+    w._activate("agent:codex")
+    assert "isn't installed" in w.banner.item["text"]
+    w._activate("agent:browser")  # bridge ready, extension not loaded: the steps again
+    assert posted == [("/install", {"agent": "browser"})]

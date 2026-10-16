@@ -782,3 +782,49 @@ def test_hotkeys_in_pynput_notation():
 
     assert keys.pynput_combo("ctrl+alt+space") == "<ctrl>+<alt>+<space>"
     assert keys.pynput_combo("Ctrl+Alt+S") == "<ctrl>+<alt>+s"
+
+
+def test_typed_reply_and_talking_to_a_thread(daemon, monkeypatch):
+    pasted = []
+    monkeypatch.setattr(daemon, "_paste", lambda text, hwnd=0, submit=False, session="": pasted.append((text, hwnd, submit, session)))
+    daemon._session_hwnd["a"] = 42
+    daemon.threads["a"] = {"source": "claude", "last": 1}
+    daemon.send_text("a", "  Ship it.  ")
+    assert pasted == [("Ship it.", 42, True, "a")]
+    assert daemon.banner["kind"] == "you" and daemon.banner["tag"] == "sent"
+    started = []
+    monkeypatch.setattr(daemon, "transcriber", object())
+    monkeypatch.setattr(daemon, "_auto_listen", lambda: started.append((daemon._reply_session, daemon._force_submit)))
+    daemon.reply_now("b")
+    import time as _t
+
+    _t.sleep(0.1)
+    assert started == [("b", True)]  # the thread you picked, and sent when you pause
+
+
+def test_browser_is_on_only_once_the_extension_said_hello(daemon, monkeypatch):
+    from agent_voice import server
+
+    monkeypatch.setattr(server.install, "agent_states", lambda: {"browser": "on"})
+    daemon._agents_at = 0
+    assert daemon.agent_states()["browser"] == "setup"
+    daemon.bridge_seen()
+    assert daemon.agent_states()["browser"] == "on" and daemon.banner["kind"] == "note"
+
+
+def test_connecting_an_agent_says_how_it_went(daemon, monkeypatch):
+    from agent_voice import server
+
+    monkeypatch.setitem(server.install.INSTALLERS, "codex", lambda: "installed in config.toml")
+    daemon.install_agent("codex")
+    assert daemon.banner["text"] == "Codex connected. Restart Codex to load it."
+    monkeypatch.setitem(server.install.INSTALLERS, "codex", lambda: "skipped: you have your own notify")
+    daemon.install_agent("codex")
+    assert daemon.banner["text"] == "Codex: skipped: you have your own notify"
+
+    def broken():
+        raise ValueError("bad JSON")
+
+    monkeypatch.setitem(server.install.INSTALLERS, "cursor", broken)
+    daemon.install_agent("cursor")
+    assert daemon.banner["text"] == "Couldn't connect Cursor: bad JSON"

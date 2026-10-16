@@ -20,3 +20,13 @@ chrome.runtime.onMessage.addListener(function (msg, sender) {
     try { p.postMessage(msg); } catch (e) { port = null; }
   }
 });
+
+// Say hello once loaded, so agent-voice knows the extension is installed and its bridge works.
+function hello() {
+  var p = connect();
+  if (p) {
+    try { p.postMessage({ type: "hello" }); } catch (e) { port = null; }
+  }
+}
+chrome.runtime.onInstalled.addListener(hello);
+chrome.runtime.onStartup.addListener(hello);

@@ -28,7 +28,9 @@ from PySide6.QtGui import (
     QPen,
     QRadialGradient,
 )
-from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QToolTip, QWidget
+from PySide6.QtCore import QEvent
+from PySide6.QtWidgets import (QApplication, QFrame, QLabel, QMenu, QPlainTextEdit, QSystemTrayIcon, QToolTip,
+                               QVBoxLayout, QWidget)
 
 from agent_voice import client
 from agent_voice.config import HOME, load_config
@@ -98,12 +100,14 @@ ICONS = {
     "replay": "",
     "open": "",
     "help": "",
+    "keyboard": "",
+    "tuck": "",
 }
 
 if sys.platform != "win32":
     ICONS.update({"mic": "●", "stop": "■", "skip": "⏭", "chat": "✎", "send": "➤", "volume": "♪", "mute": "✕",
                   "read": "☰", "power": "⏻", "bell": "♫", "copy": "⧉", "check": "✓", "bolt": "ϟ", "list": "≡",
-                  "shield": "✓", "down": "⌄", "up": "⌃", "replay": "↻", "open": "↗", "help": "?"})
+                  "shield": "✓", "down": "⌄", "up": "⌃", "replay": "↻", "open": "↗", "help": "?", "keyboard": "⌨", "tuck": "–"})
 
 # phase -> (accent colour, title, subtitle)
 PHASES = {
@@ -279,8 +283,11 @@ class Banner(QWidget):
         self.drag = 0.0  # how far it has been pulled up
         self._press: QPointF | None = None
         self._hover = False
+        self._hot: str | None = None  # the button under the mouse
+        self.on_reply = None  # opens the reply box (set by the widget)
         self._topmost_at = 0.0
         self.f_head = _font(FONT_TEXT, 8)
+        self.f_icon = _font(ICON_FONT, 9)
         self.f_head.setWeight(QFont.Medium)
         self.f_text = _font(FONT_TEXT, 9)
 
@@ -293,12 +300,25 @@ class Banner(QWidget):
         self.item, self.drag, self.holding = item, 0.0, hold
         fm = QFontMetrics(self.f_text)
         self.lines = self._wrap(item.get("text", ""), fm, width - 36)
-        self.resize(width, int(40 + len(self.lines) * fm.lineSpacing() + 14))
+        self.resize(width, int(40 + len(self.lines) * fm.lineSpacing() + 14 + (26 if self._can_reply() else 0)))
         words = len(item.get("text", "").split())
         self.until = 1e12 if hold else time.time() + min(15.0, 5.0 + max(0, words - 12) * 0.25)  # ~5 s, more if long
         if not self.isVisible():
             self.t, self.v = 0.0, 0.0
             self.show()
+
+    def _can_reply(self) -> bool:
+        """An agent's message (a reply, a question waiting on you): it can be answered from here."""
+        item = self.item or {}
+        return bool(item.get("session")) and item.get("kind") not in ("you", "catchup", "note")
+
+    def _buttons(self) -> dict[str, QRectF]:
+        """Reply by typing, or by voice, to the conversation this banner is from."""
+        if not self._can_reply():
+            return {}
+        y, h = self.height() - 34, 22
+        return {"talk": QRectF(self.width() - 16 - 62, y, 62, h),
+                "type": QRectF(self.width() - 16 - 62 - 8 - 70, y, 70, h)}
 
     def _wrap(self, text: str, fm: QFontMetrics, width: float) -> list[str]:
         lines, line = [], ""
@@ -405,6 +425,17 @@ class Banner(QWidget):
         for line in self.lines:
             p.drawText(QPointF(18, y + fm.ascent()), line)
             y += fm.lineSpacing()
+        for key, rect in self._buttons().items():
+            hot = key == self._hot
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 48 if hot else 22))
+            p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+            p.setFont(self.f_icon)
+            p.setPen(QColor(255, 255, 255, 235))
+            icon_rect = QRectF(rect.x() + 8, rect.y(), 16, rect.height())
+            p.drawText(icon_rect, Qt.AlignCenter, ICONS["keyboard" if key == "type" else "mic"])
+            p.setFont(self.f_head)
+            p.drawText(rect.adjusted(26, 0, -8, 0), Qt.AlignLeft | Qt.AlignVCenter, "Reply" if key == "type" else "Talk")
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(255, 255, 255, 45))  # a grabber: it can be swiped away
         p.drawRoundedRect(QRectF(self.width() / 2 - 16, self.height() - 7, 32, 3), 1.5, 1.5)
@@ -415,8 +446,11 @@ class Banner(QWidget):
         self.update()
 
     def leaveEvent(self, _e):
-        self._hover = False
+        self._hover, self._hot = False, None
         self.update()
+
+    def _button_at(self, pos: QPointF) -> str | None:
+        return next((key for key, rect in self._buttons().items() if rect.contains(pos)), None)
 
     def mousePressEvent(self, e):
         self._press = e.globalPosition()
@@ -424,6 +458,11 @@ class Banner(QWidget):
     def mouseMoveEvent(self, e):
         if self._press is not None and e.buttons() & Qt.LeftButton:
             self.drag = e.globalPosition().y() - self._press.y()
+            self.update()
+            return
+        hot = self._button_at(e.position())
+        if hot != self._hot:
+            self._hot = hot
             self.update()
 
     def mouseReleaseEvent(self, e):
@@ -434,8 +473,87 @@ class Banner(QWidget):
         if self.drag < -18 or abs(moved.x()) > 60:
             self.dismiss()  # swiped away
         elif abs(moved.x()) + abs(moved.y()) < 5 and self.item:
-            _post("/open_thread", {"session": self.item.get("session", "")})
+            button = self._button_at(e.position())
+            if button == "type" and self.on_reply:
+                self.on_reply(self.item)
+            elif button == "talk":
+                _post("/reply", {"session": self.item.get("session", "")})
+            else:
+                _post("/open_thread", {"session": self.item.get("session", "")})
             self.dismiss()
+
+
+class ReplyBox(QWidget):
+    """Type a reply to one conversation: Enter sends it there, Shift+Enter starts a new line, Esc closes.
+
+    Unlike the notch, this window does take the keyboard (you type in it); it closes as soon as you click
+    elsewhere, and what you typed stays for next time.
+    """
+
+    def __init__(self):
+        super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_MacAlwaysShowToolWindow)
+        self.session = ""
+        box = QFrame(self)
+        box.setObjectName("box")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(16, 10, 16, 8)
+        layout.setSpacing(6)
+        self.title = QLabel()
+        self.edit = QPlainTextEdit()
+        self.edit.setPlaceholderText("Your reply")
+        self.edit.installEventFilter(self)
+        hint = QLabel("Enter to send · Shift+Enter for a new line · Esc to close")
+        for w in (self.title, self.edit, hint):
+            layout.addWidget(w)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(box)
+        text, head = f"font-family:'{FONT_TEXT}';", f"font-family:'{FONT_TEXT}';"
+        self.setStyleSheet(
+            "#box{background:#000;border:1.5px solid #10E0A0;border-radius:18px;}"
+            f"QLabel{{color:rgba(255,255,255,150);font-size:{_font(FONT_TEXT, 8).pointSize()}pt;{head}}}"
+            f"QPlainTextEdit{{background:transparent;border:none;color:#fff;font-size:"
+            f"{_font(FONT_TEXT, 10).pointSize()}pt;{text}selection-background-color:#10E0A0;}}")
+        hint.setStyleSheet("color:rgba(255,255,255,90);")
+
+    def open(self, item: dict, anchor: QRectF, width: int) -> None:
+        if item.get("session") != self.session:
+            self.edit.clear()  # a draft belongs to its conversation
+        self.session = item.get("session", "")
+        self.title.setText(f"Reply to {item.get('title') or 'the conversation'}")
+        self.resize(width, 132)
+        geo = QApplication.primaryScreen().geometry()
+        y = int(max(geo.top() + 4, anchor.bottom() + 8))
+        self.move(int(anchor.center().x() - width / 2), y)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.edit.setFocus()
+        _post("/listen_cancel")  # the reply mic would only hear the keyboard
+
+    def send(self) -> None:
+        text = self.edit.toPlainText().strip()
+        if text:
+            self.hide()  # first: the reply goes to the agent's window, then you're brought back
+            _post("/send", {"session": self.session, "text": text})
+            self.edit.clear()
+
+    def eventFilter(self, obj, ev):
+        if obj is self.edit and ev.type() == QEvent.KeyPress:
+            if ev.key() in (Qt.Key_Return, Qt.Key_Enter) and not ev.modifiers() & Qt.ShiftModifier:
+                self.send()
+                return True
+            if ev.key() == Qt.Key_Escape:
+                self.hide()
+                return True
+        return super().eventFilter(obj, ev)
+
+    def changeEvent(self, ev):
+        if ev.type() == QEvent.ActivationChange and not self.isActiveWindow() and self.isVisible():
+            self.hide()  # clicked elsewhere: out of the way (the draft stays)
+        super().changeEvent(ev)
 
 
 class VoiceWidget(QWidget):
@@ -467,6 +585,10 @@ class VoiceWidget(QWidget):
         self.compact = False
         self.notch = False
         self.banner = Banner()
+        self.reply_box = ReplyBox()
+        self.banner.on_reply = self.open_reply
+        self._tucked: tuple | None = None  # tucked away by hand: what was showing then (news brings it back)
+        self._tuck_hover = False  # the mouse that clicked "tuck" is still over it: don't hold it down
         self._banner_seen: int | None = None
         self._reading_shown: tuple | None = None
         self._banner_busy = False
@@ -619,7 +741,13 @@ class VoiceWidget(QWidget):
         now = time.time()
         busy = (self.phase in ("speaking", "waiting", "recording", "transcribing") or bool(self._activity())
                 or bool(self._drop))
-        if busy or self._hovering or self.expanded or self.pressed or self._question():
+        if self._tucked is not None and self._news() != self._tucked:
+            self._tucked = None  # something new happened: show it
+        hovering = self._hovering and not self._tuck_hover
+        if self._tucked is not None:  # tucked by hand: only the mouse (or a drag) brings it down for a look
+            if hovering or self.pressed or self._drop:
+                self._reveal_until = now + NOTCH_HIDE_DELAY
+        elif busy or hovering or self.expanded or self.pressed or self._question():
             self._reveal_until = now + NOTCH_HIDE_DELAY
         # A lightly damped spring: it drops down, overshoots a hair in width, and settles.
         target = 1.0 if now < self._reveal_until else 0.0
@@ -855,13 +983,19 @@ class VoiceWidget(QWidget):
         if "primary" in r:
             out["primary"] = QRectF(NOTCH_W - NOTCH_EAR - 68, (NOTCH_H - 28) / 2, 28, 28)
         out["chevron"] = QRectF(NOTCH_W - NOTCH_EAR - 36, (NOTCH_H - 26) / 2, 26, 26)
+        if self.notch:
+            out["tuck"] = QRectF(NOTCH_W - NOTCH_EAR - 96, (NOTCH_H - 24) / 2, 24, 24)
         out.update(self._pill_rects())
         if self._result():
             out["result"] = QRectF(NOTCH_EAR + 38, 23, NOTCH_W / 2 - 40, 15)
         return out
 
+    def _chips_right(self) -> float:
+        """Where the info chips end, left of the buttons (one more, "tuck", in notch mode)."""
+        return NOTCH_W - NOTCH_EAR - (104 if self.notch else 78)
+
     def _pill_rects(self) -> dict[str, QRectF]:
-        right = NOTCH_W - NOTCH_EAR - 82
+        right = self._chips_right() - 4
         pills = self._pills()
         return {f"pill:{i}": QRectF(right - (len(pills) - i) * 12, NOTCH_H / 2 - 7, 12, 14) for i in range(len(pills))}
 
@@ -901,10 +1035,8 @@ class VoiceWidget(QWidget):
             for i, (key, _label) in enumerate(MODES):
                 r[f"mode:{key}"] = QRectF(track.x() + i * seg, track.y(), seg, track.height())
             for i, t in enumerate(self._threads()):
-                if t.get("reply"):  # its own buttons first: they sit on top of the row
-                    row = self._thread_row(i)
-                    r[f"thrplay:{i}"] = QRectF(row.right() - 44, row.y() + 17, 18, 16)
-                    r[f"thrcopy:{i}"] = QRectF(row.right() - 22, row.y() + 17, 18, 16)
+                for key, rect in self._thread_buttons(i, t).items():  # first: they sit on top of the row
+                    r[key] = rect
                 r[f"thr:{i}"] = self._thread_row(i)
             for i in range(len(self._history())):
                 r[f"hist:{i}"] = self._history_row(i)
@@ -944,6 +1076,12 @@ class VoiceWidget(QWidget):
 
     def _threads(self) -> list[dict]:
         return list(self.st.get("threads") or [])[:THREAD_ROWS]
+
+    def _thread_buttons(self, i: int, t: dict) -> dict[str, QRectF]:
+        """Talk to it, type to it, and (once it has replied) hear and copy its last reply."""
+        row = self._thread_row(i)
+        keys = ["thrtalk", "thrtype"] + (["thrplay", "thrcopy"] if t.get("reply") else [])
+        return {f"{k}:{i}": QRectF(row.right() - 22 * (len(keys) - j), row.y() + 17, 18, 16) for j, k in enumerate(keys)}
 
     def _thread_row(self, i: int) -> QRectF:
         return QRectF(10, self._threads_y() + 16 + i * THREAD_H, self.pw - 20, THREAD_H - 2)
@@ -1141,7 +1279,7 @@ class VoiceWidget(QWidget):
         if st.get("speed_x") and self.phase == "speaking":  # only while there's a voice to speed up
             chips.append(f"{float(st['speed_x']):g}×")
         fm_chip = QFontMetrics(self.f_notch_chip)
-        right = NOTCH_W - NOTCH_EAR - 78
+        right = self._chips_right()
         if pills:
             self._paint_pills(p, pills)
             right -= len(pills) * 12 + 8
@@ -1265,6 +1403,8 @@ class VoiceWidget(QWidget):
         prim = self._primary()
         buttons = [("primary", prim[1])] if prim else []
         buttons.append(("chevron", ICONS["up" if self.expanded else "down"]))
+        if self.notch:
+            buttons.append(("tuck", ICONS["tuck"]))
         for key, icon in buttons:
             rect = rects[key]
             ht = self.hover_t.get(key, 0.0)
@@ -1441,6 +1581,11 @@ class VoiceWidget(QWidget):
                 p.setPen(QColor(255, 255, 255, int(150 + 90 * ht)))
                 p.drawText(row.adjusted(0, 0, -10, 0), Qt.AlignRight | Qt.AlignVCenter, "Open")
 
+    def _note(self, text: str) -> None:
+        """A short message under the notch from the widget itself (no conversation behind it)."""
+        self.banner.present({"id": -1, "kind": "note", "title": "Agents", "tag": "agents", "session": "",
+                             "text": text}, int(self.pw))
+
     def _agent_state(self, agent: str) -> str:
         """'on' (hooks installed), 'off' (agent found, not connected) or 'missing' (not on this PC)."""
         return (self.st.get("agents") or {}).get(agent, "missing")
@@ -1478,12 +1623,12 @@ class VoiceWidget(QWidget):
                 p.setPen(Qt.NoPen)
                 p.setBrush(QColor("#34D399"))
                 p.drawEllipse(QPointF(x + 2.5, rect.center().y()), 2.5, 2.5)
-            elif state == "off":
-                p.setPen(QPen(QColor(255, 255, 255, 120), 1))
+            elif state in ("off", "setup"):
+                p.setPen(QPen(QColor("#FBBF24") if state == "setup" else QColor(255, 255, 255, 120), 1))
                 p.setBrush(Qt.NoBrush)
                 p.drawEllipse(QPointF(x + 2.5, rect.center().y()), 2.5, 2.5)
             p.setFont(self.f_hint)
-            p.setPen(QColor(255, 255, 255, {"on": 225, "off": 170}.get(state, 70)))
+            p.setPen(QColor(255, 255, 255, {"on": 225, "off": 170, "setup": 200}.get(state, 70)))
             room = rect.right() - (x + 9) - 4
             p.drawText(QRectF(x + 9 if state != "missing" else x + 4.5, rect.y(), min(tw + 2, room + 6), rect.height()),
                        Qt.AlignLeft | Qt.AlignVCenter, fm.elidedText(label, Qt.ElideRight, int(room + 6)))
@@ -1543,20 +1688,21 @@ class VoiceWidget(QWidget):
                 extras.append(f"context {int(t['context'])}%")
             if extras:
                 reply = " · ".join(extras) + ("  —  " + reply if reply else "")
+            buttons = self._thread_buttons(i, t)
             if reply:
                 # The conversation's last reply, with replay and copy at hand.
                 p.setFont(self.f_hint)
                 p.setPen(QColor(226, 232, 240, 120))
-                line2 = QRectF(row.x() + 20, row.y() + 17, row.width() - 72, 16)
+                line2 = QRectF(row.x() + 20, row.y() + 17, row.width() - 28 - 22 * len(buttons), 16)
                 p.drawText(line2, Qt.AlignLeft | Qt.AlignVCenter,
                            QFontMetrics(self.f_hint).elidedText(reply, Qt.ElideRight, int(line2.width())))
-                for key, icon in ((f"thrplay:{i}", ICONS["replay"]), (f"thrcopy:{i}", ICONS["copy"])):
-                    done = key.startswith("thrcopy") and self._copied == key and time.time() - self._copied_at < 1.2
-                    kt = self.hover_t.get(key, 0.0)
-                    rect = QRectF(row.right() - (44 if "play" in key else 22), row.y() + 17, 18, 16)
-                    p.setFont(self.f_icon_small)
-                    p.setPen(QColor(255, 255, 255, 235 if done else int(110 + 140 * kt)))
-                    p.drawText(rect, Qt.AlignCenter, ICONS["check"] if done else icon)
+            icons = {"thrtalk": "mic", "thrtype": "keyboard", "thrplay": "replay", "thrcopy": "copy"}
+            for key, rect in buttons.items():
+                done = key.startswith("thrcopy") and self._copied == key and time.time() - self._copied_at < 1.2
+                kt = self.hover_t.get(key, 0.0)
+                p.setFont(self.f_icon_small)
+                p.setPen(QColor(255, 255, 255, 235 if done else int(110 + 140 * kt)))
+                p.drawText(rect, Qt.AlignCenter, ICONS["check"] if done else ICONS[icons[key.split(":")[0]]])
         p.restore()
 
     def _limits_label(self) -> str:
@@ -1663,6 +1809,7 @@ class VoiceWidget(QWidget):
 
     def leaveEvent(self, _e):
         self._hovering = False
+        self._tuck_hover = False
         self.hover = None
         QToolTip.hideText()
 
@@ -1692,6 +1839,8 @@ class VoiceWidget(QWidget):
             return prim[2] if prim else ""
         if key == "chevron":
             return "Collapse" if self.expanded else "All actions"
+        if key == "tuck":
+            return "Tuck away until something new happens"
         if key == "guide":
             return "Setup guide: every agent, step by step"
         if key and key.startswith("pill:"):
@@ -1725,7 +1874,9 @@ class VoiceWidget(QWidget):
                 extra = " (in Cline, turn on Settings > Features > Enable Hooks)" if agent == "cline" else ""
                 return f"{name} speaks through agent-voice{extra}"
             if state == "off":
-                return f"Connect {name}: adds agent-voice's hooks to its settings"
+                return f"Connect {name}: adds agent-voice to its settings"
+            if state == "setup":
+                return "Bridge ready, extension not loaded yet: click for the steps (chrome://extensions, Load unpacked)"
             return f"{name} isn't installed on this PC"
         for tid, _icon, label, hk, _active in self._tiles():
             if tid == key:
@@ -1760,6 +1911,10 @@ class VoiceWidget(QWidget):
         if key == "mode:silent":
             hk = _hotkey_label(self.hotkeys.get("mute", ""))
             return f"Silent: no sound at all, replies show as a banner ({hk})"
+        if key and key.startswith("thrtalk:"):
+            return "Talk to this conversation: what you say is sent to it"
+        if key and key.startswith("thrtype:"):
+            return "Type a reply to this conversation"
         if key and key.startswith("thrplay:"):
             return "Hear this conversation's last reply again"
         if key and key.startswith("thrcopy:"):
@@ -1796,6 +1951,8 @@ class VoiceWidget(QWidget):
             key = prim[0] if prim else ""
         if key == "chevron":
             self.toggle_expanded()
+        elif key == "tuck":
+            self.tuck()
         elif key.startswith("pill:"):
             pills = self._pills()
             i = int(key.split(":", 1)[1])
@@ -1831,6 +1988,14 @@ class VoiceWidget(QWidget):
             if self.st.get("last_reply"):
                 _post("/copy_reply")
                 self._copied, self._copied_at = key, time.time()
+        elif key.startswith("thrtalk:") or key.startswith("thrtype:"):
+            threads = self._threads()
+            i = int(key.split(":", 1)[1])
+            if i < len(threads):
+                if key.startswith("thrtalk:"):
+                    _post("/reply", {"session": threads[i]["session"]})
+                else:
+                    self.open_reply(threads[i])
         elif key.startswith("thrplay:") or key.startswith("thrcopy:"):
             threads = self._threads()
             i = int(key.split(":", 1)[1])
@@ -1842,9 +2007,17 @@ class VoiceWidget(QWidget):
                     self._copied, self._copied_at = key, time.time()
         elif key.startswith("agent:"):
             agent = key.split(":", 1)[1]
-            if self._agent_state(agent) == "off":
+            state, name = self._agent_state(agent), AGENT_NAMES.get(agent, agent)
+            if state in ("off", "setup"):  # connect it (again: the browser re-opens the extension's folder)
                 _post("/install", {"agent": agent})
-                self.st.setdefault("agents", {})[agent] = "on"
+                if state == "off":
+                    self.st.setdefault("agents", {})[agent] = "setup" if agent == "browser" else "on"
+            elif state == "on":
+                self._note(f"{name[:1].upper()}{name[1:]} is connected. Not hearing it? Restart it once; to "
+                           f"disconnect it: agent-voice uninstall {agent}")
+            else:
+                self._note(f"{name[:1].upper()}{name[1:]} isn't installed on this PC. Install it, then click "
+                           "here to connect it. The ? opens the setup guide.")
         elif key == "guide":
             QDesktopServices.openUrl(QUrl(GUIDE_URL))
         elif key == "openchat":
@@ -1929,6 +2102,26 @@ class VoiceWidget(QWidget):
         if paths or text.strip():
             e.acceptProposedAction()
             _post("/attach", {"paths": paths, "text": text, "session": target["session"]})
+
+    def open_reply(self, item: dict) -> None:
+        """Type a reply to a conversation (from its banner or its thread row)."""
+        self.reply_box.open(item, QRectF(self.geometry()), int(self.pw))
+
+    def _news(self) -> tuple:
+        """What would bring the notch down by itself: a voice or the mic, a question, someone needing you, a banner."""
+        st = self.st
+        live = self.phase if self.phase in ("speaking", "waiting", "recording", "transcribing") else ""
+        q = self._question() or {}
+        return (live, q.get("permission") or q.get("question"), len(st.get("needs") or []),
+                (st.get("banner") or {}).get("id"))
+
+    def tuck(self) -> None:
+        """Out of the way now (it was covering something): up to its 3-pixel line until there's news."""
+        self._tucked = self._news()
+        self._tuck_hover = True
+        self.expanded = False
+        self._reveal_until = 0.0
+        QToolTip.hideText()
 
     def toggle_visible(self) -> None:
         if self.isVisible():

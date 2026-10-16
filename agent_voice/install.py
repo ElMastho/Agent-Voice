@@ -421,6 +421,9 @@ def _agent_dir(agent: str) -> Path:
 
 
 AGENT_KEYS = (*AGENT_DIRS, "claude-desktop", "vscode", "browser")
+AGENT_TITLES = {"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI", "cursor": "Cursor", "cline": "Cline",
+                "antigravity": "Antigravity", "claude-desktop": "Claude Desktop", "windsurf": "Windsurf",
+                "vscode": "VS Code", "browser": "The browser bridge"}
 MCP_ONLY = {"antigravity", "claude-desktop", "windsurf", "vscode"}
 
 

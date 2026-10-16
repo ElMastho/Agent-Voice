@@ -88,7 +88,7 @@ Then open a **new** Claude Code session and ask it anything. You'll see it work 
 
 ## 🏝️ The notch
 
-agent-voice lives in a pure-black island at the top centre of your screen. At rest it tucks itself away, leaving a 3-pixel line: touch the top edge with the mouse to bring it down. It drops down on its own when something happens, and goes back up 3 seconds after.
+agent-voice lives in a pure-black island at the top centre of your screen. At rest it tucks itself away, leaving a 3-pixel line: touch the top edge with the mouse to bring it down. It drops down on its own when something happens, and goes back up 3 seconds after. Covering something while an agent works? The **—** button tucks it away until there's news (a voice, a question, something that needs you, a new reply).
 
 <p align="center">
   <img src="docs/images/states.jpg" alt="The notch: ready, working, speaking, hearing you, transcribing, in a call" width="100%">
@@ -140,7 +140,7 @@ Once your reply is transcribed, it drops down under the notch framed in green, t
   <img src="docs/images/banner.jpg" alt="Chime mode: the reply drops down under the tucked-away notch" width="640">
 </p>
 
-In **Chimes** (a soft sound) or **Silent** (no sound at all), nothing talks, not even a setting change. Each finished reply drops down as a banner for about 5 seconds: hover to keep it, swipe it up to dismiss it, click it to open the conversation. While **another app holds the mic** (Teams, Zoom, Meet...), agent-voice switches to chimes by itself and back when the call ends; pick *Voice* during the call to override it.
+In **Chimes** (a soft sound) or **Silent** (no sound at all), nothing talks, not even a setting change. Each finished reply drops down as a banner for about 5 seconds: hover to keep it, swipe it up to dismiss it, click it to open the conversation. **Reply** opens a box under the notch to type your answer (Enter sends it to that conversation, wherever its window is); **Talk** opens the mic for it. Both are on the read-along banner too. While **another app holds the mic** (Teams, Zoom, Meet...), agent-voice switches to chimes by itself and back when the call ends; pick *Voice* during the call to override it.
 
 ### Every action, one click away
 
@@ -150,7 +150,7 @@ Open the chevron for the full panel:
 
 - **Actions** with their shortcuts: reply now, hold to talk, stop, auto-send, silent, read selection, *Hey Claude*, approvals, summaries, and the last reply's **Replay**, **Copy** and **Open chat**. Buttons that only matter for the voice hide themselves in Chimes and Silent.
 - **Speed** (1× to 2×) and **Mode**: *Voice / Chimes / Silent*.
-- **Threads**: your recent conversations, what each is doing (*working*, *speaking*, *asks you*, *needs approval*, *waiting for you*, *next up*), what its last turn changed, its context, and the start of its last reply, with replay and copy. Click one to open it. With `agent-voice usage on`, Claude Code's 5-hour and weekly limits show in the header.
+- **Threads**: your recent conversations, what each is doing (*working*, *speaking*, *asks you*, *needs approval*, *waiting for you*, *next up*), what its last turn changed, its context, and the start of its last reply. Its buttons: 🎙️ **talk to it** (what you say is sent to that conversation), ⌨️ **type to it**, replay and copy. Click the row to open it. With `agent-voice usage on`, Claude Code's 5-hour and weekly limits show in the header.
 - **You said**: the last 5 things it heard from you; click to copy.
 - **Needs you** (when something waits on you): approve, deny or open, for every agent.
 - **Agents**: which agents are connected (green dot): Claude Code, Codex, Gemini CLI, Cursor, Cline, Antigravity, the Claude desktop app, Windsurf, VS Code and the browser. Click one that isn't to connect it, or **?** for the setup guide.

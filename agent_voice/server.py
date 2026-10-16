@@ -929,20 +929,65 @@ class Daemon:
                        "kind": kind, "tag": tag, "at": time.time()}
 
     def agent_states(self) -> dict[str, str]:
-        """Which agents are connected; re-read every 30 s at most (status is polled 8 times a second)."""
+        """Which agents are connected; re-read every 30 s at most (status is polled 8 times a second).
+
+        The browser is only "on" once its extension has talked to us: until then the bridge is ready but the
+        extension isn't loaded ("setup").
+        """
         if time.time() - self._agents_at > 30:
             self._agents, self._agents_at = install.agent_states(), time.time()
+            if self._agents.get("browser") == "on" and not self.state.get("browser_seen"):
+                self._agents["browser"] = "setup"
         return self._agents
 
-    def install_agent(self, agent: str) -> None:
-        """Connect an agent from the widget (same as `agent-voice install <agent>`)."""
-        try:
-            log.info("install %s: %s", agent, install.INSTALLERS[agent]())
-        except Exception:  # a malformed settings file must not take the daemon down
-            log.exception("install %s failed", agent)
+    def bridge_seen(self) -> None:
+        """The browser extension started its bridge: it's loaded and working."""
+        if not self.state.get("browser_seen"):
+            log.info("browser extension connected")
+            self.state["browser_seen"] = round(time.time())
+            save_state(self.state)
+            self._show_banner("The extension is connected: replies on ChatGPT, Claude and Gemini will be read out.",
+                              "", "", kind="note", tag="browser")
         self._agents_at = 0.0
-        if agent == "browser" and sys.platform == "win32":
-            os.startfile(install.extension_dir())  # the folder to pick in "Load unpacked"
+
+    # What to do after connecting each kind of agent, said in the banner.
+    _NEXT_STEP = {"claude": "Open a new session to load it.", "codex": "Restart Codex to load it.",
+                  "gemini": "Restart Gemini CLI to load it.", "cursor": "Restart Cursor to load it.",
+                  "cline": "In Cline, turn on Settings > Features > Enable Hooks.",
+                  "browser": "Now in Chrome or Edge: open chrome://extensions, turn on Developer mode, click "
+                             "Load unpacked and pick the folder that just opened."}
+
+    def install_agent(self, agent: str) -> None:
+        """Connect an agent from the widget (same as `agent-voice install <agent>`), and say how it went."""
+        name = install.AGENT_TITLES.get(agent, agent)
+        try:
+            result = install.INSTALLERS[agent]()
+            log.info("install %s: %s", agent, result)
+            if result.startswith("skipped"):
+                text = f"{name}: {result}"
+            else:
+                text = f"{name} connected. " + self._NEXT_STEP.get(agent, f"Restart {name} to load agent-voice.")
+        except Exception as exc:  # a malformed settings file must not take the daemon down
+            log.exception("install %s failed", agent)
+            text = f"Couldn't connect {name}: {exc}"
+        self._agents_at = 0.0
+        if agent == "browser":
+            self.state.pop("browser_seen", None)  # "on" again once the extension says hello
+            save_state(self.state)
+            if sys.platform == "win32":
+                os.startfile(install.extension_dir())  # the folder to pick in "Load unpacked"
+        self._show_banner(text, "", "", kind="note", tag="agents")
+
+    def send_text(self, session: str, text: str) -> None:
+        """A reply typed in the notch: into that conversation's window, sent, and back to where you were."""
+        from agent_voice import lang
+
+        text = text.strip()
+        if not text:
+            return
+        session = session or self._last_session
+        self._heard(text, lang.detect(text), session, tag="sent")
+        self._paste(text, self._hwnd_for(session), submit=True, session=session)
 
     def replay(self, session: str = "") -> None:
         """Say a conversation's last turn again (the last one heard by default); the mic stays closed."""
@@ -971,12 +1016,18 @@ class Daemon:
             self._mic_phase = ""
             self.level = 0.0
 
-    def reply_now(self) -> None:
-        """Skip the rest of the speech and listen for your answer right away."""
+    def reply_now(self, session: str | None = None) -> None:
+        """Skip the rest of the speech and listen for your answer right away.
+
+        `session`: talk to that conversation (its thread row, its banner): what you say is sent to it.
+        """
         self.speaker.stop()
         self._listen_armed = False
         if self._listening or self._ptt_active or self.transcriber is None:
             return
+        if session:
+            self._reply_session = session
+            self._force_submit = True  # you picked the thread: send it, there's no prompt in front of you
         threading.Thread(target=self._auto_listen, daemon=True).start()
 
     def _set_level(self, value: float) -> None:
@@ -1796,7 +1847,17 @@ def _handler(daemon: Daemon):
                 threading.Thread(target=daemon.attach, args=args, daemon=True).start()
                 return self._json(200, {"ok": True})
             if self.path == "/reply":
-                daemon.reply_now()
+                daemon.reply_now(str(data.get("session") or "") or None)
+                return self._json(200, {"ok": True})
+            if self.path == "/send":
+                args = (str(data.get("session") or ""), str(data.get("text") or "")[:20000])
+                threading.Thread(target=daemon.send_text, args=args, daemon=True).start()
+                return self._json(200, {"ok": True})
+            if self.path == "/listen_cancel":  # typing a reply: the open mic would hear the keyboard
+                daemon.cancel_listen()
+                return self._json(200, {"ok": True})
+            if self.path == "/bridge_seen":
+                daemon.bridge_seen()
                 return self._json(200, {"ok": True})
             if self.path == "/ptt":
                 if data.get("action") == "stop":

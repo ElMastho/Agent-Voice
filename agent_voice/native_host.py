@@ -46,6 +46,9 @@ def session_of(msg: dict) -> str:
 
 
 def handle(msg: dict) -> None:
+    if msg.get("type") == "hello":  # the extension is loaded: the agents row can say so
+        client.request("/bridge_seen", {}, timeout=1.0)
+        return
     site = str(msg.get("site", ""))
     if site not in SITES:
         return

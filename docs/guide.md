@@ -130,12 +130,15 @@ Select text in any application and press **`Ctrl+Alt+R`**: it is read in the rig
 |---|---|
 | See what's happening | The notch drops down by itself: *Working* (with the step and a timer), *Speaking* (violet edge light), *Listening* / *Hearing you* (green), *Transcribing* (amber) |
 | Bring it down at rest | Touch the top edge of the screen with the mouse |
+| Get it out of the way while an agent works | The **—** button: tucked away until there's news (a voice, a question, something that needs you, a new reply) |
+| Answer a conversation later, by voice or typing | Its thread row in the panel: 🎙️ talks to it (sent when you pause), ⌨️ opens a box to type to it |
+| Answer a notification by typing | **Reply** on the banner: type, Enter sends it to that conversation (Shift+Enter for a new line, Esc to close); **Talk** opens the mic for it |
 | See every action | Click the chevron ⌄: what needs you, actions, speed, mode, threads, what you said, agents |
 | See who's working | A dot per live conversation on the right; hover for its name, click to open it |
 | Answer an approval | *Allow* / *Deny* at the top of the panel, or say *"approve Codex"* |
 | Send files to a conversation | Drop them on the notch, or on a thread in the panel |
 | Read what's being said | It hangs under the notch while it's spoken; swipe it up to hide it (`read_along: false` turns it off) |
-| Connect another agent | Expand the notch and click it in the **Agents** row (a green dot means connected); **?** opens this guide |
+| Connect another agent | Expand the notch and click it in the **Agents** row: a green dot means connected, a hollow one installed but not connected (click to connect), an amber one (the browser) means the bridge waits for the extension to be loaded; a message under the notch says what happened and what to do next. **?** opens this guide |
 | Have it floating instead | Right-click → *Float the widget again*: the same island, draggable (it snaps to screen edges and remembers its position); *Compact* shrinks it to a black orb |
 | Hide / show it | `Ctrl+Alt+W`, click the tray icon, or right-click → *Hide widget* |
 | Reach actions without the widget | Right-click the tray icon |

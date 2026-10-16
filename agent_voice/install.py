@@ -65,7 +65,7 @@ def claude(remove: bool = False) -> str:
     settings = _read_json(path)
     _backup(path)
     hooks = settings.setdefault("hooks", {})
-    events = ("Stop", "PreToolUse", "UserPromptSubmit", "Notification", "PermissionRequest")
+    events = ("Stop", "PreToolUse", "UserPromptSubmit", "Notification", "PermissionRequest", "StopFailure")
     for event in events:
         hooks[event] = _strip_ours(hooks.get(event, []))
     if not remove:
@@ -79,6 +79,8 @@ def claude(remove: bool = False) -> str:
         hooks["Notification"].append({"hooks": [{**entry, "timeout": 5, "async": True}]})
         # Permission prompts answered by voice or from the widget (waits up to permissions.wait_seconds).
         hooks["PermissionRequest"].append({"matcher": "*", "hooks": [{**entry, "timeout": 300}]})
+        # A turn that ends on an API error: out of quota ("rate_limit") resumes once the limit resets.
+        hooks["StopFailure"].append({"matcher": "rate_limit", "hooks": [{**entry, "timeout": 5}]})
     for event in events:
         if not hooks[event]:
             del hooks[event]

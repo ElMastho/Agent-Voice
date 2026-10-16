@@ -291,3 +291,81 @@ else:
 
     def find_window(text: str) -> int:  # noqa: ARG001
         return 0
+
+
+def busy_state() -> str:
+    """'presenting' or 'full screen' while Windows itself holds its notifications back; '' otherwise."""
+    if sys.platform != "win32":
+        return ""
+    state = ctypes.c_int(0)
+    try:
+        if ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state)) != 0:
+            return ""
+    except (AttributeError, OSError):
+        return ""
+    # QUNS_BUSY (a full-screen app), QUNS_RUNNING_D3D_FULL_SCREEN (a game), QUNS_PRESENTATION_MODE.
+    return {2: "full screen", 3: "full screen", 4: "presenting"}.get(state.value, "")
+
+
+def dib_to_png(dib: bytes) -> bytes:
+    """A clipboard bitmap (CF_DIB: BITMAPINFOHEADER + pixels, 24 or 32 bits) as a PNG file, with the stdlib only."""
+    import struct
+    import zlib
+
+    size, width, height, _planes, bits, compression = struct.unpack_from("<IiiHHI", dib, 0)
+    if bits not in (24, 32) or compression not in (0, 3) or width <= 0 or height == 0:
+        return b""
+    offset = size + (12 if compression == 3 and size == 40 else 0)  # BI_BITFIELDS: three masks follow
+    stride = (width * bits // 8 + 3) & ~3
+    rows = range(abs(height) - 1, -1, -1) if height > 0 else range(abs(height))  # bottom-up unless negative
+    step = bits // 8
+    raw = bytearray()
+    for y in rows:
+        line = dib[offset + y * stride: offset + y * stride + width * step]
+        raw.append(0)
+        for x in range(0, len(line), step):
+            raw += bytes((line[x + 2], line[x + 1], line[x]))  # BGR(A) -> RGB
+    if len(raw) != abs(height) * (1 + width * 3):
+        return b""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    header = struct.pack(">IIBBBBB", width, abs(height), 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(bytes(raw), 6)) + chunk(b"IEND", b"")
+
+
+def clipboard_png() -> bytes:
+    """The image on the clipboard (a screenshot) as PNG bytes; b'' when it holds none."""
+    if sys.platform == "darwin":
+        import re
+        import subprocess
+
+        out = subprocess.run(["osascript", "-e", "the clipboard as «class PNGf»"], capture_output=True, text=True,
+                             timeout=5).stdout
+        m = re.search(r"«data PNGf([0-9A-Fa-f]+)»", out)
+        return bytes.fromhex(m.group(1)) if m else b""
+    if sys.platform != "win32":
+        return b""
+    user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+    user32.GetClipboardData.restype = wintypes.HANDLE
+    kernel32.GlobalLock.argtypes = [wintypes.HANDLE]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalSize.argtypes = [wintypes.HANDLE]
+    kernel32.GlobalSize.restype = ctypes.c_size_t
+    kernel32.GlobalUnlock.argtypes = [wintypes.HANDLE]
+    CF_DIB = 8
+    if not user32.IsClipboardFormatAvailable(CF_DIB) or not user32.OpenClipboard(None):
+        return b""
+    try:
+        handle = user32.GetClipboardData(CF_DIB)
+        ptr = kernel32.GlobalLock(handle) if handle else None
+        if not ptr:
+            return b""
+        try:
+            data = ctypes.string_at(ptr, kernel32.GlobalSize(handle))
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+    return dib_to_png(data)

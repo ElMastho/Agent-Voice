@@ -93,3 +93,61 @@ def result_label(result: dict | None) -> str:
     if result.get("tests"):
         parts.append(f"tests {result['tests']}")
     return " · ".join(parts)
+
+
+# An agent out of quota: "5-hour limit reached ∙ resets 3pm", "Claude AI usage limit reached|1760000000",
+# "You've hit your usage limit. Try again at 3:45 PM." Only short messages: a long reply that discusses
+# rate limits is not one.
+_LIMIT_HIT = re.compile(r"\b(?:usage|rate|session|weekly|5-hour|five-hour)\s+limit\s+(?:reached|hit|exceeded)|"
+                        r"\b(?:hit|reached)\s+(?:your|the)\s+(?:\w+\s+)?(?:usage\s+)?limit\b|"
+                        r"\blimite\s+(?:d'utilisation\s+)?atteinte\b", re.I)
+_LIMIT_EPOCH = re.compile(r"limit reached\|(\d{10})")
+_LIMIT_AT = re.compile(r"\b(?:resets?|try again|réinitialis\w*|réessayez)\s+(?:at\s+|à\s+|vers\s+)?"
+                       r"(?P<h>\d{1,2})(?:[:h](?P<m>\d{2}))?\s*(?P<ap>am|pm|a\.m\.|p\.m\.)?", re.I)
+_LIMIT_IN = re.compile(r"\b(?:in|dans)\s+(?P<n>\d+)\s*(?P<unit>h|hours?|heures?|min|minutes?)\b", re.I)
+
+
+def limit_reset(text: str, now: float | None = None) -> float | None:
+    """None: not a usage-limit message. Otherwise when it resets (epoch seconds), or 0.0 when it doesn't say."""
+    import time
+    from datetime import datetime, timedelta
+
+    text = " ".join((text or "").split())
+    if not text or len(text) > 300:
+        return None
+    epoch = _LIMIT_EPOCH.search(text)
+    if not epoch and not _LIMIT_HIT.search(text):
+        return None
+    if epoch:
+        return float(epoch.group(1))
+    now = time.time() if now is None else now
+    m = _LIMIT_AT.search(text)
+    if m:
+        hour, minute = int(m["h"]), int(m["m"] or 0)
+        ap = (m["ap"] or "").lower().replace(".", "")
+        if ap == "pm" and hour < 12:
+            hour += 12
+        elif ap == "am" and hour == 12:
+            hour = 0
+        if hour < 24 and minute < 60:
+            base = datetime.fromtimestamp(now)
+            when = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if when.timestamp() <= now:
+                when += timedelta(days=1)
+            return when.timestamp()
+    m = _LIMIT_IN.search(text)
+    if m:
+        n = int(m["n"])
+        return now + n * (3600 if m["unit"].lower().startswith("h") else 60)
+    return 0.0
+
+
+def expand_shortcut(text: str, shortcuts: dict) -> str | None:
+    """A saved prompt said by its name ("run the tests", "please commit this") -> its full text; None otherwise."""
+    said = " ".join(re.sub(r"[^\w\s']", " ", text.lower()).split())
+    said = re.sub(r"^(?:please|can you|could you|now|ok|okay|alors|s'il te pla[iî]t)\s+", "", said)
+    said = re.sub(r"\s+(?:please|now|s'il te pla[iî]t)$", "", said)
+    for name, prompt in (shortcuts or {}).items():
+        if said == " ".join(re.sub(r"[^\w\s']", " ", str(name).lower()).split()) and str(prompt).strip():
+            return str(prompt).strip()
+    return None

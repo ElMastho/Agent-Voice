@@ -95,6 +95,24 @@ DEFAULTS: dict = {
     "thread_voices": True,
     # Chime mode sounds (0.0-1.0). Kept low so they don't disturb people around you.
     "chime": {"volume": 0.35},
+    # The day's recap at this time (what each thread did, what's waiting, limits, tokens); also on demand:
+    # "Hey Claude, daily recap", the tray, or `agent-voice recap`.
+    "recap": {"enabled": True, "at": "18:00"},
+    # Focus: in a call, presenting or with an app full screen, replies are held (approvals still come
+    # through) and a catch-up follows. calls: "hold", or "chimes" to keep hearing chimes in calls.
+    "focus": {"enabled": True, "full_screen": True, "calls": "hold"},
+    # Out of quota: once the limit resets, send this to the thread so it picks up where it stopped (auto: without
+    # asking; off: only after "resume when it resets" or a click on Resume).
+    "resume": {"auto": True, "message": "Continue."},
+    # Saved prompts: say a name ("Hey Claude, run the tests", "tell Codex to commit this") and its prompt is sent.
+    "shortcuts": {
+        "run the tests": "Run the test suite and fix anything that fails.",
+        "commit this": "Commit the current changes with a clear, short commit message.",
+        "review this": "Review the changes you just made: bugs, edge cases, anything you would do differently.",
+        "explain that": "Explain what you just did in a few sentences.",
+        "lance les tests": "Lance les tests et corrige ce qui échoue.",
+        "fais un commit": "Fais un commit des changements avec un message clair et court.",
+    },
 }
 
 

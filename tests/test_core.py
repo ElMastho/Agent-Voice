@@ -483,7 +483,9 @@ def test_messages_go_to_the_conversation_named(daemon, monkeypatch):
     pasted = []
     monkeypatch.setattr(daemon, "_paste", lambda text, hwnd=0, submit=False, session="": pasted.append((text, hwnd, submit)))
     daemon._send_to(*daemon._routed("tell codex to run the tests"), "en")
-    assert pasted == [("Run the tests", 42, True)]
+    assert pasted == [("Run the test suite and fix anything that fails.", 42, True)]  # a saved prompt, by its name
+    daemon._send_to(*daemon._routed("tell codex to fix the login bug"), "en")
+    assert pasted[-1] == ("Fix the login bug", 42, True)
     assert daemon._routed("tell gemini to stop") is None  # no such conversation: not a message
 
 
@@ -939,3 +941,77 @@ def test_launch_trampoline_reads_and_removes_the_prompt(tmp_path, monkeypatch):
     prompt.write_text('Fix "quotes" & pipes | ; too', encoding="utf-8")
     assert launch.run("gemini", str(prompt)) == 0
     assert ran == [["C:/bin/gemini.exe", "-i", 'Fix "quotes" & pipes | ; too']] and not prompt.exists()
+
+
+def test_limit_messages_and_their_reset_time():
+    from datetime import datetime
+
+    from agent_voice.textclean import limit_reset
+
+    now = datetime(2026, 10, 16, 14, 0).timestamp()
+    assert limit_reset("5-hour limit reached ∙ resets 3pm", now) == datetime(2026, 10, 16, 15, 0).timestamp()
+    assert limit_reset("Claude AI usage limit reached|1792180000", now) == 1792180000
+    assert limit_reset("You've hit your usage limit. Try again in 2 hours.", now) == now + 7200
+    assert limit_reset("Usage limit reached · resets 9:30", now) == datetime(2026, 10, 17, 9, 30).timestamp()
+    assert limit_reset("Rate limit reached", now) == 0.0  # a limit, no time given
+    assert limit_reset("All tests pass; I also added a rate limit to the API.", now) is None
+    assert limit_reset("The usage limit reached its max " + "x " * 200, now) is None  # long: a reply, not the error
+
+
+def test_out_of_quota_resumes_when_the_limit_resets(daemon, monkeypatch):
+    sent = []
+    monkeypatch.setattr(daemon, "_send_to", lambda session, message, lang: sent.append((session, message)))
+    daemon.speak("Working.", source="claude", session="a")
+    daemon.speak("5-hour limit reached ∙ resets 3pm", source="claude", final=True, session="a")
+    info = daemon._limited["a"]
+    assert info["resume"] and not info["guess"]  # on by default
+    assert daemon.banner["text"].startswith("Claude Code is out of quota until") and "continue" in daemon.banner["text"]
+    assert daemon.state["limited"]["a"]["resets"] == info["resets"]  # survives a restart
+    assert [n["kind"] for n in daemon.status()["needs"]] == ["limit"]
+    daemon._check_resumes(info["resets"] + 30)
+    assert daemon.jobs.empty()  # not yet: a minute after the reset
+    daemon._check_resumes(info["resets"] + 61)
+    daemon.jobs.get()()
+    assert sent == [("a", "Continue.")]
+    daemon._check_resumes(info["resets"] + 120)
+    assert daemon.jobs.empty()  # once
+    daemon.limit_hit("a", "claude", "Rate limit reached")  # still out: our "continue" came too early
+    assert daemon._limited["a"]["resume"] and not daemon._limited["a"].get("sent")
+    daemon.speak("Picking up where I left off.", source="claude", final=True, session="a")
+    assert "a" not in daemon._limited  # it talks again
+
+
+def test_resume_can_be_asked_for_when_auto_is_off(daemon):
+    from agent_voice import server
+
+    daemon.config["resume"] = {"auto": False, "message": "Continue."}
+    daemon.limit_hit("c", "codex", "You've hit your usage limit. Try again at 3:45 PM.")
+    assert not daemon._limited["c"]["resume"] and "Resume" in daemon.banner["text"]
+    assert server.match_resume("resume when it resets") and server.match_resume("reprends quand la limite est levée")
+    assert not server.match_resume("resume the work on the login page")
+    assert daemon.set_resume() and daemon._limited["c"]["resume"]  # the latest one out of quota
+
+
+def test_claude_stop_failure_reports_the_limit(monkeypatch):
+    import json
+
+    sent = []
+    monkeypatch.setattr(hooks.client, "request", lambda path, payload=None, timeout=2.0: sent.append((path, payload)))
+    hooks.hook_claude(json.dumps({"hook_event_name": "StopFailure", "session_id": "s", "error": "rate_limit",
+                                  "last_assistant_message": "5-hour limit reached ∙ resets 3pm"}))
+    hooks.hook_claude(json.dumps({"hook_event_name": "StopFailure", "session_id": "s", "error": "server_error"}))
+    assert sent == [("/limit_hit", {"session": "s", "source": "claude", "text": "5-hour limit reached ∙ resets 3pm"})]
+
+
+def test_claude_installer_listens_for_stop_failures(tmp_path, monkeypatch):
+    import json
+
+    from agent_voice import install
+
+    monkeypatch.setattr(install.Path, "home", lambda: tmp_path)
+    install.claude()
+    hooks_ = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))["hooks"]
+    assert hooks_["StopFailure"][0]["matcher"] == "rate_limit"
+    install.claude(remove=True)
+    assert "StopFailure" not in json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8")).get(
+        "hooks", {})

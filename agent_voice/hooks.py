@@ -327,6 +327,14 @@ def hook_claude(raw: str) -> None:
     except ValueError:
         return
     event = data.get("hook_event_name", "")
+    if event == "StopFailure":
+        # Out of quota (or a rate limit that outlasted Claude Code's retries): the daemon resumes it at reset time.
+        error = str(data.get("error") or "")
+        details = " ".join(str(x) for x in (data.get("error_details"), data.get("last_assistant_message")) if x)
+        if error == "rate_limit" or textclean.limit_reset(details) is not None:
+            client.request("/limit_hit", {"session": str(data.get("session_id", "")), "source": "claude",
+                                          "text": details[:400]}, timeout=1.0)
+        return
     if event == "PermissionRequest":
         out = permission_decision(data)
         if out:

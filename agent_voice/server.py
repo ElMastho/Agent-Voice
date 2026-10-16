@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 
 from agent_voice import __version__, calls, claudeapp, install, keys, quota, textclean, updater, winfocus
 from agent_voice.config import HOME, LOG_DIR, load_config, load_state, save_state
+from agent_voice.hooks import strip_summary
 from agent_voice.textclean import result_label
 from agent_voice.tts import Speaker
 
@@ -247,6 +248,59 @@ def parse_route(text: str) -> tuple[str, str] | None:
     return None
 
 
+# "Send this to Codex", "give the screenshot to the notch one and ask it to fix it", "envoie ça à Codex : ..."
+_HANDOFF = re.compile(
+    r"^(?:please\s+)?(?:send|give|pass|share|hand|envoie|donne|passe|transmets)\s+"
+    r"(?:this|that|it|the selection|my selection|the screenshot|this screenshot|my screenshot|ça|ca|ceci|cela|"
+    r"la sélection|la selection|la capture)\s+(?:over\s+)?(?:to|à|a)\s+(?P<rest>.+)$", re.I | re.S)
+_HANDOFF_ASK = re.compile(r"^(?:ask|tell)\s+(?:it|him|her|them)\s+to\s+|^(?:demande-lui|dis-lui)\s+(?:de\s+|d')?",
+                          re.I)
+
+
+def parse_handoff(text: str) -> tuple[str, str] | None:
+    """'Send this to Codex and ask it to fix it' -> ('Codex', 'Fix it'); 'Send this to Codex' -> ('Codex', '')."""
+    m = _HANDOFF.match(text.strip())
+    if not m:
+        return None
+    parts = re.split(r"\s*[,:]\s*|\s+(?:and|et)\s+", m["rest"].strip(), maxsplit=1)
+    name = parts[0].strip(" .!?")
+    msg = _HANDOFF_ASK.sub("", parts[1].strip()) if len(parts) > 1 else ""
+    if not name or len(name.split()) > 4:
+        return None
+    return name, msg[:1].upper() + msg[1:]
+
+
+# "Resume when it resets", "continue Codex after the limit", "reprends quand la limite est levée"
+_RESUME = re.compile(r"\b(?:resume|continue|carry on|keep going|reprends|reprendre|continuer?)\b.*"
+                     r"\b(?:resets?|limit|limits|quota|limite|réinitialis\w*|reinitialis\w*)\b", re.I | re.S)
+_RECAP = re.compile(r"^(?:give me\s+)?(?:the\s+|my\s+|today'?s\s+)?(?:daily\s+recap|recap(?: of (?:the|my) day)?|"
+                    r"what did i do today|what happened today|day summary|summary of (?:the|my) day|"
+                    r"résumé de (?:la|ma) journée|resume de (?:la|ma) journee|bilan de (?:la|ma) journée)\W*$", re.I)
+
+
+def match_resume(text: str) -> bool:
+    return bool(_RESUME.search(text)) and len(text.split()) <= 12
+
+
+def match_recap(text: str) -> bool:
+    return bool(_RECAP.match(_plain(text).replace(" s ", "'s ")) or _RECAP.match(text.strip().lower()))
+
+
+def spoken_number(words: set[str], most: int) -> int | None:
+    """'two', '2', 'the second one' -> 2 (up to `most`); 'one' alone only when nothing else is said."""
+    found = [n for n, keys in _ORDINALS.items() if n <= most and any(k in words for k in keys)]
+    if len(found) > 1:
+        found = [n for n in found if n != 1 or not words & {"one", "un", "une"}]
+    return found[0] if found else None
+
+
+_ALL = {"all", "everything", "everyone", "both", "tout", "tous", "toutes", "les deux"}
+
+
+def _tokens_label(n: int) -> str:
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{round(n / 1e3)}k" if n >= 1e3 else str(n)
+
+
 def _names(label: str) -> set[str]:
     return {w for w in _plain(label).split() if w not in _FILLER and len(w) > 1}
 
@@ -364,6 +418,10 @@ class Daemon:
         self.usage: dict[str, dict] = {}
         self.limits: dict[str, dict] = {k: v for k, v in (self.state.get("limits") or {}).items() if isinstance(v, dict)}
         self._limit_warned: set[str] = set()
+        # Threads out of quota: when they reset, and whether to send "continue" then. Kept across restarts.
+        self._limited: dict[str, dict] = {k: v for k, v in (self.state.get("limited") or {}).items()
+                                          if isinstance(v, dict)}
+        self._fullscreen = ""  # "presenting" / "full screen" (focus)
         self._limits_at: dict[str, float] = {}  # when each agent's numbers were measured (newest wins)
         self._usage_line = ""  # Claude Code's status line: "on" (ours), "off" or "custom" (yours); cached with agents
         # The last finished turn's outcome (files changed, tests), shown for a while in the notch.
@@ -442,8 +500,27 @@ class Daemon:
 
     @property
     def chime(self) -> bool:
-        """Chimes instead of the voice: chosen, or automatic while you're in a call."""
-        return bool(self.state.get("chime")) or bool(self.in_call and not self._call_override)
+        """Chimes instead of the voice: chosen, or automatic while you're in a call or in focus."""
+        return bool(self.state.get("chime")) or bool(self.focus)
+
+    @property
+    def focus(self) -> str:
+        """Why replies are held back right now: 'call (Teams)', 'presenting', 'full screen'; '' otherwise."""
+        if self._call_override:
+            return ""
+        cfg = self.config.get("focus", {})
+        if self.in_call:
+            return f"call ({self.in_call})"
+        if cfg.get("enabled", True) and cfg.get("full_screen", True) and self._fullscreen:
+            return self._fullscreen
+        return ""
+
+    def _holding(self) -> bool:
+        """Focus: hold replies (approvals and questions still come through). Calls can keep chimes instead."""
+        cfg = self.config.get("focus", {})
+        if not self.focus or not cfg.get("enabled", True):
+            return False
+        return not (self.in_call and cfg.get("calls", "hold") == "chimes")
 
     @property
     def quiet(self) -> bool:
@@ -464,8 +541,8 @@ class Daemon:
         self.state["chime"] = on
         save_state(self.state)
         log.info("chime=%s", on)
-        if self.in_call and not on:
-            self._call_override = True  # you asked for the voice during a call: keep it
+        if self.focus and not on:
+            self._call_override = True  # you asked for the voice during a call (or full screen): keep it
         self.stop()  # no voice and no open mic in chime mode
         if on:
             self.play_chime("done")
@@ -643,6 +720,11 @@ class Daemon:
         for session, a in self.attention.items():
             items.append({"kind": "input", "session": session, "source": a["source"],
                           "text": a["text"] or "Waiting for you", "at": a["at"]})
+        for session, info in self._limited.items():
+            when = ("about " if info.get("guess") else "") + _clock(info["resets"], "five_hour")
+            items.append({"kind": "limit", "session": session, "source": info["source"], "resume": info["resume"],
+                          "text": f"Out of quota · resumes {when}" if info["resume"] else f"Out of quota until {when}",
+                          "at": info["at"]})
         for item in items:
             item["title"] = self._title(item["session"], item.pop("source"))
             item["color"] = thread_color(item["session"] or item["title"])
@@ -679,8 +761,20 @@ class Daemon:
         allow = match_yes_no(text)
         if allow is None:
             return False
-        named = self._mentioned(text, {p["session"] for p in self._perms.values()})
-        perm = next((p for p in self._perms.values() if p["session"] == named), None) if named else self.permission
+        perms = sorted(self._perms.values(), key=lambda p: p["at"])  # the order of the "needs you" rows
+        words = set(_plain(text).split())
+        if words & _ALL or "les deux" in _plain(text):  # "approve all", "deny both"
+            for p in perms:
+                self.answer_permission(p["id"], allow)
+            return True
+        named = self._mentioned(text, {p["session"] for p in perms})
+        number = None if named else spoken_number(words, len(perms))
+        if named:
+            perm = next((p for p in perms if p["session"] == named), None)
+        elif number:  # "approve two", "deny the first one"
+            perm = perms[number - 1]
+        else:
+            perm = self.permission
         if perm is None:
             return False
         self.answer_permission(perm["id"], allow)
@@ -694,8 +788,14 @@ class Daemon:
         session = self._find_thread(parsed[0])
         return (session, parsed[1]) if session is not None else None
 
+    def _expand(self, text: str) -> tuple[str, bool]:
+        """A saved prompt's full text when `text` is its name ("run the tests"); (text, expanded?)."""
+        full = textclean.expand_shortcut(text, self.config.get("shortcuts") or {})
+        return (full, True) if full else (text, False)
+
     def _send_to(self, session: str, message: str, lang: str) -> None:
         """Type a message into a conversation's own window (and send it), then come back."""
+        message, expanded = self._expand(message)
         hwnd = self._session_hwnd.get(session, 0)
         title = self._title(session, self.threads.get(session, {}).get("source", ""))
         if not (hwnd and winfocus.is_window(hwnd)):
@@ -704,8 +804,212 @@ class Daemon:
                               session, "", kind="you", tag="not sent")
             _beep(300, 150)
             return
-        self._heard(message, lang, session, tag="sent")
+        self._heard(message, lang, session, tag="shortcut" if expanded else "sent")
         self._paste(message, hwnd, submit=True, session=session)
+
+    # -- handoff ----------------------------------------------------------------
+    def _grab_selection(self) -> str:
+        """The text selected in the app in front (copied, then the clipboard put back)."""
+        import pyperclip
+
+        self._wait_modifiers_released()
+        previous = pyperclip.paste()
+        pyperclip.copy("")
+        keys.copy()
+        time.sleep(0.25)
+        selected = pyperclip.paste()
+        pyperclip.copy(previous)
+        return selected.strip()
+
+    def handoff(self, name: str, message: str, lang: str) -> None:
+        """'Send this to Codex': the selection (or the screenshot on the clipboard) goes to that conversation.
+
+        With a message ("... and ask it to fix it") it's sent; without, it waits in the box for your question.
+        """
+        session = self._find_thread(name)
+        if session is None:
+            self._show_banner(f"I don't know a thread called {name}.", "", "", kind="note", tag="not sent")
+            _beep(300, 150)
+            return
+        content = self._grab_selection()
+        if not content:
+            png = winfocus.clipboard_png()
+            if png:
+                shots = HOME / "shots"
+                shots.mkdir(parents=True, exist_ok=True)
+                for old in sorted(shots.glob("*.png"))[:-20]:  # keep the last 20
+                    old.unlink(missing_ok=True)
+                path = shots / f"shot-{time.strftime('%Y%m%d-%H%M%S')}.png"
+                path.write_bytes(png)
+                content = str(path).replace("\\", "/")
+        title = self._title(session, self.threads.get(session, {}).get("source", ""))
+        if not content:
+            self._show_banner(f"Nothing to send to {title}: select some text or copy a screenshot first.", "", "",
+                              kind="note", tag="not sent")
+            _beep(300, 150)
+            return
+        message, _ = self._expand(message) if message else ("", False)
+        text = f"{message}\n\n{content}" if message else content
+        log.info("handoff to %r (%d chars, %s)", title, len(content), "sent" if message else "not sent")
+        self._heard(message or f"(to {title}) {content[:120]}", lang, session, tag="sent" if message else "handoff")
+        self._paste(text if message else text + " ", self._hwnd_for(session), submit=bool(message), session=session)
+
+    # -- out of quota -------------------------------------------------------------
+    def limit_hit(self, session: str, source: str, text: str = "", resets: float = 0.0) -> None:
+        """A thread ran out of quota: offer to send "continue" once its limit resets (or do it, if you said so)."""
+        if not session:
+            return
+        found = textclean.limit_reset(text) if text else None
+        resets = resets or (found or 0.0)
+        if not resets:
+            full = [w["resets"] for w in self._limits_status().get(source, {}).values() if w["pct"] >= 100]
+            resets = min(full) if full else 0.0
+        before = self._limited.get(session) or {}
+        resume = (bool(self.config.get("resume", {}).get("auto", True)) or bool(before.get("resume"))
+                  or time.time() - float(before.get("sent", 0)) < 900)  # still out after our "continue": again
+        guess = not resets
+        self._limited[session] = {"source": source, "resets": int(resets or time.time() + 1800), "guess": guess,
+                                  "resume": resume, "at": round(time.time())}
+        self._save_limited()
+        self.threads.setdefault(session, {"source": source, "last": time.time()})
+        title = self._title(session, source)
+        when = _clock(self._limited[session]["resets"], "five_hour")
+        log.info("%s hit its limit (resets %s%s)", title, when, ", resuming then" if resume else "")
+        self._event("needs", session, source, "limit reached")
+        if before.get("sent") and resume:
+            return  # our "continue" came too early: quietly try again at the next reset
+        if resume:
+            self._show_banner(f"{title} is out of quota until {'about ' if guess else ''}{when}: I'll send it "
+                              f"\"continue\" then.", session, source, kind="note", tag="limit")
+            return
+        self._show_banner(f"{title} is out of quota until {'about ' if guess else ''}{when}. Say \"resume when it "
+                          "resets\" or click Resume, and I'll send it \"continue\" then.", session, source,
+                          kind="needs", tag="limit")
+        if self.chime:
+            self.play_chime("attention")
+
+    def set_resume(self, session: str = "", on: bool = True) -> bool:
+        """Resume a thread (the most recent one out of quota) when its limit resets, or don't."""
+        session = session or max(self._limited, key=lambda s: self._limited[s]["at"], default="")
+        if session not in self._limited:
+            return False
+        self._limited[session]["resume"] = on
+        self._save_limited()
+        info = self._limited[session]
+        title = self._title(session, info["source"])
+        when = _clock(info["resets"], "five_hour")
+        self._show_banner(f"I'll send {title} \"continue\" at {when}." if on else f"{title} won't be resumed.",
+                          session, info["source"], kind="note", tag="limit")
+        return True
+
+    def _save_limited(self) -> None:
+        self.state["limited"] = self._limited
+        save_state(self.state)
+
+    def _check_resumes(self, now: float) -> None:
+        """At reset time (plus a minute), send "continue" to the threads you asked to resume."""
+        for session, info in list(self._limited.items()):
+            if now - info.get("at", now) > 8 * 86400:
+                self._limited.pop(session)  # a week old: forget it
+                self._save_limited()
+            elif info.get("resume") and not info.get("sent") and now >= info["resets"] + 60:
+                info["sent"] = round(now)
+                self._save_limited()
+                message = str(self.config.get("resume", {}).get("message") or "Continue.")
+                log.info("resuming %s after its limit reset", self._title(session, info["source"]))
+                self.jobs.put(lambda s=session, m=message: self._send_to(s, m, "en"))
+
+    def _not_limited(self, session: str) -> None:
+        """The thread talks again: it isn't out of quota any more."""
+        if session in self._limited:
+            sent = self._limited.pop(session).get("sent")
+            self._save_limited()
+            if sent:
+                log.info("%s resumed", self._title(session))
+
+    # -- the day ----------------------------------------------------------------
+    def _day(self) -> dict:
+        """Today's log (turns, tokens, what each thread did), started afresh each morning."""
+        today = time.strftime("%Y-%m-%d")
+        day = self.state.get("day")
+        if not isinstance(day, dict) or day.get("date") != today:
+            day = {"date": today, "threads": {}, "hours": [0] * 24}
+            self.state["day"] = day
+        return day
+
+    def _log_turn(self, session: str, source: str, summary: str) -> None:
+        day = self._day()
+        t = day["threads"].setdefault(session or source or "?", {"source": source, "turns": 0, "tokens": 0, "last": ""})
+        t["turns"] += 1
+        t["title"] = self._title(session, source)
+        if summary:
+            t["last"] = " ".join(summary.split())[:200]
+        day["hours"][time.localtime().tm_hour] += 1
+        save_state(self.state)
+
+    def _day_status(self) -> dict:
+        day = self._day()
+        threads = day["threads"].values()
+        return {"turns": sum(t["turns"] for t in threads), "threads": len(day["threads"]),
+                "tokens": sum(int(t.get("tokens") or 0) for t in threads), "hours": day["hours"]}
+
+    def recap_text(self) -> tuple[str, str]:
+        """(shown, spoken): what each thread did today, what's waiting, the limits and the tokens."""
+        day, stats = self._day(), self._day_status()
+        if not stats["turns"]:
+            return "Nothing yet today.", "Nothing yet today."
+        threads = sorted(day["threads"].items(), key=lambda kv: -kv[1]["turns"])
+        lines = [f"{stats['turns']} turn{'s' if stats['turns'] != 1 else ''} in {stats['threads']} "
+                 f"thread{'s' if stats['threads'] != 1 else ''}" +
+                 (f" · {_tokens_label(stats['tokens'])} tokens" if stats["tokens"] else "") + "."]
+        for session, t in threads[:5]:
+            title = self._title(session, t.get("source", "")) if session in self.threads else t.get("title") or "?"
+            lines.append(f"{title} ({t['turns']}): {textclean.truncate(t['last'], 110) or 'done'}")
+        waiting = [n["title"] for n in self._needs_status()]
+        if waiting:
+            lines.append(f"Still waiting on you: {_join(sorted(set(waiting)))}.")
+        limits = []
+        for source, windows in self._limits_status().items():
+            parts = [f"{'5h' if k == 'five_hour' else 'week'} {w['pct']}%" for k, w in sorted(windows.items())]
+            limits.append(f"{AGENT_TITLES.get(source, source.capitalize())} {', '.join(parts)}")
+        if limits:
+            lines.append("Limits: " + "; ".join(limits) + ".")
+        top = threads[0][1]
+        said = (f"Today: {stats['turns']} turns in {stats['threads']} threads, most of it in "
+                f"{top.get('title') or 'one thread'}." + (f" {_join(sorted(set(waiting)))} still "
+                                                           f"need{'s' if len(set(waiting)) == 1 else ''} you."
+                                                           if waiting else ""))
+        week = [w["pct"] for windows in self._limits_status().values() for k, w in windows.items() if k == "seven_day"]
+        if week:
+            said += f" You've used {max(week)}% of your weekly limit."
+        return " ".join(lines), said
+
+    def recap(self, spoken: bool = True) -> None:
+        shown, said = self.recap_text()
+        log.info("recap: %s", said)
+        self._show_banner(shown, "", "", kind="recap")
+        if spoken and not self.quiet:
+            self._wake_cancel.set()
+            self.speaker.speak(said, "en")
+
+    def _check_recap(self, now: float) -> None:
+        """The evening recap, once a day, when you're there to see it."""
+        cfg = self.config.get("recap", {})
+        if not cfg.get("enabled", True) or self._away_since or self.focus:
+            return
+        today = time.strftime("%Y-%m-%d", time.localtime(now))
+        if self.state.get("recap_day") == today:
+            return
+        try:
+            hour, minute = (int(x) for x in str(cfg.get("at", "18:00")).split(":", 1))
+        except ValueError:
+            return
+        local = time.localtime(now)
+        if (local.tm_hour, local.tm_min) < (hour, minute) or not self._day_status()["turns"]:
+            return
+        self.state["recap_day"] = today
+        save_state(self.state)
+        self.recap()
 
     # -- away -------------------------------------------------------------------
     def _event(self, kind: str, session: str, source: str, text: str = "") -> None:
@@ -717,7 +1021,10 @@ class Daemon:
         while True:
             time.sleep(5)
             try:
-                self._check_away(winfocus.idle_seconds(), time.time())
+                now = time.time()
+                self._check_away(winfocus.idle_seconds(), now)
+                self._check_resumes(now)
+                self._check_recap(now)
             except Exception:
                 log.exception("away check failed")
 
@@ -725,9 +1032,9 @@ class Daemon:
         cfg = self.config.get("catch_up", {})
         if not cfg.get("enabled", True):
             return
-        away = idle >= 60 * float(cfg.get("away_minutes", 5)) or bool(self.in_call)
+        away = idle >= 60 * float(cfg.get("away_minutes", 5)) or bool(self.in_call) or self._holding()
         if away and not self._away_since:
-            self._away_since = now - (0 if self.in_call and idle < 60 else idle)
+            self._away_since = now - (0 if (self.in_call or self._holding()) and idle < 60 else idle)
         elif not away and self._away_since:
             since, self._away_since = self._away_since, 0.0
             self._catch_up([e for e in self._events if e["at"] >= since])
@@ -810,8 +1117,14 @@ class Daemon:
         session, source = str(data.get("session") or ""), str(data.get("source") or "claude")
         context = data.get("context")
         if session and isinstance(context, (int, float)):
-            self.usage[session] = {"context": max(0, min(100, round(float(context)))), "at": time.time()}
+            self.usage[session] = {**self.usage.get(session, {}), "context": max(0, min(100, round(float(context)))),
+                                   "at": time.time()}
             self.usage = dict(list(self.usage.items())[-50:])
+        tokens = data.get("tokens")
+        if session and isinstance(tokens, (int, float)) and tokens >= 0:  # this conversation's tokens today
+            self.usage.setdefault(session, {"at": time.time()})["tokens"] = int(tokens)
+            t = self._day()["threads"].setdefault(session, {"source": source, "turns": 0, "tokens": 0, "last": ""})
+            t["tokens"] = int(tokens)
         limits = {}
         for window in quota.WINDOWS:
             w = data.get(window)
@@ -833,6 +1146,11 @@ class Daemon:
         self.limits[source] = limits
         self.state["limits"] = self.limits
         save_state(self.state)
+        if any(w["pct"] >= 100 for w in limits.values()):
+            latest = max((s for s, i in self.threads.items() if i["source"] == source),
+                         key=lambda s: self.threads[s]["last"], default="")
+            if latest and latest not in self._limited:
+                self.limit_hit(latest, source)
         for window, w in limits.items():
             key = f"{source}:{window}:{w['resets'] // 600}"  # once per window (its reset time, give or take)
             if w["pct"] >= 90 and key not in self._limit_warned:
@@ -940,10 +1258,20 @@ class Daemon:
                 self._queue.append((text, lang, source, interrupt, final, voice, session, 0, result))
                 log.info("queued speech from another thread (%d waiting)", len(self._queue))
                 return 0
+        if final and session and textclean.limit_reset(text) is not None:
+            self.limit_hit(session, source, text)  # "5-hour limit reached ∙ resets 3pm": not a reply
+            self.activity.pop(session, None)
+            return 0
+        if session and text.strip():
+            self._not_limited(session)
         self._record_turn(session, source, text, lang, voice, final)
         if final:
             self.activity.pop(session, None)  # the agent is done working
             self._finished(session, source, text, result)
+        if self._holding():
+            # Focus (a call, presenting, full screen): nothing now; the catch-up tells you afterwards.
+            log.info("held (%s): source=%s final=%s", self.focus, source, final)
+            return 0
         if self.quiet:
             # Chimes or silent: no voice and no open mic; the end of a turn shows as a banner.
             log.info("speak source=%s output=%s final=%s", source, self.output, final)
@@ -991,6 +1319,7 @@ class Daemon:
             turn["result"] = result
         summary = text.strip() or self._turn_text(session)
         self._event("done", session, source, textclean.clean(summary) if summary else "")
+        self._log_turn(session, source, textclean.clean(strip_summary(summary)) if summary else "")
         if result and (result.get("files") or result.get("tests")):
             title = self._title(session, source)
             self.last_result = {"session": session, "title": title, "color": thread_color(session or title),
@@ -1163,7 +1492,8 @@ class Daemon:
         if not text:
             return
         session = session or self._last_session
-        self._heard(text, lang.detect(text), session, tag="sent")
+        text, expanded = self._expand(text)
+        self._heard(text, lang.detect(text), session, tag="shortcut" if expanded else "sent")
         self._paste(text, self._hwnd_for(session), submit=True, session=session)
 
     def replay(self, session: str = "") -> None:
@@ -1295,6 +1625,15 @@ class Daemon:
         """Every few seconds: is another app on the mic? Then chimes until the call ends."""
         while True:
             time.sleep(4)
+            try:
+                busy = winfocus.busy_state()
+            except Exception:
+                busy = ""
+            if busy != self._fullscreen:
+                log.info("focus: %s", busy or "off")
+                if not busy and not self.in_call:
+                    self._call_override = False
+                self._fullscreen = busy
             if not self.config.get("auto_chime_in_calls", True):
                 continue
             try:
@@ -1428,6 +1767,10 @@ class Daemon:
                 self.answer(text=text)
             elif match_command(text):
                 self._run_command(match_command(text), session)
+            elif session in self._limited and match_resume(text):
+                self.set_resume(session)
+            elif self._expand(text)[1]:  # a saved prompt's name: its full text, sent
+                self._paste(self._expand(text)[0], target, submit=True, session=session)
             elif self.wake and strip_wake(text, list(self.config.get("wake_word", {}).get("phrases") or [])) is not None:
                 # "Hey Claude, ..." while the reply mic was open: the rest is the reply; the phrase alone is nothing.
                 rest = strip_wake(text, list(self.config.get("wake_word", {}).get("phrases") or []))
@@ -1560,8 +1903,23 @@ class Daemon:
                         "state": state, "ago": int(time.time() - info["last"]),
                         "reply": " ".join(reply.split())[-160:],
                         "context": (self.usage.get(session) or {}).get("context"),
+                        "tokens": (self.usage.get(session) or {}).get("tokens"),
                         "result": turn.get("result") if turn.get("done") else None})
         return out
+
+    def thread_detail(self, session: str) -> dict:
+        """A conversation's last turn in full (markdown), what it changed, and its numbers today."""
+        info = self.threads.get(session)
+        if info is None:
+            return {}
+        turn = self._turns.get(session) or {}
+        title = self._title(session, info["source"])
+        day = self._day()["threads"].get(session) or {}
+        return {"session": session, "title": title, "color": thread_color(session or title),
+                "text": strip_summary(self._turn_text(session))[-12000:], "result": turn.get("result"),
+                "ago": int(time.time() - info["last"]), "turns": day.get("turns", 0),
+                "tokens": (self.usage.get(session) or {}).get("tokens") or day.get("tokens", 0),
+                "context": (self.usage.get(session) or {}).get("context")}
 
     def attach(self, paths: list[str], text: str = "", session: str = "") -> None:
         """Files (or text) dropped on the notch: typed into the conversation's input, not sent, so you can add to it."""
@@ -1821,6 +2179,19 @@ class Daemon:
             if self._perms and self._voice_approval(command):  # "Hey Claude, approve Codex"
                 self._heard(command, lang, "", tag="answer")
                 continue
+            if match_recap(command):  # "Hey Claude, daily recap"
+                self._heard(command, lang, "", tag="command")
+                self.recap()
+                continue
+            if self._limited and match_resume(command):  # "Hey Claude, resume Codex when it resets"
+                named = self._mentioned(command, set(self._limited))
+                if self.set_resume(named or ""):
+                    self._heard(command, lang, named or "", tag="command")
+                continue
+            handoff = parse_handoff(command)
+            if handoff:  # "Hey Claude, send this to Codex and ask it to explain it"
+                self.handoff(handoff[0], handoff[1], lang)
+                continue
             new = parse_new_thread(command)
             if new:  # "Hey Claude, new thread: add a health check"
                 self.new_thread(new[1], {"claude": "", "": ""}.get(new[0], new[0]), lang=lang)
@@ -1829,7 +2200,12 @@ class Daemon:
             if routed:  # "Hey Claude, tell the notch redesign to run the tests"
                 self._send_to(routed[0], routed[1], lang)
                 continue
-            if len(command.split()) >= 3:
+            full, expanded = self._expand(command)
+            if expanded:  # "Hey Claude, commit this": a saved prompt, to the current thread
+                self._heard(full, lang, session, tag="shortcut")
+                _beep(880, 60)
+                self._paste(full, self._hwnd_for(session), submit=True, session=session)
+            elif len(command.split()) >= 3:
                 self._heard(command, lang, session, tag="sent")
                 _beep(880, 60)
                 self._paste(command, self._hwnd_for(session), submit=True, session=session)
@@ -1868,6 +2244,8 @@ class Daemon:
             "reading": self._reading_status(),
             "output": self.output,
             "in_call": self.in_call,
+            "focus": self.focus if self._holding() else "",
+            "day": self._day_status(),
             "banner": {**self.banner, "age": round(time.time() - self.banner["at"], 1)}
             if self.banner and time.time() - self.banner["at"] < 60 else None,
             "last_reply": {"session": self._last_session} if self._turn_text(self._last_session) else None,
@@ -2089,6 +2467,8 @@ def _handler(daemon: Daemon):
                     if tag != wait or time.time() >= end:
                         return self._json(200, {**st, "tag": tag})
                     time.sleep(0.25)
+            if url.path == "/thread":  # a thread's last reply in full, for the preview on hover
+                return self._json(200, daemon.thread_detail(parse_qs(url.query).get("session", [""])[0]))
             self._json(404, {"error": "not found"})
 
         def do_POST(self):
@@ -2151,6 +2531,16 @@ def _handler(daemon: Daemon):
                     daemon.ptt_stop()
                 else:
                     daemon.ptt_start()
+                return self._json(200, {"ok": True})
+            if self.path == "/recap":
+                daemon.recap(spoken=bool(data.get("speak", True)))
+                return self._json(200, {"text": daemon.recap_text()[0]})
+            if self.path == "/resume":
+                ok = daemon.set_resume(str(data.get("session") or ""), bool(data.get("on", True)))
+                return self._json(200, {"ok": ok})
+            if self.path == "/limit_hit":
+                daemon.limit_hit(str(data.get("session") or ""), str(data.get("source") or ""),
+                                 str(data.get("text") or "")[:400])
                 return self._json(200, {"ok": True})
             if self.path == "/usage_line":
                 threading.Thread(target=daemon.usage_line, args=(bool(data.get("enable", True)),), daemon=True).start()

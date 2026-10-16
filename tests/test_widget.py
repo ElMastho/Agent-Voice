@@ -224,3 +224,15 @@ def test_notifications_drop_below_the_reply_box(app):
     # Below the box, or above it on a short screen (no room below): never over it.
     assert not w.banner.geometry().intersects(w.reply_box.geometry())
     w.reply_box.hide()
+
+
+def test_update_chip_installs_and_the_widget_quits(app, monkeypatch):
+    posted, quits = [], []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append(path))
+    monkeypatch.setattr(widget.QTimer, "singleShot", lambda ms, fn: quits.append(fn))
+    w = _widget({"phase": "idle", "threads": [], "update": {"version": "0.6.0", "url": "u", "how": "auto", "state": ""}})
+    assert "update" in w._rects() and "restarts" in w._tooltip("update")
+    w._activate("update")
+    assert posted == ["/update"] and not quits
+    w._on_status({**w.st, "update": {**w.st["update"], "state": "installing"}})
+    assert w._update_label() == "Restarting…" and quits == [widget.QApplication.quit]

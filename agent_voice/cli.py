@@ -53,6 +53,12 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("watch", help="run a terminal agent (aider, opencode...) and announce when it waits for you")
     p.add_argument("command", nargs=argparse.REMAINDER)
 
+    p = sub.add_parser("apply-update", help=argparse.SUPPRESS)  # the updater, run from the downloaded build
+    p.add_argument("--source", required=True)
+    p.add_argument("--target", required=True)
+    p.add_argument("--pid", type=int, default=0)
+    p.add_argument("--version", default="")
+
     p = sub.add_parser("launch", help=argparse.SUPPRESS)  # a new thread's terminal tab: agent + prompt file
     p.add_argument("agent")
     p.add_argument("prompt_file")
@@ -100,6 +106,12 @@ def main(argv: list[str] | None = None) -> int:
         from agent_voice.launch import run
 
         return run(args.agent, args.prompt_file)
+    if args.cmd == "apply-update":
+        from pathlib import Path
+
+        from agent_voice.updater import apply
+
+        return apply(Path(args.source), Path(args.target), args.pid, args.version)
     if args.cmd == "native-host":
         from agent_voice.native_host import run
 

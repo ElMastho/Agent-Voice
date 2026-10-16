@@ -671,6 +671,7 @@ class VoiceWidget(QWidget):
         self._tucked: tuple | None = None  # tucked away by hand: what was showing then (news brings it back)
         self._tuck_hover = False  # the mouse that clicked "tuck" is still over it: don't hold it down
         self._banner_seen: int | None = None
+        self._quitting = False
         self._reading_shown: tuple | None = None
         self._banner_busy = False
         self._bar_pos: tuple[int, int] | None = None  # where the floating bar was before notch mode
@@ -901,6 +902,10 @@ class VoiceWidget(QWidget):
             if self._opens_seen is not None and opens != self._opens_seen:
                 self.open_new_thread()
             self._opens_seen = opens
+        if (self.st.get("update") or {}).get("state") == "installing" and not self._quitting:
+            # The updater is about to replace our files: get out of its way (it restarts everything).
+            self._quitting = True
+            QTimer.singleShot(1000, QApplication.quit)
         if self.tray:
             self.tray.refresh()
 
@@ -1079,7 +1084,24 @@ class VoiceWidget(QWidget):
         out.update(self._pill_rects())
         if self._result():
             out["result"] = QRectF(NOTCH_EAR + 38, 23, NOTCH_W / 2 - 40, 15)
+        label = self._update_label()
+        for text, rect in self._notch_chips()[0] if label else ():
+            if text == label:  # the one chip you can click
+                out["update"] = rect
         return out
+
+    def _update_label(self) -> str:
+        state = (self.st.get("update") or {}).get("state")
+        if not self.st.get("update"):
+            return ""
+        return {"downloading": "Updating…", "installing": "Restarting…"}.get(state, "Update")
+
+    def start_update(self) -> None:
+        """The Update chip / tray item: install it (release build) or say how (source checkout, other OS)."""
+        update = self.st.get("update") or {}
+        if update.get("how") == "page":
+            QDesktopServices.openUrl(QUrl(update["url"]))
+        _post("/update")
 
     def _chips_right(self) -> float:
         """Where the info chips end, left of the buttons (one more, "tuck", in notch mode)."""
@@ -1351,13 +1373,9 @@ class VoiceWidget(QWidget):
                 self._paint_panel(p)
             p.restore()
 
-    def _paint_notch_row(self, p: QPainter) -> None:
-        """One dense row: orb, status + conversation, live caption, info chips, buttons."""
-        cy = NOTCH_H / 2
-        st = self.st
-        self._paint_indicator(p, QPointF(NOTCH_EAR + 21, cy))
-
-        # Info chips, right to left, before the buttons.
+    def _notch_chips(self) -> tuple[list[tuple[str, QRectF]], float]:
+        """The notch row's info chips, right to left before the buttons (and the pills); where they end."""
+        st, cy = self.st, NOTCH_H / 2
         chips = []
         if st.get("permission"):
             chips.append("Approve?")
@@ -1371,8 +1389,9 @@ class VoiceWidget(QWidget):
             chips.append(f"Context {ctx}%")
         if st.get("queued"):
             chips.append(f"+{st['queued']} waiting")
-        if st.get("update"):
-            chips.append("Update")
+        update_chip = self._update_label()
+        if update_chip:
+            chips.append(update_chip)
         lang = st.get("speaking_lang") if self.phase == "speaking" else ""
         if lang:
             chips.append(lang.upper())
@@ -1395,13 +1414,29 @@ class VoiceWidget(QWidget):
         fm_chip = QFontMetrics(self.f_notch_chip)
         right = self._chips_right()
         if pills:
-            self._paint_pills(p, pills)
             right -= len(pills) * 12 + 8
+        out = []
         for text in chips:
             cw = fm_chip.horizontalAdvance(text) + 12
             right -= cw
-            self._flat_chip(p, QRectF(right, cy - 8, cw, 16), text)
+            out.append((text, QRectF(right, cy - 8, cw, 16)))
             right -= 4
+        return out, right
+
+    def _paint_notch_row(self, p: QPainter) -> None:
+        """One dense row: orb, status + conversation, live caption, info chips, buttons."""
+        cy = NOTCH_H / 2
+        st = self.st
+        self._paint_indicator(p, QPointF(NOTCH_EAR + 21, cy))
+
+        # Info chips, right to left, before the buttons.
+        act = self._activity()
+        pills = self._pills()
+        if pills:
+            self._paint_pills(p, pills)
+        chips, right = self._notch_chips()
+        for text, rect in chips:
+            self._flat_chip(p, rect, text)
 
         # Status and conversation on the first line, caption (or hint) on the second.
         x = NOTCH_EAR + 38.0
@@ -1980,6 +2015,13 @@ class VoiceWidget(QWidget):
             return ""
         if key == "result":
             return "Open the conversation to see the changes"
+        if key == "update":
+            up = self.st.get("update") or {}
+            if up.get("state"):
+                return f"Updating to version {up.get('version')}"
+            if up.get("how") == "auto":
+                return f"Install version {up.get('version')}: downloads it, then restarts agent-voice"
+            return f"Version {up.get('version')} is out: click for how to update"
         if key and (key.startswith("need:") or key.startswith("allow:") or key.startswith("deny:")):
             needs = self._needs()
             i = int(key.split(":", 1)[1])
@@ -2085,6 +2127,8 @@ class VoiceWidget(QWidget):
             i = int(key.split(":", 1)[1])
             if i < len(pills):
                 _post("/open_thread", {"session": pills[i]["session"]})
+        elif key == "update":
+            self.start_update()
         elif key == "result":
             _post("/open_thread", {"session": (self.st.get("result") or {}).get("session", "")})
         elif key.startswith("allow:") or key.startswith("deny:") or key.startswith("need:"):
@@ -2391,8 +2435,12 @@ class Tray(QSystemTrayIcon):
 
         update = st.get("update")
         if update:
-            add(f"Update available: v{update['version']} (download)",
-                lambda: QDesktopServices.openUrl(QUrl(update["url"])))
+            how, state = update.get("how"), update.get("state")
+            label = (f"Updating to v{update['version']}…" if state else
+                     f"Update to v{update['version']} (restarts agent-voice)" if how == "auto" else
+                     f"Update available: v{update['version']} (download)" if how == "page" else
+                     f"Update available: v{update['version']} (how to)")
+            add(label, w.start_update, enabled=not state)
             m.addSeparator()
         add("Hide widget" if w.isVisible() else "Show widget", w.toggle_visible, key=hk.get("widget", ""))
         add("Compact widget (orb only)", w.toggle_compact, checked=w.compact)

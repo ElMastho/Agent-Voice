@@ -69,6 +69,8 @@ Everything runs **locally on the CPU**: no cloud, no API key, no audio leaving y
 
 Hooks point at the folder you extracted to: if you move it, double-click `agent-voice.exe` again. You can also connect an agent later from the notch: expand it and click the agent in the **Agents** row.
 
+New versions install themselves in one click: see [Updating](#updating).
+
 ### From source
 
 > Windows 11 · Python 3.13 recommended (some audio/ML wheels lag behind the newest Python).
@@ -86,6 +88,21 @@ py -3.13 -m venv .venv
 ```
 
 Then open a **new** Claude Code session and ask it anything. You'll see it work in the notch, hear the answer, then a beep: reply out loud. The full walkthrough is in the **[user guide](docs/guide.md)**.
+
+### Updating
+
+agent-voice looks for a new release on GitHub a few seconds after it starts, then once a day (`update_check: false` turns this off). When there is one, the notch shows an **Update** chip and the tray menu an *Update to vX* item.
+
+- **Windows download**: click either one. agent-voice downloads `agent-voice-windows-x64.zip`, checks it (the release's exact asset, its size and checksum, every file in the zip), then stops, replaces the files in its folder and starts again; the notch says how it went. Your settings, voices and models in `~/.agent-voice` stay as they are, and your agents stay connected (same folder). If the download fails nothing is changed; if a file can't be replaced, the old version is put back. The log is `~/.agent-voice/logs/update.log`.
+- **From source**: the chip only reminds you how, since your checkout is yours to update:
+
+  ```bash
+  git pull
+  .venv/Scripts/pip install -e .
+  .venv/Scripts/agent-voice shutdown && .venv/Scripts/agent-voice start
+  ```
+
+- **By hand** (any build): `agent-voice.exe shutdown`, tray → *Quit widget*, extract the new zip over the folder, and double-click `agent-voice.exe`.
 
 ## 🏝️ The notch
 
@@ -181,7 +198,7 @@ Right-click the notch → *Float the widget again*: the same black island, round
 - **Several conversations**: when a second one finishes while another is talking (or waiting for you), it waits its turn and is announced by name. Each speaks a little lower or higher than the others (`thread_voices`), so you can tell them apart without looking.
 - **Hey Claude** (off by default, toggle in the panel): while idle, *"Hey Claude, run the tests"* is sent to your last conversation as a new prompt; *"Hey Claude"* alone opens the mic. A 3.3M-parameter keyword spotter ([sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)) listens only while someone speaks, so it costs next to nothing; short phrases it misses (an accent it doesn't know: "Klod") get a quick check by Whisper tiny, and Whisper confirms every phrase before anything is sent.
 - **Read anything aloud**: select text in any app and press `Ctrl+Alt+R`.
-- **Updates**: when a newer release is on GitHub, the tray menu offers it and the notch shows an *Update* chip.
+- **Updates**: when a newer release is on GitHub, the notch shows an *Update* chip and the tray menu offers it; on the Windows download, one click installs it and restarts ([Updating](#updating)).
 
 ## ⌨️ Shortcuts
 
@@ -309,7 +326,7 @@ sequenceDiagram
 | `permissions` | `enabled: true`, `wait_seconds: 60` | Approvals by voice / notch, and how long Claude waits before its own dialog |
 | `wake_word` | `phrases: [hey claude, ok claude, …]` | Phrases accepted when Whisper confirms a keyword-spotter hit |
 | `background_send` | `true` | Claude desktop app: send replies without bringing the window forward |
-| `update_check` | `true` | Look for a newer release on GitHub at start |
+| `update_check` | `true` | Look for a newer release on GitHub at start, then daily (installing one is always your click) |
 | `chime.volume` | `0.35` | Chime loudness (0 to 1) |
 | `stt.model` | `small` | Whisper size: `base` is faster, `small` is better in French |
 | `widget.enabled` | `true` | Start the notch and tray icon with the service |
@@ -339,7 +356,7 @@ agent-voice serve                               run in the foreground (debugging
 
 ## 🔒 Privacy, security, battery
 
-- **Offline by design**: text-to-speech, transcription, language detection and the wake word run locally. Audio never leaves the machine. The only network calls are the model downloads on first use and the optional release check.
+- **Offline by design**: text-to-speech, transcription, language detection and the wake word run locally. Audio never leaves the machine. The only network calls are the model downloads on first use, the optional release check, and the new release's zip when you click *Update*.
 - **Calls**: detected from Windows' own privacy records of which app uses the mic; no audio is touched.
 - **Local API only**: the service listens on `127.0.0.1` and rejects any request carrying an `Origin` header, a foreign `Host` (DNS rebinding) or a non-JSON body. Web pages can't drive it. The browser extension goes through a native messaging bridge that only its own id can start.
 - **Desktop apps' notifications** (off by default): only the listed apps' notifications are read, by a query that filters them, from Windows' local notification database; nothing else is opened.

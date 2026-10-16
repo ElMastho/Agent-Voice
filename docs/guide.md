@@ -47,6 +47,14 @@ You should hear nothing yet. At the top centre of the screen there's a thin blac
 
 > **Tip:** `agent-voice say "Hello, this is a sound check."` is the quickest test. Mixed French and English text is read with both voices.
 
+### Updating
+
+agent-voice checks GitHub for a new release when it starts and once a day after that (`update_check: false` turns it off). A new one shows as an **Update** chip in the notch and an item at the top of the tray menu.
+
+- **Windows download**: click the chip or the tray item. It downloads the release's zip, verifies it (exact asset name and link, size, checksum, every file's CRC), extracts it to a temp folder and starts the new version's updater from there. That updater stops the service and the notch, replaces the files in your agent-voice folder and starts it again; a notification under the notch says *Updated to version X* or why it didn't. Nothing in `~/.agent-voice` (settings, voices, logs) is touched, and the agents stay connected because the folder doesn't move. A failed download changes nothing; a failed swap puts the old files back. Details are in `~/.agent-voice/logs/update.log`.
+- **From source**: the chip tells you to `git pull`, `.venv/Scripts/pip install -e .`, then `agent-voice shutdown` and `agent-voice start`.
+- **By hand**: `agent-voice.exe shutdown`, tray → *Quit widget*, then extract the new zip over the folder, double-click `agent-voice.exe`.
+
 ## 2. Your first conversation
 
 1. Open a **new** Claude Code session (hooks are loaded when a session starts).
@@ -238,7 +246,7 @@ File: `~/.agent-voice/config.json`. Only put the keys you want to change; they'r
 | `permissions.enabled` / `wait_seconds` | `true` / `60` | Approvals by voice and in the notch, and how long Claude waits |
 | `wake_word.phrases` | `["hey claude", ...]` | Phrases Whisper accepts as the wake word |
 | `background_send` | `true` | Claude desktop app: send replies without bringing it forward |
-| `update_check` | `true` | Look for a newer release at start |
+| `update_check` | `true` | Look for a newer release at start, then once a day |
 | `chime.volume` | `0.35` | Chime loudness |
 | `hotkeys` | `stop`, `reply`, `hands_free`, `mute`, `chime`, `read_selection`, `widget`, `push_to_talk` | Empty string disables one |
 | `stt.model` | `"small"` | `tiny` / `base` / `small` / `medium` |
@@ -270,6 +278,7 @@ Runtime state (mode, auto-send, summary, speed, wake word, approvals, desktop ap
 | **Browser replies not read** | Check the extension is loaded and enabled, and `agent-voice install browser` was run *after* moving the app. Sites change their pages: the extension falls back to "the text stopped changing for 4 s", so a reply may come a few seconds late. |
 | **MCP app silent** | Restart the app after installing (they read their MCP config at start), and check agent-voice appears in its MCP server list. |
 | **`watch` doesn't announce replies** | It waits for 2.5 s of quiet after you press Enter; agents that keep animating a spinner never go quiet. |
+| **The update says a file couldn't be replaced** | An app keeps a part of agent-voice open (an MCP app, the browser): close it and click *Update* again. Nothing was changed meanwhile. |
 | **Anything else** | `agent-voice serve` runs in the foreground with logs; the full log is `~/.agent-voice/logs/server.log`. |
 
 ## 9. Uninstall

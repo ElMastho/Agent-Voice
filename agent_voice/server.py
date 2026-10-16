@@ -19,7 +19,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from agent_voice import __version__, calls, claudeapp, install, keys, textclean, winfocus
+from agent_voice import __version__, calls, claudeapp, install, keys, textclean, updater, winfocus
 from agent_voice.config import HOME, LOG_DIR, load_config, load_state, save_state
 from agent_voice.textclean import result_label
 from agent_voice.tts import Speaker
@@ -101,6 +101,7 @@ def _beep(freq: int, ms: int = 90) -> None:
 SPEEDS = (1.0, 1.25, 1.5, 1.75, 2.0)
 RELEASES_API = "https://api.github.com/repos/ElMastho/agent-voice/releases/latest"
 RELEASES_PAGE = "https://github.com/ElMastho/agent-voice/releases/latest"
+UPDATE_EVERY = 24 * 3600  # re-check for a release once a day (daemons stay up for weeks)
 
 # Chime mode: (frequency Hz, start s) notes. "done" rises, "attention" asks twice.
 CHIMES = {
@@ -260,10 +261,6 @@ def _join(items: list[str]) -> str:
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
 
 
-def _version(v: str) -> tuple:
-    return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
-
-
 def _plain(text: str) -> str:
     return " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
 
@@ -322,8 +319,10 @@ class Daemon:
         self.permission: dict | None = None
         self._perm_seq = 0
         self._perm_decisions: dict[int, str] = {}
-        # Newer release on GitHub, if any (checked once at start).
+        # Newer release on GitHub, if any (checked at start, then daily): version, url, how
+        # ("auto": one-click install; "git": a source checkout; "page": download by hand) and state.
         self.update: dict | None = None
+        self._release: dict = {}
         # Wake word: always listening for "Hey Claude" while idle (off unless you turn it on).
         self._wake_cancel = threading.Event()
         self._wake_transcriber = None  # Whisper tiny: checks short phrases the keyword spotter missed
@@ -1570,10 +1569,16 @@ class Daemon:
 
     # -- updates ----------------------------------------------------------------
     def _check_update(self) -> None:
-        """Tell the widget when GitHub has a newer release (once, a few seconds after start)."""
+        """Tell the widget when GitHub has a newer release: a few seconds after start, then once a day."""
         if not self.config.get("update_check", True):
             return
         time.sleep(5)
+        self._update_result()
+        while True:
+            self._fetch_release()
+            time.sleep(UPDATE_EVERY)
+
+    def _fetch_release(self) -> None:
         import urllib.request
 
         try:
@@ -1584,9 +1589,75 @@ class Daemon:
         except Exception:  # offline, rate-limited, private repo: no news is fine
             return
         tag = str(latest.get("tag_name") or "")
-        if tag and _version(tag) > _version(__version__):
-            self.update = {"version": tag.lstrip("v"), "url": str(latest.get("html_url") or RELEASES_PAGE)}
-            log.info("update available: %s", tag)
+        if not updater.is_newer(tag, __version__):
+            return
+        if self.update and self.update.get("state"):  # already downloading or installing one
+            return
+        asset = updater.pick_asset(latest)
+        how = ("auto" if asset else "page") if updater.self_updatable() else ("page" if getattr(sys, "frozen", False) else "git")
+        self._release = {"asset": asset, "tag": tag}
+        self.update = {"version": tag.lstrip("v"), "url": str(latest.get("html_url") or RELEASES_PAGE),
+                       "how": how, "state": ""}
+        log.info("update available: %s (%s)", tag, how)
+
+    def _update_result(self) -> None:
+        """Right after an update: say how it went, and clear what it left behind."""
+        result = updater.read_result()
+        if updater.self_updatable():
+            updater.cleanup(updater.install_dir())
+        if not result:
+            return
+        if result.get("ok"):
+            text = f"Updated to version {result.get('version')}. Your settings and voices are unchanged."
+        else:
+            text = (f"The update to version {result.get('version')} didn't go through: {result.get('error')}. "
+                    "Nothing was changed; try again from the tray.")
+        self._show_banner(text, "", "", kind="note", tag="update")
+
+    def install_update(self) -> None:
+        """The widget's Update button: download, verify and hand off to the updater (release build only)."""
+        up = self.update
+        if not up:
+            self._show_banner("agent-voice is up to date.", "", "", kind="note", tag="update")
+            return
+        version = up["version"]
+        if up.get("how") == "git":
+            self._show_banner(f"Version {version} is out. In your agent-voice folder: git pull, then "
+                              "pip install -e . and agent-voice shutdown, then agent-voice start.",
+                              "", "", kind="note", tag="update")
+            return
+        if up.get("how") != "auto":
+            self._show_banner(f"Version {version} is out: download it from the release page.",
+                              "", "", kind="note", tag="update")
+            return
+        if up.get("state"):
+            return
+        up["state"] = "downloading"
+        self._show_banner(f"Downloading version {version}...", "", "", kind="note", tag="update")
+        try:
+            def progress(frac: float) -> None:
+                self._show_banner(f"Downloading version {version}... {int(frac * 100)}%", "", "",
+                                  kind="note", tag="update")
+
+            zip_path = updater.download(self._release["asset"], progress)
+            self._show_banner(f"Checking version {version}...", "", "", kind="note", tag="update")
+            root = updater.extract(zip_path, zip_path.parent / "build")
+        except Exception as e:
+            log.exception("update download failed")
+            up["state"] = ""
+            self._show_banner(f"Couldn't download version {version} ({e}). Nothing was changed.",
+                              "", "", kind="note", tag="update")
+            return
+        up["state"] = "installing"  # the widget quits when it sees this
+        self._show_banner(f"Installing version {version}: agent-voice restarts in a few seconds.",
+                          "", "", kind="note", tag="update")
+        try:
+            updater.launch_apply(root, updater.install_dir(), os.getpid(), version)
+        except OSError as e:
+            log.exception("could not start the updater")
+            up["state"] = ""
+            self._show_banner(f"Couldn't start the update ({e}). Nothing was changed.", "", "",
+                              kind="note", tag="update")
 
     @property
     def approvals(self) -> bool:
@@ -2086,6 +2157,9 @@ def _handler(daemon: Daemon):
                 mode = data.get("mode", "toggle")
                 daemon.set_muted(not daemon.muted if mode == "toggle" else mode == "on")
                 return self._json(200, {"muted": daemon.muted})
+            if self.path == "/update":
+                threading.Thread(target=daemon.install_update, name="update-install", daemon=True).start()
+                return self._json(200, {"ok": True})
             if self.path == "/shutdown":
                 self._json(200, {"ok": True})
                 threading.Thread(target=self.server.shutdown, daemon=True).start()

@@ -102,6 +102,9 @@ The daemon and widget run as `pythonw` in the background. **Code changes need a 
 - **Python 3.14 lacks some wheels** (onnxruntime/ctranslate2 at the time of writing): use 3.13.
 - **Global hotkeys (`keyboard`) can't see apps running as administrator** unless the daemon is elevated too.
 - **`render_docs.py` replaces `widget.time`** with a fake clock; keep animation code reading time through the module-level `time` import.
+- **Animations run on real time**: easing factors are tuned per 30 fps frame and go through `_k()` / `_spring()` with the frame's measured `dt`, so a late frame doesn't slow them down. Tests that tick the widget must step its clock (`w._last_tick -= widget.FRAME` before each `_tick()`).
+- **Never resize the notch every frame**: resizing a see-through window re-uploads all of it (the jerky opening). The notch's window is a canvas sized once for where an animation is going and trimmed when it settles; the island is drawn at `_vw` x `_vis_h()` inside it, and `visual_rect()` is where it is on screen.
+- **Claude Code's `StopFailure` hook** (matcher `rate_limit`) is how an out-of-quota turn reaches `/limit_hit`; the resume schedule lives in `state.json` (`limited`) so a restart doesn't lose it.
 
 ## Style
 

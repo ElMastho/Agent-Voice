@@ -76,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("uninstall", help="remove hooks for agents")
     p.add_argument("agents", nargs="*", default=["all"])
 
+    sub.add_parser("recap", help="today's recap: what each thread did, what's waiting, limits, tokens")
     p = sub.add_parser("usage", help="show Claude Code's rate limits in the notch (adds a status line)")
     p.add_argument("mode", nargs="?", default="on", choices=["on", "off"])
 
@@ -207,6 +208,10 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:
                 print(f"{name}: failed: {exc}")
         return 0
+    if args.cmd == "recap":
+        reply = client.request("/recap", {"speak": False})
+        print(reply["text"] if reply else "agent-voice isn't running (agent-voice start)")
+        return 0 if reply else 1
     if args.cmd == "usage":
         from agent_voice.install import usage_line
 

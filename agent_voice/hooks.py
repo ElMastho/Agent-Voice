@@ -201,6 +201,28 @@ def claude_context(entries: list[dict]) -> float | None:
     return None
 
 
+def claude_tokens_today(entries: list[dict], today: str | None = None) -> int:
+    """Tokens this conversation used today (input, output and newly cached; not the cached context re-read)."""
+    from datetime import datetime
+
+    today = today or time.strftime("%Y-%m-%d")
+    seen, total = set(), 0
+    for entry in entries:
+        message = entry.get("message") or {}
+        usage = message.get("usage") if entry.get("type") == "assistant" else None
+        if not isinstance(usage, dict) or message.get("id") in seen:
+            continue  # one request is written as several entries (one per content block)
+        try:
+            day = datetime.fromisoformat(str(entry.get("timestamp", "")).replace("Z", "+00:00")).astimezone()
+        except ValueError:
+            continue
+        if day.strftime("%Y-%m-%d") != today:
+            continue
+        seen.add(message.get("id"))
+        total += sum(int(usage.get(k) or 0) for k in ("input_tokens", "output_tokens", "cache_creation_input_tokens"))
+    return total
+
+
 def _digest(text: str) -> str:
     return hashlib.sha1(text.strip().encode("utf-8")).hexdigest()[:16]
 
@@ -380,9 +402,8 @@ def hook_claude(raw: str) -> None:
         if event == "Stop":
             result = claude_turn_result(entries)
             context = claude_context(entries)
-            if context is not None:
-                client.request("/usage", {"session": str(data.get("session_id", "")), "source": "claude",
-                                          "context": context}, timeout=1.0)
+            client.request("/usage", {"session": str(data.get("session_id", "")), "source": "claude",
+                                      "context": context, "tokens": claude_tokens_today(entries)}, timeout=1.0)
     last = data.get("last_assistant_message") or ""
     if event == "Stop" and last.strip() and not _covered(last, texts):
         # Only a fallback for when the transcript isn't flushed yet: its formatting can differ

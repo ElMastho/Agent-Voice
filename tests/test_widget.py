@@ -220,6 +220,7 @@ def test_notifications_drop_below_the_reply_box(app):
     w.reply_box.open(ITEM, QRectF(w.geometry()), int(w.pw))
     w.banner.present(ITEM, int(w.pw))
     for _ in range(40):
+        w._last_tick -= widget.FRAME  # animations run on real time: each tick is one 30 fps frame here
         w._tick()
     # Below the box, or above it on a short screen (no room below): never over it.
     assert not w.banner.geometry().intersects(w.reply_box.geometry())
@@ -251,3 +252,23 @@ def test_limits_rows_and_turning_claude_on(app, monkeypatch):
     assert [s for s, _ in w._limit_rows()] == ["codex", "claude"]  # still there: its numbers are on their way
     w.grab()  # paints the section without errors
     assert widget._limit_color(95).name() == "#f87171"
+
+
+def test_opening_the_notch_resizes_its_window_rarely(app, monkeypatch):
+    monkeypatch.setattr(widget, "SCREEN_W", 1920)  # a laptop: open, it takes a third of the screen
+    w = _widget({"phase": "idle", "threads": []})
+    w.expanded = False
+    w._apply_size()
+    for _ in range(30):
+        w._last_tick -= widget.FRAME
+        w._tick()
+    sizes, widths = [], []
+    w.toggle_expanded()
+    for _ in range(90):
+        w._last_tick -= widget.FRAME
+        w._tick()
+        sizes.append((w.width(), w.height()))
+        widths.append(round(w._vw))
+    assert len(set(widths)) > 10  # the island glides open...
+    assert len(set(sizes)) <= 3  # ...inside a canvas sized once (and trimmed at the end), not every frame
+    assert w._two_col() and abs(w._vw - 640) < 1 and w.size().width() == round(w._vw)

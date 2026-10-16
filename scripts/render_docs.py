@@ -45,6 +45,7 @@ class Clock:
 
 CLOCK = Clock()
 W.time = CLOCK  # the widget animates from time.time(); drive it frame by frame
+W.SCREEN_W = 1920  # a laptop screen: the open notch takes a third of it
 
 
 def backdrop(w: int, h: int, seed: int = 7) -> Image.Image:
@@ -150,6 +151,10 @@ NEEDS = [
 ]
 LIMITS = {"claude": {"five_hour": {"pct": 63, "resets": 51600}, "seven_day": {"pct": 41, "resets": 1792500000}},
           "codex": {"five_hour": {"pct": 18, "resets": 60000}, "seven_day": {"pct": 92, "resets": 1792300000}}}
+LIMIT_NEED = {"kind": "limit", "session": "b", "title": "API refactor", "color": "#34D399", "resume": True,
+              "text": "Out of quota · resumes 15:20", "at": 0}
+DAY = {"turns": 23, "threads": 4, "tokens": 1840000,
+       "hours": [0, 2, 0, 0, 0, 0, 0, 0, 1, 4, 6, 3, 1, 2, 5, 7, 4, 2, 0, 0, 0, 0, 0, 0]}
 AGENTS = {"claude": "on", "codex": "on", "gemini": "on", "cursor": "off", "cline": "missing", "antigravity": "on",
           "claude-desktop": "on", "windsurf": "missing", "vscode": "off", "browser": "on"}
 HISTORY = [
@@ -211,8 +216,8 @@ def render_states() -> None:
 
 def render_panel() -> None:
     st = status("idle", last_heard=HISTORY[0]["text"], last_heard_lang="en", history=HISTORY, agents=AGENTS,
-                threads=THREADS, needs=NEEDS, limits=LIMITS, wake=True, approvals=True, summary=True,
-                last_reply={"session": "a"},
+                threads=THREADS, needs=NEEDS + [LIMIT_NEED], limits=LIMITS, wake=True, approvals=True,
+                summary=True, last_reply={"session": "a"}, day=DAY,
                 activity={"session": "a", "title": "Notch redesign", "color": "#F59E0B", "label": "Run pytest",
                           "steps": 9, "elapsed": 74, "others": 1})
     w, shot, k = notch_shot(st, expanded=True, hover=True)

@@ -1319,7 +1319,8 @@ class Daemon:
             turn["result"] = result
         summary = text.strip() or self._turn_text(session)
         self._event("done", session, source, textclean.clean(summary) if summary else "")
-        self._log_turn(session, source, textclean.clean(strip_summary(summary)) if summary else "")
+        said = re.search(r"voice summary:\s*(.+)", summary or "", re.I)  # its own one-line summary, if it wrote one
+        self._log_turn(session, source, said.group(1).strip() if said else textclean.clean(summary) if summary else "")
         if result and (result.get("files") or result.get("tests")):
             title = self._title(session, source)
             self.last_result = {"session": session, "title": title, "color": thread_color(session or title),

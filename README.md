@@ -42,9 +42,14 @@ Everything runs **locally on the CPU**: no cloud, no API key, no audio leaving y
 | 🙋 **Needs you** | Approvals, questions and agents waiting for input, from every agent, in one list: *Allow* / *Deny* with a click, or say *"approve Codex"*. |
 | 🔵 **A dot per conversation** | Who's working, who waits on you, who just finished, at a glance; click a dot to jump to it. |
 | 🗂️ **While you were away** | Back at your desk (or out of a call): *"Notch redesign finished; Codex needs you."* |
+| ⏳ **Resumes after a limit** | A thread runs out of quota while you're away: once the limit resets, the notch sends it *"Continue."* so it picks up where it stopped. On by default. |
+| 🎯 **Focus** | In a call, presenting, or with an app full screen, replies are held (approvals still come through) and a catch-up follows. |
+| 🌇 **Daily recap** | At 18:00 (or *"Hey Claude, daily recap"*): what each thread did today, what's still waiting, your limits and tokens. |
+| 📎 **Hand things over** | *"Hey Claude, send this to Codex and ask it to explain it"*: your selection, or the screenshot on the clipboard, goes to that thread. |
+| ⚡ **Saved prompts** | *"Hey Claude, run the tests"*, *"tell Codex to commit this"*: a name you say, a full prompt sent (`shortcuts`). |
 | ➕ **Start a new thread** | `Ctrl+Alt+N`, *+ New* in the panel, or *"Hey Claude, new thread: add a health check"*: a new Claude Code session in the desktop app, or Claude Code / Codex / Gemini CLI in a new terminal tab. |
 | 📣 **Talk to any thread by name** | *"Tell Codex to run the tests"* is typed into Codex's window and sent, wherever you are. |
-| 📊 **Results and usage** | *Done · 3 files changed · tests passed*, each conversation's context, and a **Limits** section: Claude Code's and Codex's 5-hour and weekly limits as bars, with when they reset (a heads-up at 90%). |
+| 📊 **Today, at a glance** | Open, the notch takes a third of the screen: today's turns, threads and tokens, the turns by hour, Claude Code's and Codex's 5-hour and weekly **limits** (a heads-up at 90%), *Done · 3 files changed · tests passed*, each conversation's context. Rest on a thread to read its last reply in full. |
 | 📎 **Drop files on the notch** | Screenshots, logs, files: dropped on the notch, they land in the conversation's prompt. |
 | 🗣️ **Speaks every reply** | Final answers and the progress notes between tool calls, never twice. Markdown, code and paths are cleaned out so it sounds natural. |
 | 📖 **Read along** | The text being spoken hangs under the notch, from the sentence you're hearing, and leaves 5 seconds after the voice stops. |
@@ -130,10 +135,15 @@ The edge light only shows while the voice or the mic is live: it doubles as a "m
 </p>
 
 - **A dot per live conversation**, in its colour, on the right of the notch: filled while it works or talks, ringed in amber while it waits on you, dimmed once it's done. Hover for its name and state, click to open it.
-- **N need you**: approvals, questions and agents waiting for input, from every agent. The panel lists them with *Allow* / *Deny* (or *Open* for those you answer in their own window), and you can answer by voice: *"approve Codex"*, *"deny the notch one"*, *"yes"*.
+- **N need you**: approvals, questions and agents waiting for input, from every agent. The panel lists them with *Allow* / *Deny* (or *Open* for those you answer in their own window), and you can answer by voice: *"approve Codex"*, *"deny the notch one"*, *"yes"*, and with several waiting (numbered), *"approve all"*, *"deny two"*.
+- **Out of quota**: a thread that hits its 5-hour or weekly limit shows *Out of quota · resumes 15:20* in the list. A minute after the reset, the notch sends it *"Continue."* (`resume.message`), even if you're not there; click *✓ Resume* to cancel. With `resume.auto` off, it asks first: click *Resume* or say *"resume when it resets"*. It learns about the limit from Claude Code's `StopFailure` hook, from the limit message itself (*"5-hour limit reached ∙ resets 3pm"*) and from a full window in **Limits**; without a reset time it tries again every 30 minutes.
 - **What the turn changed**: when a conversation finishes, *Done · 3 files changed · tests passed* (from the files it edited and its last test run); click it to open the conversation.
 - **Context**: *Context 86%* when the conversation at work is running out of context; each thread shows its own.
 - **While you were away**: after 5 minutes without touching the keyboard or mouse, or at the end of a call, a violet banner (spoken in Voice mode) tells you what finished and who needs you.
+- **Focus**: in a call, while presenting, or with an app full screen (Windows' own "do not disturb" signals), replies are held: no voice, no banner, no chime. Approvals and questions still come through. When it ends, the catch-up tells you what finished. The notch shows *Focus* (or *In a call*); picking Voice in the panel overrides it until it ends. `focus.calls: "chimes"` keeps the old chimes during calls.
+- **The open notch** takes a third of the screen (480 px when closed). On the right: **Today** (turns, threads and tokens since midnight, and the turns by hour), **Limits**, what you said and your agents; on the left: what needs you, the controls and your threads.
+- **Reply previews**: rest the mouse on a thread for half a second and its last reply opens beside the panel, in full and formatted (code, lists, tables), with what it changed and its tokens today. It scrolls with the wheel and never takes the focus.
+- **Daily recap**: at 18:00 (`recap.at`), once, a violet *Today* banner: turns and tokens, what each thread did (from its last summary), what's still waiting on you, and your limits; spoken in Voice mode. Any time: *"Hey Claude, daily recap"*, *"what did I do today?"*, the tray's *Today's recap*, or `agent-voice recap`.
 - **Drop files**: drag screenshots, logs or files onto the notch (or onto a thread in the panel): their paths are typed into that conversation's prompt, not sent, so you can add your question.
 
 ### Read along
@@ -195,6 +205,8 @@ Right-click the notch → *Float the widget again*: the same black island, round
 - **Approvals**: when Claude Code asks to run a command or edit a file, the request is read out and shown with *Allow once* / *Deny*. Say *"yes"* / *"no"* (*"oui"* / *"non"*) or click; with no answer within a minute, Claude shows its own dialog. Voice never grants more than once. Several agents can ask at once: the first is read out, the others wait in **Needs you**, and *"approve Codex"* answers the one you name.
 - **New threads**: `Ctrl+Alt+N` (or *+ New* in the panel's Threads, or the tray) opens a box under the notch: pick where it runs (**Claude app**: a new Claude Code session in the desktop app, in your folder's group; or **Claude Code**, **Codex**, **Gemini CLI** in a new Windows Terminal tab), check the folder (the one you last worked in), then type the first prompt or press **Talk** and say it. By voice: *"Hey Claude, new thread: add a health check"*, *"start a new conversation with Codex to …"*, *"nouvelle session : …"*. From a script: `agent-voice new "prompt" [--agent claude-app|claude|codex|gemini] [--cwd DIR]`.
 - **Messages by name**: *"Hey Claude, tell Codex to run the tests"* (or *"dis à Codex de lancer les tests"*, or in the reply window *"tell the notch redesign to commit"*) types *"Run the tests"* into that conversation's own window, sends it, and brings you back.
+- **Hand things over**: select text in any app (or copy a screenshot), then *"Hey Claude, send this to Codex"*: it lands in Codex's message box for you to add your question, or with *"... and ask it to explain it"* it's sent right away. Screenshots are saved to `~/.agent-voice/shots` (the last 20) and passed as a file path. French: *"envoie ça à Codex"*.
+- **Saved prompts** (`shortcuts`): say a name and its full prompt is sent: *"Hey Claude, run the tests"* (the current thread), *"tell Codex to commit this"*, or just *"review this"* in the reply window, or typed in the reply box. Defaults: *run the tests*, *commit this*, *review this*, *explain that*, *lance les tests*, *fais un commit*; add your own in the config.
 - **Questions**: when the agent asks you to choose (Claude Code's questions, Cline's follow-ups), the options appear in the notch and are read out. Click one or say it: *"the second one"*, *"option 3"*, or its name; anything else is sent as your own answer.
 - **Several conversations**: when a second one finishes while another is talking (or waiting for you), it waits its turn and is announced by name. Each speaks a little lower or higher than the others (`thread_voices`), so you can tell them apart without looking.
 - **Hey Claude** (off by default, toggle in the panel): while idle, *"Hey Claude, run the tests"* is sent to your last conversation as a new prompt; *"Hey Claude"* alone opens the mic. A 3.3M-parameter keyword spotter ([sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)) listens only while someone speaks, so it costs next to nothing; short phrases it misses (an accent it doesn't know: "Klod") get a quick check by Whisper tiny, and Whisper confirms every phrase before anything is sent.
@@ -322,6 +334,10 @@ sequenceDiagram
 | `thread_voices` | `true` | Each conversation speaks slightly lower or higher than the others |
 | `auto_chime_in_calls` | `true` | Chimes instead of the voice while another app uses the microphone |
 | `catch_up` | `enabled: true`, `away_minutes: 5` | *While you were away*: what finished and who needs you, when you come back |
+| `resume` | `auto: true`, `message: "Continue."` | Out of quota: send this once the limit resets (`auto: false`: only when you ask) |
+| `focus` | `enabled: true`, `full_screen: true`, `calls: "hold"` | Hold replies in calls, presentations and full screen apps (`calls: "chimes"`: chimes in calls) |
+| `recap` | `enabled: true`, `at: "18:00"` | The daily recap's time |
+| `shortcuts` | *run the tests*, *commit this*, … | Saved prompts: `{"name you say": "prompt sent"}` |
 | `desktop_apps` | `enabled: false`, `apps: {chatgpt, copilot, perplexity}` | Read these apps' notifications (also `agent-voice apps on`) |
 | `auto_listen` | `enabled`, 15 s window, 1.5 s silence, 600 s max | Mic after the final answer |
 | `permissions` | `enabled: true`, `wait_seconds: 60` | Approvals by voice / notch, and how long Claude waits before its own dialog |
@@ -350,6 +366,7 @@ agent-voice watch <command>                     run a terminal agent with a voic
 agent-voice new "prompt" [--agent A] [--cwd D]  start a new thread (Claude app, or a CLI agent in a new tab)
 agent-voice apps [on|off|toggle]                read ChatGPT / Copilot / Perplexity desktop notifications
 agent-voice usage on|off                        Claude Code's rate limits in the notch (adds a status line)
+agent-voice recap                               today's recap: threads, what's waiting, limits, tokens
 agent-voice autostart on|off                    start with Windows (a LaunchAgent on macOS)
 agent-voice setup                               config, voices, Whisper model
 agent-voice serve                               run in the foreground (debugging)

@@ -97,8 +97,31 @@ In the reply window, say on its own *"repeat that"*, *"slower"*, *"faster"* or *
 ### Everything that needs you, in one place
 Approvals, questions and agents waiting for input, from every agent, are counted in the notch (*2 need you*) and listed at the top of the panel:
 
-- **Approvals** (Claude Code; and any agent that asks through agent-voice): *Allow* or *Deny* with a click. When several agents ask at once, the first one is read out and the others wait in the list; answer any of them by voice by naming it: *"approve Codex"*, *"deny the notch one"*, *"yes"*. With the reply mic closed, *"Hey Claude, approve Codex"* works too (wake word on).
+- **Approvals** (Claude Code; and any agent that asks through agent-voice): *Allow* or *Deny* with a click. When several agents ask at once, the first one is read out and the others wait in the list; answer any of them by voice by naming it: *"approve Codex"*, *"deny the notch one"*, *"yes"*. With several waiting they're numbered: *"approve two"*, *"deny the first one"*, *"approve all"* (*"tout"*, *"les deux"*). With the reply mic closed, *"Hey Claude, approve Codex"* works too (wake word on).
+- **Out of quota**: *API refactor: Out of quota · resumes 15:20*. See [Out of quota](#out-of-quota-it-picks-up-again-on-its-own).
 - **Waiting for you** (Gemini CLI asking to confirm a tool, Claude Code idle on your input, a terminal agent's *(y/n)*, an MCP app's `notify`): *Open* brings its window to the front.
+
+### Out of quota: it picks up again on its own
+When a thread hits its 5-hour or weekly limit, it joins *Needs you* with the time it resets. A minute after that, agent-voice sends it **"Continue."** (`resume.message`) in its own window, so the work goes on while you're away. That's on by default (`resume.auto`); click *✓ Resume* to cancel it for that thread. With `resume.auto: false` it asks instead: click *Resume*, or say *"resume when it resets"* (*"reprends quand la limite est levée"*).
+
+How it knows: Claude Code's `StopFailure` hook (a turn that ends on `rate_limit`; added by `agent-voice install claude`), the limit message itself in any agent's reply (*"5-hour limit reached ∙ resets 3pm"*, *"Try again at 3:45 PM"*), or a window at 100% in **Limits** (Codex). When nothing says when it resets, it tries every 30 minutes until the thread answers. The schedule survives a restart.
+
+### Focus: calls, presentations, full screen
+In a call (another app on the mic), while presenting, or with an app full screen (a video, a game, a slideshow: the same signals Windows uses for its own notifications), agent-voice **holds replies**: no voice, no banner, no chime. Approvals, questions and agents waiting for input still come through. When it ends, the *While you were away* banner tells you what finished. The notch shows *Focus* (or *In a call*), and the panel's **Today** header says why. Choose Voice in the panel to hear replies anyway until it ends. `focus.full_screen: false` ignores full screen; `focus.calls: "chimes"` keeps chimes during calls instead of holding.
+
+### Today, at a glance
+Open the panel: on a wide enough screen the notch takes a third of it, with a second column. **Today** counts the turns, the threads and the tokens since midnight (Claude Code's, from its transcripts: input, output and newly cached; not the context it re-reads each turn), with the turns by hour. Below: **Limits**, what you said, and your agents.
+
+**Rest the mouse on a thread** for half a second: its last reply opens beside the panel in full, formatted (code blocks, lists, tables), with what the turn changed, its tokens today and its context. Scroll it with the wheel; it goes when the mouse leaves.
+
+### The daily recap
+At 18:00 (`recap.at`), once a day and only if something happened, a violet *Today* banner sums up the day: turns and tokens, each thread with its last summary, what's still waiting on you, and where your limits are; in Voice mode it's also said in a sentence or two. If you're away or in focus at that time, it waits for you. Ask for it any time: *"Hey Claude, daily recap"*, *"what did I do today?"*, *"résumé de la journée"*, the tray's *Today's recap*, or `agent-voice recap` in a terminal.
+
+### Hand your selection or a screenshot to a thread
+Select some text (code, an error, a paragraph) in any app, or copy a screenshot (`Win+Shift+S`), then say *"Hey Claude, send this to Codex"*. It goes to that thread's message box, without being sent, so you can add your question; say *"... and ask it to explain it"* to send it at once. Screenshots are saved to `~/.agent-voice/shots/` (the last 20 are kept) and passed by path. Also *"give the screenshot to the notch redesign"*, *"envoie ça à Codex"*.
+
+### Saved prompts
+Prompts you use all the time get a short name: *"Hey Claude, run the tests"* sends *"Run the test suite and fix anything that fails."* to the current thread; *"tell Codex to commit this"* to Codex; *"review this"* said in the reply window, or typed in the reply box, works too. Edit or add them in `shortcuts` (`{"the name you say": "the prompt sent"}`); the defaults are *run the tests*, *commit this*, *review this*, *explain that*, *lance les tests* and *fais un commit*.
 
 ### Start a new thread
 Press **`Ctrl+Alt+N`** (or *+ New* in the panel's Threads header, or the tray menu): a box opens under the notch.
@@ -246,6 +269,10 @@ File: `~/.agent-voice/config.json`. Only put the keys you want to change; they'r
 | `thread_voices` | `true` | One voice pitch per conversation |
 | `auto_chime_in_calls` | `true` | Chimes while another app uses the microphone |
 | `catch_up.enabled` / `away_minutes` | `true` / `5` | *While you were away* when you come back |
+| `resume.auto` / `message` | `true` / `"Continue."` | Out of quota: send this once the limit resets (`false`: only when you ask) |
+| `focus.enabled` / `full_screen` / `calls` | `true` / `true` / `"hold"` | Hold replies in focus; `calls: "chimes"` for chimes during calls |
+| `recap.enabled` / `at` | `true` / `"18:00"` | The daily recap |
+| `shortcuts` | 6 saved prompts | `{"name": "prompt"}` |
 | `desktop_apps.enabled` / `apps` | `false` / `{chatgpt, copilot, perplexity}` | Read these desktop apps' notifications (app id fragment → name) |
 | `permissions.enabled` / `wait_seconds` | `true` / `60` | Approvals by voice and in the notch, and how long Claude waits |
 | `wake_word.phrases` | `["hey claude", ...]` | Phrases Whisper accepts as the wake word |
@@ -262,7 +289,7 @@ File: `~/.agent-voice/config.json`. Only put the keys you want to change; they'r
 | `auto_listen.max_seconds` | `600` | Hard limit |
 | `widget.enabled` | `true` | Launch the widget with the service |
 
-Runtime state (mode, auto-send, summary, speed, wake word, approvals, desktop apps) lives in `~/.agent-voice/state.json`, and the notch/bar choice and position in `~/.agent-voice/widget.json`.
+Runtime state (mode, auto-send, summary, speed, wake word, approvals, desktop apps, today's numbers, threads waiting to resume) lives in `~/.agent-voice/state.json`, and the notch/bar choice and position in `~/.agent-voice/widget.json`.
 
 ## 8. Troubleshooting
 

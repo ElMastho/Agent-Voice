@@ -800,7 +800,7 @@ def test_cli_parses_every_command(capsys):
     with pytest.raises(SystemExit):
         cli.main(["--help"])
     help_text = capsys.readouterr().out
-    for command in ("mcp", "watch", "apps", "usage", "install", "say"):
+    for command in ("mcp", "watch", "apps", "usage", "install", "say", "recap"):
         assert command in help_text
 
 
@@ -1015,3 +1015,117 @@ def test_claude_installer_listens_for_stop_failures(tmp_path, monkeypatch):
     install.claude(remove=True)
     assert "StopFailure" not in json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8")).get(
         "hooks", {})
+
+
+def test_approvals_by_number_and_all(daemon):
+    for s in ("a", "b", "c"):
+        daemon.request_permission(s, "Bash", f"run step {s}")
+    answers = []
+    daemon.answer_permission = lambda perm_id, allow: (answers.append((perm_id, allow)), daemon._perms.pop(perm_id))
+    assert daemon._voice_approval("deny two")
+    assert answers == [(2, False)]
+    assert daemon._voice_approval("approve all")
+    assert sorted(answers[1:]) == [(1, True), (3, True)] and not daemon._perms
+
+
+def test_focus_holds_replies_and_catches_up(daemon):
+    daemon._fullscreen = "presenting"
+    assert daemon.focus == "presenting" and daemon.chime and daemon.status()["focus"] == "presenting"
+    daemon.speak("All done.", source="claude", final=True, session="a")
+    assert daemon.banner is None and daemon.chimes == [] and daemon.speaker.said == []  # held
+    daemon.request_permission("a", "Bash", "run the migration")  # approvals still come through
+    assert daemon.permission is not None
+    daemon._check_away(0, 100.0)
+    daemon._fullscreen = ""
+    daemon._perms.clear()
+    daemon.permission = None
+    daemon._check_away(0, 200.0)
+    assert daemon.banner["kind"] == "catchup" and "finished" in daemon.banner["text"]
+
+
+def test_daily_recap(daemon, monkeypatch):
+    import time as t
+
+    from agent_voice import server
+
+    assert server.match_recap("Daily recap.") and server.match_recap("what did I do today?")
+    assert not server.match_recap("recap the changes to the login page")
+    assert daemon.recap_text()[0] == "Nothing yet today."
+    daemon.speak("Voice summary: the tests pass.", source="claude", final=True, session="a")
+    daemon.speak("Fixed the parser.", source="codex", final=True, session="c")
+    daemon.set_usage({"session": "a", "source": "claude", "tokens": 120000})
+    daemon.request_permission("c", "Bash", "deploy", source="codex")
+    shown, said = daemon.recap_text()
+    assert shown.startswith("2 turns in 2 threads · 120k tokens.") and "Still waiting on you: Codex." in shown
+    assert "the tests pass" in shown and "Codex still needs you." in said
+    daemon.config["recap"] = {"enabled": True, "at": "00:00"}
+    daemon.banner = None
+    daemon._check_recap(t.time())
+    assert daemon.banner["kind"] == "recap"
+    daemon.banner = None
+    daemon._check_recap(t.time())
+    assert daemon.banner is None  # once a day
+    assert daemon.status()["day"]["turns"] == 2 and sum(daemon.status()["day"]["hours"]) == 2
+
+
+def test_shortcuts_and_handoff(daemon, monkeypatch):
+    from agent_voice import server
+
+    pasted = []
+    monkeypatch.setattr(daemon, "_paste", lambda text, hwnd=0, submit=False, session="": pasted.append((text, submit)))
+    daemon.threads.update({"c": {"source": "codex", "last": 2}})
+    daemon._session_hwnd["c"] = 42
+    daemon.send_text("c", "commit this")
+    assert pasted[-1] == ("Commit the current changes with a clear, short commit message.", True)
+    assert server.parse_handoff("Send this to Codex and ask it to explain it.") == ("Codex", "Explain it.")
+    assert server.parse_handoff("give the screenshot to the notch redesign") == ("the notch redesign", "")
+    assert server.parse_handoff("envoie ça à Codex") == ("Codex", "")
+    assert server.parse_handoff("send the tests to Codex") is None
+    monkeypatch.setattr(daemon, "_grab_selection", lambda: "def broken(): pass")
+    daemon.handoff("codex", "", "en")
+    assert pasted[-1] == ("def broken(): pass ", False)  # in its box, waiting for your question
+    daemon.handoff("codex", "review this", "en")
+    assert pasted[-1][1] and pasted[-1][0].startswith("Review the changes") and pasted[-1][0].endswith("pass")
+    monkeypatch.setattr(daemon, "_grab_selection", lambda: "")
+    monkeypatch.setattr(server.winfocus, "clipboard_png", lambda: b"\x89PNG fake")
+    monkeypatch.setattr(server, "HOME", daemon_home := __import__("pathlib").Path(__import__("tempfile").mkdtemp()))
+    daemon.handoff("codex", "what's wrong here", "en")
+    shot = pasted[-1][0].split("\n\n")[1]
+    assert shot.endswith(".png") and (daemon_home / "shots").exists()
+    daemon.handoff("gemini", "", "en")
+    assert "don't know a thread called gemini" in daemon.banner["text"]
+
+
+def test_thread_detail_and_tokens_today(daemon):
+    from agent_voice import hooks as h
+
+    daemon.speak("## Done\n\n```py\nprint(1)\n```\n\nVoice summary: printed it.", source="claude", final=True,
+                 session="a", result={"files": 1, "tests": "passed"})
+    detail = daemon.thread_detail("a")
+    assert "```py" in detail["text"] and "Voice summary" not in detail["text"] and detail["turns"] == 1
+    assert daemon.thread_detail("nope") == {}
+    today = "2026-10-16"
+    entries = [
+        {"type": "assistant", "timestamp": "2026-10-16T09:00:00Z",
+         "message": {"id": "m1", "usage": {"input_tokens": 10, "output_tokens": 90, "cache_read_input_tokens": 9999,
+                                           "cache_creation_input_tokens": 400}}},
+        {"type": "assistant", "timestamp": "2026-10-16T09:00:01Z",
+         "message": {"id": "m1", "usage": {"input_tokens": 10, "output_tokens": 90}}},  # the same request again
+        {"type": "assistant", "timestamp": "2026-10-15T09:00:00Z", "message": {"id": "m0", "usage": {"input_tokens": 5}}},
+    ]
+    assert h.claude_tokens_today(entries, today) == 500
+
+
+def test_clipboard_bitmaps_become_png():
+    import io
+
+    PIL = pytest.importorskip("PIL.Image")
+    from agent_voice import winfocus
+
+    img = PIL.new("RGB", (3, 2), (255, 0, 0))
+    img.putpixel((2, 1), (0, 0, 255))
+    buf = io.BytesIO()
+    img.save(buf, "BMP")
+    png = winfocus.dib_to_png(buf.getvalue()[14:])  # the clipboard's CF_DIB: a BMP without its file header
+    out = PIL.open(io.BytesIO(png))
+    assert out.size == (3, 2) and out.getpixel((0, 0)) == (255, 0, 0) and out.getpixel((2, 1)) == (0, 0, 255)

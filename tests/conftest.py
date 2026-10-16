@@ -8,9 +8,17 @@ os.environ["AGENT_VOICE_HOME"] = tempfile.mkdtemp(prefix="agent-voice-tests-")
 os.environ["PULSE_SERVER"] = "unix:/nonexistent/agent-voice-tests"
 
 
+
+def pytest_sessionfinish(session, exitstatus):
+    session.config.agent_voice_status = int(exitstatus)
+
+
 def pytest_unconfigure(config):
-    # Something holding the exit (a thread, an audio driver): print where every thread is, and leave anyway.
-    import faulthandler
+    # Linux: Qt's offscreen platform can deadlock tearing itself down at exit, after every test has run and the
+    # results are printed. Leave now, with pytest's own exit code.
     import sys
 
-    faulthandler.dump_traceback_later(30, exit=True, file=sys.stderr)
+    if sys.platform.startswith("linux"):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(getattr(config, "agent_voice_status", 0))

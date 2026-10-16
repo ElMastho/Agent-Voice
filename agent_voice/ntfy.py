@@ -34,7 +34,8 @@ KINDS = {
 
 def new_topic() -> str:
     """A topic nobody can guess: whoever knows it can read the notifications (keep the QR code to yourself)."""
-    return "agent-voice-" + secrets.token_urlsafe(18).replace("-", "x").replace("_", "y")
+    # Lowercase letters and digits only: ntfy topics are case-sensitive, and phones love to capitalise.
+    return "agent-voice-" + secrets.token_hex(12)
 
 
 def subscribe_url(server: str, topic: str) -> str:

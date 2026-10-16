@@ -284,7 +284,7 @@ def test_phone_card_and_upcoming(app, monkeypatch):
           "schedules": [{"id": 3, "at": 4102444800, "title": "Codex", "prompt": "Run the tests", "repeat": ""}]}
     w = _widget(st)
     rects = w._rects()
-    assert {"phone", "phone:test", "phone:new", "phone:off", "unsched:0"} <= set(rects)
+    assert {"phone", "phone:test", "phone:new", "phone:fold", "phone:copy", "unsched:0"} <= set(rects)
     assert w._limits_y() == w._sched_y() + w._sched_h() and w._sched_y() == w._phone_y() + widget.PHONE_H + 10
     w._activate("phone:test")
     w._activate("unsched:0")
@@ -346,3 +346,15 @@ def test_new_thread_folder_from_recent_or_browse(app, monkeypatch):
     box._browse()
     assert box.folder.text().replace("\\", "/") == "C:/picked" and not box._picking
     box.hide()
+
+
+def test_phone_card_folds_to_one_line(app, monkeypatch):
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: None)
+    monkeypatch.setattr(widget, "SCREEN_W", 1920)
+    monkeypatch.setattr(widget.VoiceWidget, "_save_position", lambda self: None)
+    w = _widget({"phase": "idle", "threads": [], "phone": {"enabled": True, "url": "https://ntfy.sh/agent-voice-ab"}})
+    w._activate("phone:fold")
+    assert w.phone_folded and w._phone_h() == widget.PHONE_FOLDED_H + 10 and "phone:new" not in w._rects()
+    w.grab()
+    w._activate("phone:fold")
+    assert not w.phone_folded and "phone:new" in w._rects()

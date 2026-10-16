@@ -70,6 +70,7 @@ ANIMATE_MS = 16  # 60 fps while something moves (at rest: no redraws at all, see
 SCREEN_W = 0  # the screen width to lay out for (0: the real one; render_docs and tests set it)
 KPI_H = 150  # the "Today" block: three numbers and the activity by hour
 PHONE_H = 112  # the phone card: the QR code to scan, and its buttons
+PHONE_FOLDED_H = 30  # folded away: one line
 SCHED_H = 22  # an upcoming scheduled prompt
 TILE_H, TILE_GAP = 30, 6  # the action buttons: an icon and its name on one line (the shortcut is in the tooltip)
 NOTCH_RADIUS = 20
@@ -943,6 +944,7 @@ class VoiceWidget(QWidget):
         self._banner_seen: int | None = None
         self._boot: int | None = None  # the service's start: when it changes, it was restarted (and so are we)
         self._opens: int | None = None
+        self.phone_folded = False  # the phone card folded to one line (kept in widget.json)
         self._quitting = False
         self._reading_shown: tuple | None = None
         self._banner_busy = False
@@ -1021,6 +1023,7 @@ class VoiceWidget(QWidget):
             self.compact = bool(pos.get("compact", False))
             self.notch = bool(pos.get("notch", True))
             self.start_hidden = bool(pos.get("hidden", False))
+            self.phone_folded = bool(pos.get("phone_folded", False))
         except (OSError, ValueError, KeyError):
             x, y = screen.right() - NOTCH_W - 8, screen.top() + 64
             self.notch = True  # a fresh install starts as the notch
@@ -1193,7 +1196,7 @@ class VoiceWidget(QWidget):
             HOME.mkdir(parents=True, exist_ok=True)
             x, y = self._bar_pos if self.notch and self._bar_pos else (self.x(), self.y())
             state = {"x": x, "y": y, "expanded": self.expanded, "compact": self.compact, "notch": self.notch,
-                     "hidden": not self.isVisible()}
+                     "hidden": not self.isVisible(), "phone_folded": self.phone_folded}
             POS_FILE.write_text(json.dumps(state), encoding="utf-8")
         except OSError:
             pass
@@ -1568,16 +1571,23 @@ class VoiceWidget(QWidget):
         return self._hist_y() + 16 + max(1, len(self._history())) * ROW_H + 8
 
     def _phone_h(self) -> float:
-        return PHONE_H + 10 if (self.st.get("phone") or {}).get("enabled") else 0.0
+        if not (self.st.get("phone") or {}).get("enabled"):
+            return 0.0
+        return (PHONE_FOLDED_H if self.phone_folded else PHONE_H) + 10
 
     def _phone_rects(self) -> dict[str, QRectF]:
         if not self._phone_h():
             return {}
+        if self.phone_folded:  # one line: the state, Test, and ⌄ to see the QR code again
+            row = QRectF(self.rx + 10, self._phone_y(), self.rw - 20, PHONE_FOLDED_H)
+            return {"phone:fold": QRectF(row.right() - 28, row.y() + 4, 24, row.height() - 8),
+                    "phone:test": QRectF(row.right() - 90, row.y() + 5, 56, row.height() - 10)}
         card = QRectF(self.rx + 10, self._phone_y(), self.rw - 20, PHONE_H)
         x = card.x() + PHONE_H - 6
         y = card.bottom() - 30
         return {"phone:test": QRectF(x, y, 56, 22), "phone:new": QRectF(x + 62, y, 70, 22),
-                "phone:off": QRectF(card.right() - 30, card.y() + 8, 22, 22)}
+                "phone:fold": QRectF(card.right() - 30, card.y() + 8, 22, 22),
+                "phone:copy": QRectF(x, card.y() + 56, card.right() - x - 8, 14)}
 
     def _schedules(self) -> list[dict]:
         return list(self.st.get("schedules") or [])[:4]
@@ -2403,6 +2413,10 @@ class VoiceWidget(QWidget):
             return
         p.save()
         p.setOpacity(appear)
+        if self.phone_folded:
+            self._paint_phone_folded(p, phone)
+            p.restore()
+            return
         card = QRectF(self.rx + 10, self._phone_y(), self.rw - 20, PHONE_H)
         p.setPen(QPen(QColor(255, 255, 255, 22), 1))
         p.setBrush(QColor(255, 255, 255, 10))
@@ -2426,7 +2440,12 @@ class VoiceWidget(QWidget):
             p.setPen(QColor(226, 232, 240, alpha) if not (i == 1 and phone.get("error")) else QColor("#F87171"))
             p.drawText(QRectF(x, card.y() + 26 + 15 * i, width - (30 if i == 0 else 0), 14),
                        Qt.AlignLeft | Qt.AlignVCenter, fm.elidedText(line, elide, width - (30 if i == 0 else 0)))
-        for key, label in (("phone:test", "Test"), ("phone:new", "New link"), ("phone:off", "×")):
+        if self._copied == "phone:copy" and time.time() - self._copied_at < 1.3:
+            p.setFont(self.f_hint)
+            p.setPen(QColor("#34D399"))
+            p.fillRect(self._phone_rects()["phone:copy"], QColor(0, 0, 0))
+            p.drawText(self._phone_rects()["phone:copy"], Qt.AlignLeft | Qt.AlignVCenter, "Link copied: paste it in ntfy")
+        for key, label in (("phone:test", "Test"), ("phone:new", "New link"), ("phone:fold", "⌃")):
             rect = self._phone_rects()[key]
             ht = self.hover_t.get(key, 0.0)
             p.setPen(Qt.NoPen)
@@ -2437,6 +2456,33 @@ class VoiceWidget(QWidget):
             p.setPen(QColor(255, 255, 255, 230))
             p.drawText(rect, Qt.AlignCenter, label)
         p.restore()
+
+    def _paint_phone_folded(self, p: QPainter, phone: dict) -> None:
+        row = QRectF(self.rx + 10, self._phone_y(), self.rw - 20, PHONE_FOLDED_H)
+        p.setPen(QPen(QColor(255, 255, 255, 22), 1))
+        p.setBrush(QColor(255, 255, 255, 10))
+        p.drawRoundedRect(row, row.height() / 2, row.height() / 2)
+        p.setFont(self.f_icon_small)
+        p.setPen(QColor("#34D399"))
+        p.drawText(QRectF(row.x() + 8, row.y(), 18, row.height()), Qt.AlignCenter, ICONS["phone"])
+        p.setFont(self.f_hint)
+        p.setPen(QColor(226, 232, 240, 170) if not phone.get("error") else QColor("#F87171"))
+        text = "Phone notifications on" + (f" · {phone['sent']} sent" if phone.get("sent") else "") + (
+            f" · not sent: {phone['error']}" if phone.get("error") else "")
+        rects = self._phone_rects()
+        room = int(rects["phone:test"].x() - row.x() - 34)
+        p.drawText(QRectF(row.x() + 30, row.y(), room, row.height()), Qt.AlignLeft | Qt.AlignVCenter,
+                   QFontMetrics(self.f_hint).elidedText(text, Qt.ElideRight, room))
+        for key, label in (("phone:test", "Test"), ("phone:fold", "⌄")):
+            rect = rects[key]
+            ht = self.hover_t.get(key, 0.0)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(16, 224, 160, int(40 + 70 * ht)) if key == "phone:test"
+                       else QColor(255, 255, 255, int(16 + 30 * ht)))
+            p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+            p.setFont(self.f_chip)
+            p.setPen(QColor(255, 255, 255, 230))
+            p.drawText(rect, Qt.AlignCenter, label)
 
     def _paint_schedules(self, p: QPainter, progress: float) -> None:
         """Prompts waiting for their time; × cancels one."""
@@ -2749,10 +2795,14 @@ class VoiceWidget(QWidget):
                     "you're away. Sends them over the internet: off until you turn it on")
         if key == "phone:test":
             return "Send a test notification"
+        if key == "phone:copy":
+            return ("Copy the link. In the ntfy app: + (Subscribe to topic), paste it. Scanning the QR code with "
+                    "the camera opens it in the browser instead: subscribe from the app")
         if key == "phone:new":
             return "Make a new private link (the old QR code stops getting anything)"
-        if key == "phone:off":
-            return "Turn phone notifications off"
+        if key == "phone:fold":
+            return ("Show the QR code" if self.phone_folded else "Fold it away (notifications stay on; the Phone "
+                    "button turns them off)")
         if key and key.startswith("unsched:"):
             return "Cancel this scheduled prompt"
         if key == "limits:refresh":
@@ -2906,15 +2956,20 @@ class VoiceWidget(QWidget):
             on = not (self.st.get("phone") or {}).get("enabled")
             _post("/phone", {"on": on})
             if on:
+                self.phone_folded = False  # just turned on: the QR code, to scan it
                 self._note("Phone notifications on: scan the QR code in the panel with the ntfy app (iPhone or "
                            "Android). Whoever has that link can read them, so keep it to yourself.")
         elif key == "phone:test":
             _post("/phone", {"action": "test"})
+        elif key == "phone:copy":
+            QApplication.clipboard().setText((self.st.get("phone") or {}).get("url", ""))
+            self._copied, self._copied_at = key, time.time()
         elif key == "phone:new":
             _post("/phone", {"action": "new"})
             self._note("New private link: scan the new QR code; the old one gets nothing any more.")
-        elif key == "phone:off":
-            _post("/phone", {"on": False})
+        elif key == "phone:fold":
+            self.phone_folded = not self.phone_folded  # the QR code only when you need it
+            self._save_position()
         elif key.startswith("unsched:"):
             items = self._schedules()
             i = int(key.split(":", 1)[1])

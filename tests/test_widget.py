@@ -371,3 +371,29 @@ def test_button_tooltips_explain_once(app):
     assert w._tooltip("wake").startswith("Hey Claude · wake word\nHey Claude: while idle")  # its explanation shows
     reply = w._tooltip("reply")
     assert reply.count("Reply now") == 1  # the name once, with its shortcut
+
+
+def test_take_back_banner_sends_keeps_or_drops(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    b = widget.Banner()
+    b.present({"id": 3, "kind": "pending", "pending": 9, "until": widget.time.time() + 5, "title": "Codex",
+               "session": "c", "text": "Deploy to production"}, 420)
+    rects = b._buttons()
+    assert set(rects) == {"send", "edit", "cancel"} and b.until > widget.time.time() + 5
+    QTest.mouseClick(b, Qt.LeftButton, Qt.NoModifier, rects["edit"].center().toPoint())
+    assert posted == [("/pending", {"id": 9, "action": "hold"})] and b.until > 0  # the next banner replaces it
+
+
+def test_do_not_disturb_has_a_way_back_on_the_notch(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    w = _widget({"phase": "muted", "output": "silent", "dnd_from": "chime", "threads": [],
+                 "activity": {"session": "a", "title": "Codex", "color": "#60A5FA", "label": "Run", "steps": 1,
+                              "elapsed": 3}})
+    assert w._primary()[0] == "undnd" and "Chimes" in w._primary()[2]
+    w.expanded, w._reveal_until = False, 0.0
+    w._place_notch()
+    assert w._reveal_until == 0.0  # an agent at work doesn't bring it down
+    w._activate("primary")
+    assert posted == [("/output", {"mode": "chime"})] and w._output() == "chime"

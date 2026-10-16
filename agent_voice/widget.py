@@ -41,7 +41,7 @@ from agent_voice.textclean import result_label, tokens_label
 WIDTH = 320
 BAR_H = 64
 SPEEDS = (1.0, 1.25, 1.5, 1.75, 2.0)
-MODES = (("voice", "Voice"), ("chime", "Chimes"), ("silent", "Silent"))
+MODES = (("voice", "Voice"), ("chime", "Chimes"), ("silent", "Do not disturb"))
 HIST_ROWS, THREAD_ROWS, ROW_H = 5, 4, 22
 LIMIT_H = 22  # a Limits row: the agent, then its 5-hour and weekly bars
 LIMIT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
@@ -58,7 +58,7 @@ AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI"
 AGENTS_PER_ROW = 6
 NEED_ROWS, NEED_H = 3, 28  # "needs you" rows at the top of the panel
 # Banner kinds: the accent around it and its header.
-BANNER_KINDS = {"you": ("#10E0A0", ""), "needs": ("#FBBF24", ""), "catchup": ("#8B7CFF", "While you were away"),
+BANNER_KINDS = {"you": ("#10E0A0", ""), "pending": ("#10E0A0", ""), "needs": ("#FBBF24", ""), "catchup": ("#8B7CFF", "While you were away"),
                 "recap": ("#8B7CFF", "Today")}
 GUIDE_URL = "https://github.com/ElMastho/agent-voice/blob/main/docs/guide.md"
 COMPACT = 56  # compact mode: just the orb
@@ -95,6 +95,7 @@ def _font(family: str, size: int) -> QFont:
 
 
 ICONS = {
+    "headphones": "\ue7f6",
     "phone": "\ue8ea",
     "folder": "\ue838",
     "clock": "\ue823",
@@ -123,7 +124,7 @@ ICONS = {
 }
 
 if sys.platform != "win32":
-    ICONS.update({"phone": "☏", "clock": "◷", "folder": "▤"})
+    ICONS.update({"phone": "☏", "clock": "◷", "folder": "▤", "headphones": "∩"})
     ICONS.update({"mic": "●", "stop": "■", "skip": "⏭", "chat": "✎", "send": "➤", "volume": "♪", "mute": "✕",
                   "read": "☰", "power": "⏻", "bell": "♫", "copy": "⧉", "check": "✓", "bolt": "ϟ", "list": "≡",
                   "shield": "✓", "down": "⌄", "up": "⌃", "replay": "↻", "open": "↗", "help": "?", "keyboard": "⌨", "tuck": "–"})
@@ -135,7 +136,7 @@ PHASES = {
     "waiting": ("#34D399", "Listening", "Go ahead, I'm listening"),
     "recording": ("#10E0A0", "Hearing you", "Pause to finish"),
     "transcribing": ("#FBBF24", "Transcribing", "One moment"),
-    "muted": ("#F87171", "Muted", "Voice is off"),
+    "muted": ("#F87171", "Do not disturb", "Nothing until you're back"),
     "offline": ("#64748B", "Offline", "Voice service isn't running"),
 }
 
@@ -340,7 +341,10 @@ def _post(path: str, payload: dict | None = None) -> None:
 
 
 # -- the widget --------------------------------------------------------------------------
-# How long a notification stays (Chimes, Silent), and how long the read-along text stays once the voice ends.
+# The banner's buttons: (icon, label).
+BANNER_BUTTONS = {"type": ("keyboard", "Reply"), "talk": ("mic", "Talk"), "send": ("send", "Send now"),
+                  "edit": ("keyboard", "Edit"), "cancel": ("stop", "Cancel")}
+# How long a notification stays (Chimes), and how long the read-along text stays once the voice ends.
 SHOW_FOR, LINGER = 10.0, 5.0
 
 
@@ -369,6 +373,7 @@ class Banner(QWidget):
         self._hot: str | None = None  # the button under the mouse
         self.on_reply = None  # opens the reply box (set by the widget)
         self._topmost_at = 0.0
+        self._shown_left = -1
         self.f_head = _font(FONT_TEXT, 8)
         self.f_icon = _font(ICON_FONT, 9)
         self.f_head.setWeight(QFont.Medium)
@@ -385,6 +390,8 @@ class Banner(QWidget):
         self._layout(width)
         words = len(item.get("text", "").split())
         self.until = 1e12 if hold else time.time() + min(30.0, SHOW_FOR + max(0, words - 12) * 0.5)  # more if long
+        if item.get("kind") == "pending":  # about to be sent: as long as it waits (what happens next replaces it)
+            self.until = float(item.get("until") or time.time()) + 2.0
         if not self.isVisible():
             self.t, self.v = 0.0, 0.0
             self.show()
@@ -393,20 +400,29 @@ class Banner(QWidget):
         """Wrap the text for `width` and size the banner to it."""
         fm = QFontMetrics(self.f_text)
         self.lines = self._wrap((self.item or {}).get("text", ""), fm, width - 36)
-        self.resize(width, int(40 + len(self.lines) * fm.lineSpacing() + 14 + (26 if self._can_reply() else 0)))
+        self.resize(width, int(40 + len(self.lines) * fm.lineSpacing() + 14 + (26 if self._buttons_shown() else 0)))
 
     def _can_reply(self) -> bool:
         """An agent's message (a reply, a question waiting on you): it can be answered from here."""
         item = self.item or {}
         return bool(item.get("session")) and item.get("kind") not in ("you", "catchup", "note", "recap")
 
+    def _buttons_shown(self) -> bool:
+        return self._can_reply() or (self.item or {}).get("kind") == "pending"
+
     def _buttons(self) -> dict[str, QRectF]:
-        """Reply by typing, or by voice, to the conversation this banner is from."""
-        if not self._can_reply():
+        """Reply by typing, or by voice, to the conversation this banner is from; or, for a message about to be
+        sent: send it now, keep it to fix it, or drop it."""
+        if not self._buttons_shown():
             return {}
-        y, h = self.height() - 34, 22
-        return {"talk": QRectF(self.width() - 16 - 62, y, 62, h),
-                "type": QRectF(self.width() - 16 - 62 - 8 - 70, y, 70, h)}
+        y, h, right = self.height() - 34, 22, self.width() - 16
+        if (self.item or {}).get("kind") == "pending":
+            out = {}
+            for key, w in (("cancel", 74), ("edit", 62), ("send", 90)):
+                out[key] = QRectF(right - w, y, w, h)
+                right -= w + 8
+            return out
+        return {"talk": QRectF(right - 62, y, 62, h), "type": QRectF(right - 62 - 8 - 70, y, 70, h)}
 
     def _wrap(self, text: str, fm: QFontMetrics, width: float) -> list[str]:
         lines, line = [], ""
@@ -425,6 +441,10 @@ class Banner(QWidget):
             lines.append(fm.elidedText(line, Qt.ElideRight, int(width)) if len(lines) == self.LINES - 1 else line)
         return lines or [""]
 
+    def _left(self) -> int:
+        """Seconds before the message waiting under the notch is sent."""
+        return max(0, math.ceil(float((self.item or {}).get("until") or 0) - time.time()))
+
     def dismiss(self) -> None:
         self.until = 0.0
         self.dismissed = self.holding  # swiped away while reading along: not again for this speech
@@ -442,7 +462,12 @@ class Banner(QWidget):
         if width and abs(width - self.width()) >= 1:
             self._layout(width)  # the notch opened or closed: the banner keeps its width, frame by frame
         now = time.time()
-        if self._hover and self.until:
+        if self.item.get("kind") == "pending":
+            left = self._left()
+            if left != self._shown_left:  # the countdown: one repaint a second
+                self._shown_left = left
+                self.update()
+        elif self._hover and self.until:
             self.until = max(self.until, now + 1.5)  # reading it: don't take it away
         target = 1.0 if now < self.until else 0.0
         self.t, self.v = _spring(self.t, self.v, target, dt, 0.62, 0.14)
@@ -500,13 +525,17 @@ class Banner(QWidget):
         p.setFont(self.f_head)
         p.setPen(QColor(255, 255, 255, 150))
         title = fixed_title or self.item.get("title") or ""
-        if yours:
+        if kind == "pending":
+            title = f"Sending to {title}" if title else "Sending"
+        elif yours:
             title = f"You  →  {title}" if title else "You said"
         head = QFontMetrics(self.f_head).elidedText(title or "Reply", Qt.ElideRight, self.width() - 90)
         p.drawText(QRectF(30, 10, self.width() - 90, 20), Qt.AlignLeft | Qt.AlignVCenter, head)
         p.setPen(QColor(255, 255, 255, 90))
-        p.drawText(QRectF(0, 10, self.width() - 18, 20), Qt.AlignRight | Qt.AlignVCenter,
-                   "speaking" if self.holding else self.item.get("tag") or ("" if kind in BANNER_KINDS else "done"))
+        tag = "speaking" if self.holding else self.item.get("tag") or ("" if kind in BANNER_KINDS else "done")
+        if kind == "pending":
+            tag = f"in {self._left()} s · say “wait” or “cancel”"
+        p.drawText(QRectF(0, 10, self.width() - 18, 20), Qt.AlignRight | Qt.AlignVCenter, tag)
         p.setFont(self.f_text)
         p.setPen(QColor(255, 255, 255, 228))
         fm = QFontMetrics(self.f_text)
@@ -521,10 +550,11 @@ class Banner(QWidget):
             p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
             p.setFont(self.f_icon)
             p.setPen(QColor(255, 255, 255, 235))
+            icon, label = BANNER_BUTTONS[key]
             icon_rect = QRectF(rect.x() + 8, rect.y(), 16, rect.height())
-            p.drawText(icon_rect, Qt.AlignCenter, ICONS["keyboard" if key == "type" else "mic"])
+            p.drawText(icon_rect, Qt.AlignCenter, ICONS[icon])
             p.setFont(self.f_head)
-            p.drawText(rect.adjusted(26, 0, -8, 0), Qt.AlignLeft | Qt.AlignVCenter, "Reply" if key == "type" else "Talk")
+            p.drawText(rect.adjusted(26, 0, -8, 0), Qt.AlignLeft | Qt.AlignVCenter, label)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(255, 255, 255, 45))  # a grabber: it can be swiped away
         p.drawRoundedRect(QRectF(self.width() / 2 - 16, self.height() - 7, 32, 3), 1.5, 1.5)
@@ -563,6 +593,11 @@ class Banner(QWidget):
             self.dismiss()  # swiped away
         elif abs(moved.x()) + abs(moved.y()) < 5 and self.item:
             button = self._button_at(e.position())
+            if self.item.get("kind") == "pending":
+                if button:  # what happens to it next replaces this banner
+                    _post("/pending", {"id": self.item.get("pending"),
+                                       "action": {"send": "send", "edit": "hold", "cancel": "cancel"}[button]})
+                return
             if button == "type" and self.on_reply:
                 self.on_reply(self.item)
             elif button == "talk":
@@ -1146,13 +1181,14 @@ class VoiceWidget(QWidget):
         now = time.time()
         busy = (self.phase in ("speaking", "waiting", "recording", "transcribing") or bool(self._activity())
                 or bool(self._drop))
+        dnd = self._output() == "silent"  # Do not disturb: it stays up until you hover it
         if self._tucked is not None and self._news() != self._tucked:
             self._tucked = None  # something new happened: show it
         hovering = self._hovering and not self._tuck_hover
         if self._tucked is not None:  # tucked by hand: only the mouse (or a drag) brings it down for a look
             if hovering or self.pressed or self._drop:
                 self._reveal_until = now + NOTCH_HIDE_DELAY
-        elif busy or hovering or self.expanded or self.pressed or self._question():
+        elif hovering or self.expanded or self.pressed or self._drop or (not dnd and (busy or self._question())):
             self._reveal_until = now + NOTCH_HIDE_DELAY
         # A lightly damped spring: it drops down, overshoots a hair in width, and settles.
         target = 1.0 if now < self._reveal_until else 0.0
@@ -1369,6 +1405,9 @@ class VoiceWidget(QWidget):
             return ("stop", ICONS["stop"], f"Cancel ({_hotkey_label(hk.get('stop', ''))})")
         if self.phase == "transcribing":
             return None
+        if self._output() == "silent":
+            back = "Chimes" if self.st.get("dnd_from") == "chime" else "Voice"
+            return ("undnd", ICONS["bell"], f"Do not disturb is on: click to go back to {back}")
         return ("reply", ICONS["mic"], f"Talk now ({_hotkey_label(hk.get('reply', ''))})")
 
     def _tiles(self) -> list[tuple[str, str, str, str, bool]]:
@@ -1380,22 +1419,24 @@ class VoiceWidget(QWidget):
             ("hold", ICONS["mic"], "Hold to talk", hk.get("push_to_talk", ""), self.pressed == "hold"),
             ("stop", ICONS["stop"], "Stop", hk.get("stop", ""), False),
             ("handsfree", ICONS["send"], "Auto-send", hk.get("hands_free", ""), bool(st.get("hands_free"))),
-            ("mute", ICONS["mute"], "Silent", hk.get("mute", ""), muted),
+            ("mute", ICONS["mute"], "Do not disturb", hk.get("mute", ""), muted),
             ("read", ICONS["read"], "Read selection", hk.get("read_selection", ""), False),
             ("wake", ICONS["bolt"], "Hey Claude", "wake word", bool(st.get("wake"))),
             ("approve", ICONS["shield"], "Approvals", "voice or click", bool(st.get("approvals", True))),
             ("summary", ICONS["list"], "Summaries" if st.get("summary", True) else "Full answers",
              "short / full", bool(st.get("summary", True))),
             ("phone", ICONS["phone"], "Phone", "notifications", bool((st.get("phone") or {}).get("enabled"))),
+            ("headphones", ICONS["headphones"], "Headphones", "voice in headphones only", bool(st.get("headphones_only"))),
         ]
         if self.island:  # a fourth column: the last reply, on demand
             tiles[3:3] = [("replay", ICONS["replay"], "Replay", "last reply", False)]
             tiles[7:7] = [("copyreply", ICONS["check"] if self._copied == "copyreply" and time.time() - self._copied_at < 1.3
                            else ICONS["copy"], "Copy reply", "to clipboard", False)]
             tiles[11:11] = [("openchat", ICONS["open"], "Open chat", "last thread", False)]
+        # Do not disturb is in the Mode row (and on the notch itself while it's on): no tile for it.
+        tiles = [t for t in tiles if t[0] != "mute"]
         if self._output() != "voice":
-            # Voice-only tiles go, and so does Silent: the Mode row already switches it.
-            tiles = [t for t in tiles if t[0] not in VOICE_ONLY | {"mute"}]
+            tiles = [t for t in tiles if t[0] not in VOICE_ONLY]  # nothing to hear: their tiles go
         return tiles
 
     def _needs(self) -> list[dict]:
@@ -1866,10 +1907,12 @@ class VoiceWidget(QWidget):
             chips.append("Focus")
         elif st.get("in_call"):
             chips.append("In a call")
+        elif st.get("speakers"):
+            chips.append("Speakers")
         elif self._output() == "chime":
             chips.append("Chime")
         elif self._output() == "silent":
-            chips.append("Silent")
+            chips.append("Do not disturb")
         elif st.get("hands_free"):
             chips.append("Auto")
         if st.get("speed_x") and self.phase == "speaking":  # only while there's a voice to speed up
@@ -2743,6 +2786,9 @@ class VoiceWidget(QWidget):
         if key == "phone":
             return ("Phone notifications (ntfy): replies, what needs you, limits and the recap on your phone while "
                     "you're away. Sends them over the internet: off until you turn it on")
+        if key == "headphones":
+            return ("The voice only in headphones: through the speakers (an open office), chimes and the reply as a "
+                    "banner instead. It switches by itself when you plug them in or take them off")
         if key == "phone:test":
             return "Send a test notification"
         if key == "phone:copy":
@@ -2837,7 +2883,8 @@ class VoiceWidget(QWidget):
             return f"Chimes: no voice, a soft sound and the reply as a banner ({hk})"
         if key == "mode:silent":
             hk = _hotkey_label(self.hotkeys.get("mute", ""))
-            return f"Silent: no sound at all, replies show as a banner ({hk})"
+            return (f"Do not disturb: no voice, no sound, no banner, the notch stays up. What happens meanwhile is "
+                    f"told when you're back ({hk})")
         if key and key.startswith("thrtalk:"):
             return "Talk to this conversation: what you say is sent to it"
         if key and key.startswith("thrtype:"):
@@ -2877,7 +2924,11 @@ class VoiceWidget(QWidget):
         if key == "primary":
             prim = self._primary()
             key = prim[0] if prim else ""
-        if key == "chevron":
+        if key == "undnd":  # back to Voice or Chimes, as it was before
+            mode = self.st.get("dnd_from") or "voice"
+            self.st["output"] = mode
+            _post("/output", {"mode": mode})
+        elif key == "chevron":
             self.toggle_expanded()
         elif key == "tuck":
             self.tuck()
@@ -2891,6 +2942,8 @@ class VoiceWidget(QWidget):
             self.start_update()
         elif key == "result":
             _post("/open_thread", {"session": (self.st.get("result") or {}).get("session", "")})
+        elif key == "headphones":
+            _post("/headphones", {"mode": "toggle"})
         elif key == "phone":
             on = not (self.st.get("phone") or {}).get("enabled")
             _post("/phone", {"on": on})
@@ -3267,13 +3320,15 @@ class Tray(QSystemTrayIcon):
         m.addSeparator()
         add("Auto-send replies", lambda: _post("/handsfree", {"mode": "toggle"}), online,
             bool(st.get("hands_free")), hk.get("hands_free", ""))
-        add("Mute voice", lambda: _post("/mute", {"mode": "toggle"}), online, bool(st.get("muted")), hk.get("mute", ""))
+        add("Do not disturb", lambda: _post("/mute", {"mode": "toggle"}), online, bool(st.get("muted")), hk.get("mute", ""))
         add("Chime mode (sounds only)", lambda: _post("/chime", {"mode": "toggle"}), online,
             bool(st.get("chime")), hk.get("chime", ""))
         add("Summarize answers", lambda: _post("/summary", {"mode": "toggle"}), online, bool(st.get("summary", True)))
         add("Approve permissions by voice", lambda: _post("/approvals", {"mode": "toggle"}), online,
             bool(st.get("approvals", True)))
         add("Wake word (Hey Claude)", lambda: _post("/wake", {"mode": "toggle"}), online, bool(st.get("wake")))
+        add("Voice in headphones only", lambda: _post("/headphones", {"mode": "toggle"}), online,
+            bool(st.get("headphones_only")))
         add("Read ChatGPT / Copilot notifications", lambda: _post("/apps", {"mode": "toggle"}), online,
             bool(st.get("desktop_apps")))
         speed_menu = m.addMenu("Voice speed")

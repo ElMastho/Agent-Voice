@@ -147,7 +147,7 @@ def test_daemon_says_how_to_update(monkeypatch):
     from agent_voice import server
 
     d = server.Daemon.__new__(server.Daemon)
-    d.banner, d._release = None, {}
+    d.banner, d._release, d.state = None, {}, {}
     d._title = lambda session, source: ""
     d.update = {"version": "0.6.0", "url": server.RELEASES_PAGE, "how": "git", "state": ""}
     d.install_update()
@@ -161,6 +161,7 @@ def test_failed_download_changes_nothing(monkeypatch):
     from agent_voice import server
 
     d = server.Daemon.__new__(server.Daemon)
+    d.state = {}
     d.banner, d._release = None, {"asset": {"browser_download_url": "x", "size": 1}}
     d._title = lambda session, source: ""
     d.update = {"version": "0.6.0", "url": server.RELEASES_PAGE, "how": "auto", "state": ""}

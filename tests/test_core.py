@@ -320,8 +320,9 @@ def daemon(monkeypatch):
     monkeypatch.setattr(server.claudeapp, "session_title", lambda session: "")
     monkeypatch.setattr(server.winfocus, "is_window", lambda hwnd: True)
     d = server.Daemon(config.load_config(), start_threads=False)
+    d.config["take_back"]["seconds"] = 0  # sent at once, unless a test is about the take-back
     d.chimes = []
-    monkeypatch.setattr(d, "play_chime", lambda kind: d.chimes.append(kind))
+    monkeypatch.setattr(d, "play_chime", lambda kind: d.muted or d.chimes.append(kind))  # silent, like the real one
     return d
 
 
@@ -332,10 +333,15 @@ def test_chime_and_silent_show_the_reply_as_a_banner(daemon):
     assert daemon.speaker.said == []  # no voice in chime mode
     assert daemon.chimes == ["done"]
     assert daemon.banner["text"].endswith("all tests pass.")
-    daemon.set_output("silent")
+    daemon.set_output("silent")  # Do not disturb: no sound, no banner, the notch stays up
+    shown = daemon.banner["id"]
+    daemon._check_away(0, __import__("time").time() - 1)  # counts as away
     daemon.speak("Second answer.", source="claude", final=True, session="a")
-    assert daemon.banner["text"] == "Second answer." and daemon.output == "silent"
-    assert daemon.speaker.said == []
+    assert daemon.banner["id"] == shown and daemon.output == "silent" and daemon.chimes == ["done"]
+    assert daemon.speaker.said == [] and daemon.status()["dnd_from"] == "chime"
+    daemon.set_output(daemon.dnd_from)  # the notch's button: back to where you were
+    daemon._check_away(0, __import__("time").time())
+    assert daemon.output == "chime" and daemon.banner["kind"] == "catchup"  # what happened meanwhile
 
 
 def test_settings_stay_quiet_without_a_voice(daemon):
@@ -1388,3 +1394,88 @@ def test_screenshot_conversion_handles_24_and_32_bits():
         idat = png[png.index(b"IDAT") + 4:]
         raw = zlib.decompress(idat[:struct.unpack(">I", png[png.index(b"IDAT") - 4:png.index(b"IDAT")])[0]])
         assert raw == (b"\0" + bytes([30, 20, 10]) * 3) * 2  # RGB, row by row
+
+
+def test_take_back_phrases_and_look_at_this():
+    from agent_voice import server
+
+    assert server.match_take_back("Wait!") == "hold" and server.match_take_back("No, cancel that.") == "cancel"
+    assert server.match_take_back("Send it now") == "send" and server.match_take_back("annule") == "cancel"
+    assert server.match_take_back("wait until the tests pass") is None  # a sentence is more of the message
+    assert server.parse_look("Look at this and tell me why it's red.") == "Tell me why it's red."
+    assert server.parse_look("look at this") == "" and server.parse_look("Regarde ça, c'est cassé") == "C'est cassé"
+    assert server.parse_look("look at the tests") is None
+
+
+def _taking_back(daemon, monkeypatch, seconds=0.3):
+    import threading
+
+    pasted = []
+    monkeypatch.setattr(daemon, "_paste", lambda text, hwnd=0, submit=False, session="": pasted.append((text, submit)))
+    daemon.config["take_back"]["seconds"] = seconds
+    thread = threading.Thread(target=daemon._send_spoken, args=("Deploy to production", 7, "a", "en"))
+    thread.start()
+    deadline = __import__("time").time() + 2
+    while daemon._pending is None and __import__("time").time() < deadline:
+        __import__("time").sleep(0.01)
+    return pasted, thread
+
+
+def test_take_back_sends_after_a_moment_unless_you_stop_it(daemon, monkeypatch):
+    pasted, thread = _taking_back(daemon, monkeypatch)
+    assert daemon.status()["pending"] and daemon.banner["kind"] == "pending" and not pasted  # waiting
+    thread.join(2)
+    assert pasted == [("Deploy to production", True)] and daemon._pending is None
+    pasted, thread = _taking_back(daemon, monkeypatch, seconds=5)
+    assert daemon.pending_action(daemon._pending["id"], "hold")
+    thread.join(2)
+    assert pasted == [("Deploy to production", False)]  # typed in, not sent: fix it there
+    pasted, thread = _taking_back(daemon, monkeypatch, seconds=5)
+    daemon.pending_action(daemon._pending["id"], "cancel")
+    thread.join(2)
+    assert pasted == [] and daemon.banner["tag"] == "cancelled"
+    copied = []
+    monkeypatch.setattr("pyperclip.copy", copied.append)
+    pasted, thread = _taking_back(daemon, monkeypatch, seconds=5)
+    daemon.stop()  # interrupted: not sent, kept
+    thread.join(2)
+    assert pasted == [] and copied == ["Deploy to production"]
+
+
+def test_voice_only_in_headphones(daemon):
+    daemon.state["headphones_only"] = True
+    daemon._output.kind = "headphones"
+    assert not daemon.chime
+    daemon._output.kind = "speakers"
+    assert daemon.chime and daemon.status()["speakers"]
+    daemon.speak("Done.", source="claude", final=True, session="a")
+    assert daemon.banner["text"] == "Done."  # a banner, not out loud
+    daemon.set_chime(False)  # you picked Voice anyway
+    assert not daemon.chime
+    daemon._output.poll = lambda: "headphones"
+    daemon._check_output()
+    daemon._output.kind, daemon._output.poll = "speakers", lambda: "speakers"
+    assert daemon.chime  # a device change: back to chimes on speakers
+    from agent_voice import outputs
+
+    assert outputs.kind_of(3) == "headphones" and outputs.kind_of(1) == "speakers" and outputs.kind_of(8) == ""
+
+
+def test_look_at_this_sends_a_picture_of_the_window(daemon, monkeypatch, tmp_path):
+    from agent_voice import server
+
+    pasted = []
+    monkeypatch.setattr(daemon, "_paste", lambda text, hwnd=0, submit=False, session="": pasted.append((text, submit)))
+    monkeypatch.setattr(server, "HOME", tmp_path)
+    monkeypatch.setattr(server.winfocus, "foreground", lambda: 5)
+    monkeypatch.setattr(server.winfocus, "title", lambda hwnd: "Chrome")
+    monkeypatch.setattr(server.winfocus, "window_png", lambda hwnd: b"\x89PNG fake")
+    daemon.threads["a"] = {"source": "claude", "last": 1}
+    daemon.look_at("a", "Why is the button grey?", "en")
+    text, sent = pasted[-1]
+    assert sent and text.startswith("Why is the button grey?\n\n") and text.endswith(".png")
+    daemon.look_at("a", "", "en")
+    assert pasted[-1][1] is False and pasted[-1][0].endswith(".png ")  # waits in its box for your question
+    monkeypatch.setattr(server.winfocus, "window_png", lambda hwnd: b"")
+    daemon.look_at("a", "", "en")
+    assert "Couldn't take a picture" in daemon.banner["text"]

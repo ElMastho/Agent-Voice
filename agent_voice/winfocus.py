@@ -370,3 +370,65 @@ def clipboard_png() -> bytes:
     finally:
         user32.CloseClipboard()
     return dib_to_png(data)
+
+
+def window_png(hwnd: int) -> bytes:
+    """A picture of a window as it is on screen right now (what you're looking at), as PNG; b'' if it can't be had.
+
+    Copied from the screen rather than asked of the window: browsers and GPU-drawn apps answer that with black.
+    """
+    if sys.platform != "win32" or not hwnd:
+        return b""
+    import struct
+
+    user32, gdi32, dwm = ctypes.WinDLL("user32"), ctypes.WinDLL("gdi32"), ctypes.WinDLL("dwmapi")
+    user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+    user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+    user32.GetDC.restype = wintypes.HDC
+    user32.GetDC.argtypes = [wintypes.HWND]
+    user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+    user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    dwm.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+    gdi32.CreateCompatibleDC.restype = wintypes.HDC
+    gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+    gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+    gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+    gdi32.SelectObject.restype = wintypes.HGDIOBJ
+    gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+    gdi32.BitBlt.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HDC,
+                             ctypes.c_int, ctypes.c_int, wintypes.DWORD]
+    gdi32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT, ctypes.c_void_p,
+                                ctypes.c_void_p, wintypes.UINT]
+    gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+    gdi32.DeleteDC.argtypes = [wintypes.HDC]
+
+    # Real pixels on a scaled display (the daemon itself isn't DPI-aware): for this thread, for this capture.
+    before = user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))  # PER_MONITOR_AWARE_V2
+    try:
+        rect = wintypes.RECT()
+        # The visible frame, without the invisible resize borders around it.
+        if dwm.DwmGetWindowAttribute(wintypes.HWND(hwnd), 9, ctypes.byref(rect), ctypes.sizeof(rect)) != 0:
+            user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect))
+        width, height = rect.right - rect.left, rect.bottom - rect.top
+        if width <= 0 or height <= 0 or width * height > 50_000_000:
+            return b""
+        screen = user32.GetDC(None)
+        mem = gdi32.CreateCompatibleDC(screen)
+        bitmap = gdi32.CreateCompatibleBitmap(screen, width, height)
+        old = gdi32.SelectObject(mem, bitmap)
+        try:
+            gdi32.BitBlt(mem, 0, 0, width, height, screen, rect.left, rect.top, 0x00CC0020 | 0x40000000)  # SRCCOPY
+            header = struct.pack("<IiiHHIIiiII", 40, width, -height, 1, 32, 0, 0, 0, 0, 0, 0)  # top-down, 32 bits
+            info = ctypes.create_string_buffer(header, 40 + 12)
+            pixels = ctypes.create_string_buffer(width * height * 4)
+            if not gdi32.GetDIBits(mem, bitmap, 0, height, pixels, info, 0):
+                return b""
+        finally:
+            gdi32.SelectObject(mem, old)
+            gdi32.DeleteObject(bitmap)
+            gdi32.DeleteDC(mem)
+            user32.ReleaseDC(None, screen)
+    finally:
+        if before:
+            user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(before))
+    return dib_to_png(header + pixels.raw)

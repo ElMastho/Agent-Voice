@@ -19,8 +19,8 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from agent_voice import (__version__, calls, claudeapp, install, keys, launch, ntfy, quota, schedule, textclean,
-                         updater, usage, winfocus)
+from agent_voice import (__version__, calls, claudeapp, install, keys, launch, ntfy, outputs, quota, schedule,
+                         textclean, updater, usage, winfocus)
 from agent_voice.config import HOME, LOG_DIR, LOOPBACK, load_config, load_state, save_state
 from agent_voice.hooks import strip_summary
 from agent_voice.textclean import result_label
@@ -325,6 +325,43 @@ _RECAP = re.compile(r"^(?:give me\s+)?(?:the\s+|my\s+|today'?s\s+)?(?:daily\s+re
                     r"résumé de (?:la|ma) journée|resume de (?:la|ma) journee|bilan de (?:la|ma) journée)\W*$", re.I)
 
 
+# Said while a dictated message waits to be sent: keep it to fix it, drop it, or send it now.
+_TAKE_BACK = {
+    "hold": re.compile(r"^(?:wait|hold on|hold it|hang on|stop|edit|edit it|let me (?:fix|edit|change) (?:it|that)|"
+                       r"attends?|attendez|pas encore|modifie|je corrige)$"),
+    "cancel": re.compile(r"^(?:cancel(?: that| it)?|never ?mind|don'?t send(?: it| that)?|scratch that|delete (?:it|that)|"
+                         r"forget it|annule|annule ça|laisse tomber|n'envoie pas|oublie)$"),
+    "send": re.compile(r"^(?:send(?: it)?(?: now)?|go|go ahead|yes|ok send it|envoie(?:-le)?|vas-y|oui)$"),
+}
+
+
+def match_take_back(text: str) -> str | None:
+    """'Wait!' -> 'hold', 'cancel that' -> 'cancel', 'send it' -> 'send'; None for anything else (more words)."""
+    plain = re.sub(r"[^\w\s'-]", "", text.lower().replace("’", "'")).strip()
+    plain = re.sub(r"^(?:no|non|oh|uh|euh|please|ok|okay)\s+|\s+(?:please|s'il te pla[iî]t)$", "", plain)
+    return next((name for name, rx in _TAKE_BACK.items() if rx.match(plain)), None)
+
+
+# "Look at this", "check this error and tell me what's wrong", "regarde ça" -> a picture of the window in front.
+_LOOK = (
+    re.compile(r"^(?:please\s+)?(?:look at|have a look at|take a look at|check(?: out)?|see)\s+(?:this|that|my screen|"
+               r"the screen|this window|this page|this error|that error|what i'?m looking at)\b(?P<rest>.*)$", re.I | re.S),
+    re.compile(r"^(?:regarde|vois|jette un (?:œil|oeil) (?:à|a))\s+(?:ça|ca|ceci|cela|mon écran|l'écran|cette fenêtre|"
+               r"cette page|cette erreur)\b(?P<rest>.*)$", re.I | re.S),
+)
+
+
+def parse_look(text: str) -> str | None:
+    """'Look at this and tell me why it fails' -> 'Tell me why it fails'; 'look at this' -> ''; None otherwise."""
+    text = text.strip()
+    for rx in _LOOK:
+        m = rx.match(text)
+        if m:
+            rest = re.sub(r"^[\s,.:;!?-]*(?:(?:and|et)\s+)?", "", m["rest"]).strip()
+            return rest[:1].upper() + rest[1:]
+    return None
+
+
 def match_resume(text: str) -> bool:
     return bool(_RESUME.search(text)) and len(text.split()) <= 12
 
@@ -497,6 +534,13 @@ class Daemon:
         self.widget_toggles = 0
         self.widget_opens = 0  # bumped by `agent-voice open` (the Start menu): the widget shows its panel
         self.boot = int(time.time() * 1000)
+        # A dictated message waiting a few seconds before it's sent (the take-back), and what was said about it.
+        self._pending: dict | None = None
+        self._pending_seq = 0
+        self._pending_event = threading.Event()
+        # Headphones or speakers: on speakers (if you asked), chimes instead of the voice. You can still pick Voice.
+        self._output = outputs.OutputWatch()
+        self._speaker_override = False
         if start_threads:
             threading.Thread(target=self._job_loop, name="jobs", daemon=True).start()
             threading.Thread(target=self._listen_monitor, name="listen", daemon=True).start()
@@ -562,8 +606,31 @@ class Daemon:
 
     @property
     def chime(self) -> bool:
-        """Chimes instead of the voice: chosen, or automatic while you're in a call or in focus."""
-        return bool(self.state.get("chime")) or bool(self.focus)
+        """Chimes instead of the voice: chosen, automatic while you're in a call or in focus, or on speakers."""
+        return bool(self.state.get("chime")) or bool(self.focus) or self.on_speakers
+
+    @property
+    def headphones_only(self) -> bool:
+        """The voice only in headphones: through speakers, chimes and banners instead (everyone around would hear)."""
+        if "headphones_only" in self.state:
+            return bool(self.state["headphones_only"])
+        return bool(self.config.get("headphones", {}).get("only", False))
+
+    def set_headphones_only(self, on: bool) -> None:
+        self.state["headphones_only"] = on
+        save_state(self.state)
+        self._speaker_override = False
+        log.info("headphones_only=%s", on)
+        if self.on_speakers:
+            self.stop()
+            self.play_chime("done")
+        else:
+            self._confirm("Voice in headphones only." if on else "Voice on any speaker.")
+
+    @property
+    def on_speakers(self) -> bool:
+        """The voice is kept off right now because the sound would come out of speakers."""
+        return self.headphones_only and self._output.kind == "speakers" and not self._speaker_override
 
     @property
     def focus(self) -> str:
@@ -605,6 +672,8 @@ class Daemon:
         log.info("chime=%s", on)
         if self.focus and not on:
             self._call_override = True  # you asked for the voice during a call (or full screen): keep it
+        if self.on_speakers and not on:
+            self._speaker_override = True  # the voice on speakers anyway, until the device changes
         self.stop()  # no voice and no open mic in chime mode
         if on:
             self.play_chime("done")
@@ -612,9 +681,10 @@ class Daemon:
             self._confirm("Voice mode.")
 
     def set_output(self, mode: str) -> None:
-        """voice | chime | silent: one choice instead of separate mute and chime switches."""
+        """voice | chime | silent (Do not disturb): one choice instead of separate mute and chime switches.
+
+        Do not disturb keeps the chime choice, so turning it off goes back to Voice or Chimes as you had it."""
         if mode == "silent":
-            self.state["chime"] = False
             self.set_muted(True)
             return
         if self.muted:
@@ -856,8 +926,97 @@ class Daemon:
         full = textclean.expand_shortcut(text, self.config.get("shortcuts") or {})
         return (full, True) if full else (text, False)
 
-    def _send_to(self, session: str, message: str, lang: str) -> None:
-        """Type a message into a conversation's own window (and send it), then come back."""
+    def _send_spoken(self, text: str, hwnd: int, session: str, lang: str) -> None:
+        """A dictated message that sends itself: shown under the notch for a few seconds first, while the mic
+        listens for "wait" (it's typed in, not sent, to fix it), "cancel that" or "send it"; more words are added."""
+        seconds = float(self.config.get("take_back", {}).get("seconds", 5) or 0)
+        if seconds <= 0:
+            self._paste(text, hwnd, submit=True, session=session)
+            return
+        self._pending_seq += 1
+        p = {"id": self._pending_seq, "text": text, "session": session, "until": time.time() + seconds, "action": ""}
+        self._pending = p
+        self._pending_event.clear()
+        self._show_pending(p)
+        try:
+            self._await_take_back(p, seconds)
+        finally:
+            self._pending = None
+        action = p["action"] or ("keep" if self._pending_event.is_set() else "send")
+        source = self.threads.get(session, {}).get("source", "") if session else ""
+        log.info("take-back: %s", action)
+        if action == "send":
+            self._show_banner(p["text"], session, source, kind="you", tag="sent")
+            self._paste(p["text"], hwnd, submit=True, session=session)
+        elif action == "hold":  # typed into its input, not sent: fix it there and press Enter
+            self._show_banner(p["text"], session, source, kind="you", tag="not sent: fix it, then Enter")
+            self._paste(p["text"], hwnd, submit=False, session=session)
+        elif action == "cancel":
+            self._show_banner(p["text"], session, source, kind="you", tag="cancelled")
+            _beep(400)
+        else:  # interrupted (Stop, a prompt you typed yourself): nothing sent, nothing lost
+            import pyperclip
+
+            pyperclip.copy(p["text"])
+            self._show_banner(p["text"], session, source, kind="you", tag="not sent · on the clipboard")
+
+    def _show_pending(self, p: dict) -> None:
+        source = self.threads.get(p["session"], {}).get("source", "") if p["session"] else ""
+        self._show_banner(p["text"], p["session"], source, kind="pending", tag="sending")
+        if self.banner:
+            self.banner.update(pending=p["id"], until=p["until"])
+
+    def _await_take_back(self, p: dict, seconds: float) -> None:
+        """Until the message goes: listen for what you say about it (or a click on Send, Edit, Cancel)."""
+        from agent_voice.stt import is_hallucination, listen_for_speech
+
+        if self.transcriber is None:  # no mic: the buttons only
+            self._pending_event.wait(max(0.0, p["until"] - time.time()))
+            return
+        cfg = self.config["auto_listen"]
+        listening, self._listening = self._listening, True
+        self.speaker.hold()
+        try:
+            while not p["action"] and not self._pending_event.is_set():
+                left = p["until"] - time.time()
+                if left <= 0:
+                    return
+                self._mic_phase = "waiting"
+                audio = listen_for_speech(left, float(cfg["silence_seconds"]), float(cfg["max_seconds"]),
+                                          self._pending_event, on_level=self._set_level,
+                                          on_start=lambda: setattr(self, "_mic_phase", "recording"))
+                if audio is None or p["action"] or self._pending_event.is_set():
+                    return
+                self._mic_phase = "transcribing"
+                said, _ = self.transcriber.transcribe(audio)
+                if not said or is_hallucination(said):
+                    continue
+                what = match_take_back(said)
+                if what:
+                    p["action"] = what
+                    return
+                p["text"] = f"{p['text']} {said}".strip()  # you went on: it's part of the message
+                p["until"] = time.time() + seconds
+                self._show_pending(p)
+        finally:
+            self.speaker.release()
+            self._listening = listening
+            self._mic_phase = ""
+            self.level = 0.0
+
+    def pending_action(self, pending_id: int, action: str) -> bool:
+        """The banner's Send, Edit and Cancel."""
+        p = self._pending
+        if not p or p["id"] != pending_id or action not in ("send", "hold", "cancel"):
+            return False
+        p["action"] = action
+        self._pending_event.set()
+        return True
+
+    def _send_to(self, session: str, message: str, lang: str, spoken: bool = False) -> None:
+        """Type a message into a conversation's own window (and send it), then come back.
+
+        `spoken`: you said it, so it waits a moment under the notch first (scheduled prompts and resumes don't)."""
         message, expanded = self._expand(message)
         hwnd = self._session_hwnd.get(session, 0)
         title = self._title(session, self.threads.get(session, {}).get("source", ""))
@@ -868,7 +1027,10 @@ class Daemon:
             _beep(300)
             return
         self._heard(message, lang, session, tag="shortcut" if expanded else "sent")
-        self._paste(message, hwnd, submit=True, session=session)
+        if spoken:
+            self._send_spoken(message, hwnd, session, lang)
+        else:
+            self._paste(message, hwnd, submit=True, session=session)
 
     # -- handoff ----------------------------------------------------------------
     def _copy_selection(self, settle: float = 0.25) -> tuple[str, str]:
@@ -894,28 +1056,53 @@ class Daemon:
             self._show_banner(f"I don't know a thread called {name}.", "", "", kind="note", tag="not sent")
             _beep(300)
             return
+        window = winfocus.foreground()  # what you're looking at, before anything moves
         content = self._copy_selection()[0].strip()
         if not content:
-            png = winfocus.clipboard_png()
-            if png:
-                shots = HOME / "shots"
-                shots.mkdir(parents=True, exist_ok=True)
-                for old in sorted(shots.glob("*.png"))[:-20]:  # keep the last 20
-                    old.unlink(missing_ok=True)
-                path = shots / f"shot-{time.strftime('%Y%m%d-%H%M%S')}.png"
-                path.write_bytes(png)
-                content = str(path).replace("\\", "/")
+            # A screenshot you copied, else a picture of the window you're looking at.
+            content = self._save_shot(winfocus.clipboard_png() or winfocus.window_png(window))
         title = self._title(session, self.threads.get(session, {}).get("source", ""))
         if not content:
             self._show_banner(f"Nothing to send to {title}: select some text or copy a screenshot first.", "", "",
                               kind="note", tag="not sent")
             _beep(300)
             return
+        self._deliver(session, message, content, lang, f"(to {title}) {content[:120]}")
+
+    def look_at(self, session: str, message: str, lang: str) -> None:
+        """'Look at this': a picture of the window in front goes to the conversation, with what you asked."""
+        window = winfocus.foreground()
+        path = self._save_shot(winfocus.window_png(window))
+        if not path:
+            self._show_banner("Couldn't take a picture of that window.", "", "", kind="note", tag="not sent")
+            _beep(300)
+            return
+        log.info("look at %r", winfocus.title(window)[:60])
+        self._deliver(session, message, path, lang, f"(a picture of {winfocus.title(window)[:60] or 'the window'})")
+
+    def _deliver(self, session: str, message: str, content: str, lang: str, shown: str) -> None:
+        """Content for a conversation: with a message, sent (after the take-back); alone, typed in for your question."""
         message, _ = self._expand(message) if message else ("", False)
-        text = f"{message}\n\n{content}" if message else content
-        log.info("handoff to %r (%d chars, %s)", title, len(content), "sent" if message else "not sent")
-        self._heard(message or f"(to {title}) {content[:120]}", lang, session, tag="sent" if message else "handoff")
-        self._paste(text if message else text + " ", self._hwnd_for(session), submit=bool(message), session=session)
+        log.info("to %r: %d chars, %s", self._title(session), len(content), "sent" if message else "not sent")
+        self._heard(message or shown, lang, session, tag="sent" if message else "handoff")
+        hwnd = self._hwnd_for(session)
+        if message:
+            self._send_spoken(f"{message}\n\n{content}", hwnd, session, lang)
+        else:
+            self._paste(content + " ", hwnd, submit=False, session=session)
+
+    @staticmethod
+    def _save_shot(png: bytes) -> str:
+        """Keep a picture for an agent to open (the last 20 stay); its path, or '' with no picture."""
+        if not png:
+            return ""
+        shots = HOME / "shots"
+        shots.mkdir(parents=True, exist_ok=True)
+        for old in sorted(shots.glob("*.png"))[:-20]:
+            old.unlink(missing_ok=True)
+        path = shots / f"shot-{time.strftime('%Y%m%d-%H%M%S')}.png"
+        path.write_bytes(png)
+        return str(path).replace("\\", "/")
 
     # -- out of quota -------------------------------------------------------------
     def limit_hit(self, session: str, source: str, text: str = "", resets: float = 0.0) -> None:
@@ -1021,7 +1208,7 @@ class Daemon:
 
     def _away_for_phone(self) -> bool:
         idle = winfocus.idle_seconds()
-        return bool(self._away_since or self._holding()) or idle >= 60 * float(
+        return bool(self._away_since or self._holding() or self.muted) or idle >= 60 * float(
             self.config.get("ntfy", {}).get("away_minutes", 2))
 
     def set_phone(self, on: bool) -> dict:
@@ -1244,9 +1431,11 @@ class Daemon:
         cfg = self.config.get("catch_up", {})
         if not cfg.get("enabled", True):
             return
-        away = idle >= 60 * float(cfg.get("away_minutes", 5)) or bool(self.in_call) or self._holding()
+        # Do not disturb counts as away: what happened meanwhile is told when you turn it off.
+        held = bool(self.in_call) or self._holding() or self.muted
+        away = idle >= 60 * float(cfg.get("away_minutes", 5)) or held
         if away and not self._away_since:
-            self._away_since = now - (0 if (self.in_call or self._holding()) and idle < 60 else idle)
+            self._away_since = now - (0 if held and idle < 60 else idle)
         elif not away and self._away_since:
             since, self._away_since = self._away_since, 0.0
             self._catch_up([e for e in self._events if e["at"] >= since])
@@ -1533,12 +1722,19 @@ class Daemon:
         self._show_banner(text, "", "", kind="note", tag="limits")
 
     def set_muted(self, muted: bool) -> None:
+        """Do not disturb: no voice, no sound, no banner; what happens is kept for when you're back."""
         self.state["muted"] = muted
         save_state(self.state)
         if muted:
-            self.stop()
-        _beep(440 if muted else 880)
-        log.info("muted=%s", muted)
+            self.stop()  # and no cue: you may be walking into a meeting
+        else:
+            _beep(880)
+        log.info("do not disturb=%s", muted)
+
+    @property
+    def dnd_from(self) -> str:
+        """What Do not disturb goes back to: 'chime' or 'voice'."""
+        return "chime" if self.state.get("chime") else "voice"
 
     # -- actions ----------------------------------------------------------------
     def speak(
@@ -1679,7 +1875,11 @@ class Daemon:
                 "color": thread_color(session or title), "session": session}
 
     def _show_banner(self, text: str, session: str, source: str, kind: str = "reply", tag: str = "") -> None:
-        """A notification under the notch: a reply in chime/silent mode, or ("you") what you just said."""
+        """A notification under the notch: a reply in chime mode, or ("you") what you just said.
+
+        Do not disturb: only what you do yourself shows; the rest waits for the catch-up when you're back."""
+        if self.muted and kind not in ("you", "pending"):
+            return
         title = self._title(session, source) if session or source else ""
         self.banner = {"id": (self.banner or {}).get("id", 0) + 1, "text": textclean.clean(text)[:800],
                        "title": title, "color": thread_color(session or title), "session": session,
@@ -1834,6 +2034,7 @@ class Daemon:
     def cancel_listen(self) -> None:
         self._listen_armed = False
         self._listen_cancel.set()
+        self._pending_event.set()  # a message about to go stays unsent (on the clipboard)
         # Closing the mic can take ~1 s on some drivers; show "idle" right away.
         if self._listening and not self._ptt_active:
             self._mic_phase = ""
@@ -1940,9 +2141,10 @@ class Daemon:
                 "others": len(live) - 1, "context": (self.usage.get(session) or {}).get("context")}
 
     def _call_watch(self) -> None:
-        """Every few seconds: is another app on the mic? Then chimes until the call ends."""
+        """Every few seconds: is another app on the mic? Then chimes until the call ends. Headphones or speakers?"""
         while True:
             time.sleep(4)
+            self._check_output()
             try:
                 busy = winfocus.busy_state()
             except Exception:
@@ -1969,6 +2171,18 @@ class Daemon:
             elif not label and self.in_call:
                 log.info("call ended")
                 self.in_call, self._call_override = "", False
+
+    def _check_output(self) -> None:
+        before = self._output.kind
+        try:
+            now = self._output.poll()
+        except Exception:
+            log.debug("sound output unknown", exc_info=True)
+            return
+        if now != before:
+            self._speaker_override = False  # a new device: your choice for the old one doesn't carry over
+            if self.on_speakers and self.speaker.busy:
+                self.stop()  # headphones unplugged mid-sentence: not out loud in the room
 
     def _learn_title(self, hwnd: int, session: str) -> None:
         """You type in the conversation on screen, so its title belongs to this session.
@@ -2140,9 +2354,13 @@ class Daemon:
             approving = permission is not None and permission is self.permission
             answering = approving or (question is not None and question is self.question)
             command = None if answering else match_command(text)
+            look = None if answering or command else parse_look(text)
+            if look is not None:  # "Look at this and tell me what's wrong"
+                self.look_at(session or self._last_session, look, lang)
+                return
             routed = None if answering or command else self._routed(text)
             if routed and routed[0] != session:
-                self._send_to(routed[0], routed[1], lang)  # "Tell Codex to ...": goes to Codex, not here
+                self._send_to(routed[0], routed[1], lang, spoken=True)  # "Tell Codex to ...": goes to Codex, not here
                 return
             tag = ("answer" if answering else "command" if command
                    else "sent" if self.hands_free or force_submit else "typed")
@@ -2160,15 +2378,15 @@ class Daemon:
             elif session in self._limited and match_resume(text):
                 self.set_resume(session)
             elif expanded:  # a saved prompt's name: its full text, sent
-                self._paste(full, target, submit=True, session=session)
+                self._send_spoken(full, target, session, lang)
             elif rest is not None:
                 # "Hey Claude, ..." while the reply mic was open: the rest is the reply; the phrase alone is nothing.
                 if rest.strip(" .!?,"):
-                    self._paste(rest, target, submit=self.hands_free or force_submit, session=session)
+                    self._dictated(rest, target, session, lang, self.hands_free or force_submit)
                 else:
                     log.info("reply was only the wake phrase: nothing sent")
             else:
-                self._paste(text, target, submit=self.hands_free or force_submit, session=session)
+                self._dictated(text, target, session, lang, self.hands_free or force_submit)
         except Exception:
             log.exception("auto-listen failed")
         finally:
@@ -2176,6 +2394,13 @@ class Daemon:
             self.speaker.release()
             self._mic_phase = ""
             self.level = 0.0
+
+    def _dictated(self, text: str, hwnd: int, session: str, lang: str, submit: bool) -> None:
+        """What you said: sent (after the take-back), or typed into the input for you to send."""
+        if submit:
+            self._send_spoken(text, hwnd, session, lang)
+        else:
+            self._paste(text, hwnd, submit=False, session=session)
 
     def _run_command(self, command: str, session: str) -> None:
         """A spoken command in the reply window: handled here, nothing is sent to the agent."""
@@ -2575,6 +2800,10 @@ class Daemon:
                 if self.set_resume(named or ""):
                     self._heard(command, lang, named or "", tag="command")
                 continue
+            look = parse_look(command)
+            if look is not None:  # "Hey Claude, look at this and tell me why it's red"
+                self.look_at(session or self._last_session, look, lang)
+                continue
             handoff = parse_handoff(command)
             if handoff:  # "Hey Claude, send this to Codex and ask it to explain it"
                 self.handoff(handoff[0], handoff[1], lang)
@@ -2585,17 +2814,17 @@ class Daemon:
                 continue
             routed = self._routed(command)
             if routed:  # "Hey Claude, tell the notch redesign to run the tests"
-                self._send_to(routed[0], routed[1], lang)
+                self._send_to(routed[0], routed[1], lang, spoken=True)
                 continue
             full, expanded = self._expand(command)
             if expanded:  # "Hey Claude, commit this": a saved prompt, to the current thread
                 self._heard(full, lang, session, tag="shortcut")
                 _beep(880)
-                self._paste(full, self._hwnd_for(session), submit=True, session=session)
+                self._send_spoken(full, self._hwnd_for(session), session, lang)
             elif len(command.split()) >= 3:
                 self._heard(command, lang, session, tag="sent")
                 _beep(880)
-                self._paste(command, self._hwnd_for(session), submit=True, session=session)
+                self._send_spoken(command, self._hwnd_for(session), session, lang)
             else:
                 # Just "Hey Claude": open the mic for the prompt, and send it.
                 _beep(880)
@@ -2643,6 +2872,10 @@ class Daemon:
             "output": self.output,
             "in_call": self.in_call,
             "focus": self.focus if self._holding() else "",
+            "headphones_only": self.headphones_only,
+            "dnd_from": self.dnd_from,
+            "speakers": self.on_speakers,
+            "pending": {"id": self._pending["id"], "until": self._pending["until"]} if self._pending else None,
             "phone": self._phone_status(),
             "schedules": self._schedules_status(),
             "day": self._day_status(),
@@ -2765,7 +2998,7 @@ class Daemon:
                 return
             submit = self.hands_free or bool(self.config["stt"].get("auto_submit"))
             self._heard(text, lang, "", tag="sent" if submit else "typed")  # push-to-talk goes to the focused window
-            self._paste(text, submit=submit)
+            self._dictated(text, winfocus.foreground() if submit else 0, "", lang, submit)
         except Exception:
             log.exception("push-to-talk failed")
         finally:
@@ -2797,7 +3030,7 @@ def status_tag(st: dict) -> str:
 
 # On/off switches: the endpoint -> the daemon's property (set with set_<name>).
 TOGGLES = {"/summary": "summary", "/handsfree": "hands_free", "/chime": "chime", "/approvals": "approvals",
-           "/apps": "desktop_apps", "/wake": "wake", "/mute": "muted"}
+           "/apps": "desktop_apps", "/wake": "wake", "/mute": "muted", "/headphones": "headphones_only"}
 
 
 def _background(target, *args, **kwargs) -> None:
@@ -2979,6 +3212,8 @@ def _handler(daemon: Daemon):
                 daemon.limit_hit(str(data.get("session") or ""), str(data.get("source") or ""),
                                  str(data.get("text") or "")[:400])
                 return self._json(200, {"ok": True})
+            if self.path == "/pending":  # the take-back banner's Send, Edit (hold) and Cancel
+                return self._json(200, {"ok": daemon.pending_action(_int(data.get("id")), str(data.get("action") or ""))})
             if self.path == "/widget_open":
                 daemon.widget_opens += 1
                 return self._json(200, {"ok": True})

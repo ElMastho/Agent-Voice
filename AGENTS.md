@@ -41,6 +41,7 @@ agent_voice/
   quota.py      agents' rate limits (5-hour, weekly): Codex's session logs, Claude's usage cache
   usage.py      Claude's usage from its transcripts (Ledger) and the estimate between real readings (Estimator)
   ntfy.py       phone notifications (opt-in): ntfy messages, batching, sending
+  outputs.py    headphones or speakers: the default playback device's form factor (pycaw)
   ducking.py    other apps' volume under the voice / while you reply, media pause (Windows mixer, pycaw)
   schedule.py   scheduled prompts: "14:00", "in 20 minutes", "demain à 9h", repeats
   apps.py       desktop AI apps' Windows notifications (wpndatabase.db, read-only, filtered in SQL)
@@ -110,6 +111,8 @@ The daemon and widget run as `pythonw` in the background. **Code changes need a 
 - **Never resize the notch every frame**: resizing a see-through window re-uploads all of it (the jerky opening). The notch's window is a canvas sized once for where an animation is going and trimmed when it settles; the island is drawn at `_vw` x `_vis_h()` inside it, and `visual_rect()` is where it is on screen.
 - **Sounds never go through `sounddevice.play()` outside `tts.py`**: it shares one global stream with the voice, so a cue there would cut the speech off. Cues and chimes use `_play_apart` (a stream of their own), built by `tone_audio` (no harmonics above the note, eased in and out). Never `winsound.Beep`.
 - **Ducking restores what it lowered**: `Ducker` saves the original volumes to `state.json` (`ducked`) before fading, and the next start puts them back.
+- **Dictated sends go through `Daemon._send_spoken`** (the take-back: a few seconds under the notch, the mic open for "wait" / "cancel that"). Scheduled prompts, resumes and typed replies call `_paste` directly: never hold those.
+- **Window pictures copy the screen** (`winfocus.window_png`, BitBlt with the thread made DPI-aware for the capture): `PrintWindow` gives black for browsers and GPU-drawn apps.
 - **Claude's limits come from `claude -p /usage`**: a local Claude Code command (no model request) that refreshes `cachedUsageUtilization` in `~/.claude.json`. Never pass it through Git Bash (it rewrites `/usage` into a path and Claude gets a real prompt); the daemon runs it without a shell. Never read Claude's credentials ourselves.
 - **Claude Code's `StopFailure` hook** (matcher `rate_limit`) is how an out-of-quota turn reaches `/limit_hit`; the resume schedule lives in `state.json` (`limited`) so a restart doesn't lose it.
 

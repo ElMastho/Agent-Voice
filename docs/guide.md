@@ -90,7 +90,8 @@ In the reply window, say on its own *"repeat that"*, *"slower"*, *"faster"* or *
 ### Stop, and the three modes
 - **`Ctrl+Alt+S`**: stop the current speech (and cancel listening).
 - In Claude Code, sending a new prompt yourself also stops the voice instantly.
-- **Mode** (in the panel): **Voice**, **Chimes** (`Ctrl+Alt+C`: a soft sound when the agent is done or needs you) or **Silent** (`Ctrl+Alt+M`: no sound at all). In Chimes and Silent nothing talks, the mic doesn't open after answers, and each finished reply drops down under the notch as a **banner** for about 10 seconds, longer for long replies (hover to keep it, swipe it up to dismiss it, click it to open the conversation).
+- **Mode** (in the panel): **Voice**, **Chimes** (`Ctrl+Alt+C`: a soft sound when the agent is done or needs you) or **Do not disturb** (`Ctrl+Alt+M`). In Chimes nothing talks, the mic doesn't open after answers, and each finished reply drops down under the notch as a **banner** for about 10 seconds, longer for long replies (hover to keep it, swipe it up to dismiss it, click it to open the conversation).
+- **Do not disturb** (`Ctrl+Alt+M`) is for a meeting: no voice, no sound, no banner, and the notch stays tucked at the top even while agents work; hover it to look. What happens meanwhile is kept (approvals and questions wait in *Needs you*; phone notifications, if on, still reach you). One button on the notch, where the mic usually is, turns it off and puts you back in Voice or Chimes, as you were, with a *While you were away* catch-up.
 - **Calls**: while another app holds the microphone (Teams, Zoom, Meet in a browser...), agent-voice switches to chimes on its own and the notch says *In a call*; it goes back to the voice when the call ends. Pick *Voice* during the call to keep the voice.
 
 ### Approvals and questions
@@ -139,8 +140,17 @@ Send a prompt later, to a thread or as a new thread:
 
 They wait in the panel's **Upcoming** list (× cancels one) and survive restarts. At that time the prompt is typed into the thread's own window and sent (saved prompts expand), and your phone hears about it if that's on. If the PC was off and it's more than 6 hours late, you're told and nothing is sent.
 
+### Take it back before it's sent
+Anything you dictate that sends itself (auto-send, *Talk* on a thread, *"Hey Claude, ..."*, *"tell Codex to ..."*) first waits 5 seconds under the notch, framed in green, with a countdown. The mic stays open: say *"wait"* and it's typed into the conversation's input without being sent, so you can fix it and press Enter; *"cancel that"* drops it; *"send it"* sends it now. Keep talking and what you add joins the message (the countdown starts again). The banner has the same three as buttons: *Send now*, *Edit*, *Cancel*. Pressing Stop meanwhile keeps it unsent, on the clipboard. `take_back.seconds: 0` sends at once, as before.
+
+### "Look at this"
+*"Hey Claude, look at this and tell me why the build is red"* takes a picture of the window you're looking at (a browser, an error dialog, a chart) and sends it to your current thread with the question. Without a question (*"look at this"*), it's put in the thread's message box for you to finish. It works from the reply mic too, and in French (*"regarde ça"*). Pictures are saved to `~/.agent-voice/shots/` and passed by path.
+
+### Headphones only
+In an open office, turn on *Headphones only* (panel or tray): the voice then plays only through headphones or a headset. When the sound goes to the laptop's speakers or a monitor, replies come as a chime and a banner, and the notch shows *Speakers*. It follows your device: plug your headphones in and the voice is back, take them off and it stops mid-sentence. Choosing *Voice* while on speakers keeps it until you change device.
+
 ### Hand your selection or a screenshot to a thread
-Select some text (code, an error, a paragraph) in any app, or copy a screenshot (`Win+Shift+S`), then say *"Hey Claude, send this to Codex"*. It goes to that thread's message box, without being sent, so you can add your question; say *"... and ask it to explain it"* to send it at once. Screenshots are saved to `~/.agent-voice/shots/` (the last 20 are kept) and passed by path. Also *"give the screenshot to the notch redesign"*, *"envoie ça à Codex"*.
+Select some text (code, an error, a paragraph) in any app, or copy a screenshot (`Win+Shift+S`), then say *"Hey Claude, send this to Codex"*. It goes to that thread's message box, without being sent, so you can add your question; say *"... and ask it to explain it"* to send it at once. With nothing selected or copied, a picture of the window you're looking at goes instead. Screenshots are saved to `~/.agent-voice/shots/` (the last 20 are kept) and passed by path. Also *"give the screenshot to the notch redesign"*, *"envoie ça à Codex"*.
 
 ### Saved prompts
 Prompts you use all the time get a short name: *"Hey Claude, run the tests"* sends *"Run the test suite and fix anything that fails."* to the current thread; *"tell Codex to commit this"* to Codex; *"review this"* said in the reply window, or typed in the reply box, works too. Edit or add them in `shortcuts` (`{"the name you say": "the prompt sent"}`); the defaults are *run the tests*, *commit this*, *review this*, *explain that*, *lance les tests* and *fais un commit*.
@@ -188,7 +198,7 @@ By default, final answers are spoken as **one short sentence**, so a long recap 
 - **Other agents**, or a reply without that line: the opening sentences of the answer are spoken (up to `summary.max_chars`). To get real summaries from Codex, Gemini CLI or Cursor too, add the same instruction to their project rules (`AGENTS.md`, `GEMINI.md`, `.cursor/rules`): *"End your final reply with a line `Voice summary: <one short sentence>`."*
 - Progress messages during the work are not affected.
 
-Toggle it with the *Summaries* tile, the tray (*Summarize answers*) or `agent-voice summary on|off`. The voice confirms "Summaries on" or "Full answers". It also decides what the Chimes/Silent banner shows.
+Toggle it with the *Summaries* tile, the tray (*Summarize answers*) or `agent-voice summary on|off`. The voice confirms "Summaries on" or "Full answers". It also decides what the Chimes banner shows.
 
 ### Read anything aloud
 Select text in any application and press **`Ctrl+Alt+R`**: it is read in the right language. With nothing selected, the clipboard is read.
@@ -298,6 +308,8 @@ File: `~/.agent-voice/config.json`. Only put the keys you want to change; they'r
 | `focus.enabled` / `full_screen` / `calls` | `true` / `true` / `"hold"` | Hold replies in focus; `calls: "chimes"` for chimes during calls |
 | `recap.enabled` / `at` | `true` / `"18:00"` | The daily recap |
 | `shortcuts` | 6 saved prompts | `{"name": "prompt"}` |
+| `take_back.seconds` | `5` | What you dictate waits this long before it's sent (0: at once) |
+| `headphones.only` | `false` | The voice only in headphones; chimes and banners through speakers |
 | `ducking.enabled` / `voice` / `listen` / `pause_media` | `true` / `0.3` / `0.0` / `true` | Other apps' volume under the voice and while you reply |
 | `limits.claude_refresh_minutes` | `10` | Run `claude -p /usage` this often while Claude is in use (`0`: never) |
 | `ntfy.server` / `token` | `"https://ntfy.sh"` / `""` | Your own ntfy server and its access token |

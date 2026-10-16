@@ -112,6 +112,12 @@ DEFAULTS: dict = {
     # Other apps' sound (Windows): lowered to `voice` of their volume while agent-voice speaks, to `listen` while
     # you reply, and a video or song playing is paused then (`pause_media`) and played again after.
     "ducking": {"enabled": True, "voice": 0.3, "listen": 0.0, "pause_media": True},
+    # What you dictate and send waits this many seconds under the notch first: say "wait" (it's typed in, not sent),
+    # "cancel that", or "send it"; keep talking and it's added. 0 sends at once.
+    "take_back": {"seconds": 5},
+    # only: the voice only in headphones; through speakers (an open office), chimes and the banner instead. The
+    # panel's Headphones button switches it.
+    "headphones": {"only": False},
     # Out of quota: once the limit resets, send this to the thread so it picks up where it stopped (auto: without
     # asking; off: only after "resume when it resets" or a click on Resume).
     "resume": {"auto": True, "message": "Continue."},

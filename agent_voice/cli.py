@@ -75,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
     p = sub.add_parser("wake", help='"Hey Claude, ..." while idle sends a new prompt (default: toggle)')
     p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
+    p = sub.add_parser("headphones", help="the voice only in headphones; chimes on speakers (default: toggle)")
+    p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
     p = sub.add_parser("apps", help="read out ChatGPT / Copilot / Perplexity desktop notifications (default: toggle)")
     p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
     p = sub.add_parser("chime", help="chime mode: no voice, a soft sound when the agent is done or needs you (default: toggle)")
@@ -205,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
             print("agent-voice is not running", file=sys.stderr)
             return 1
         if result.get("muted"):
-            print("muted (run `agent-voice unmute`)")
+            print("do not disturb is on (agent-voice unmute)")
         return 0
     if args.cmd == "stop":
         client.request("/stop", {})
@@ -265,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
             state["muted"] = (not state.get("muted")) if mode == "toggle" else mode == "on"
             save_state(state)
             result = {"muted": state["muted"]}
-        print("muted" if result["muted"] else "unmuted")
+        print("do not disturb on" if result["muted"] else "do not disturb off")
         return 0
 
     if args.cmd in ("install", "uninstall"):
@@ -318,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
 SWITCHES = {"summary": ("/summary", "summary", "summary", "off (full answers)"),
             "handsfree": ("/handsfree", "hands_free", "hands-free", "off"),
             "wake": ("/wake", "wake", "wake word", "off"),
+            "headphones": ("/headphones", "headphones_only", "voice in headphones only", "off (any speaker)"),
             "apps": ("/apps", "desktop_apps", "desktop apps", "off"),
             "chime": ("/chime", "chime", "chime mode", "off (voice)")}
 

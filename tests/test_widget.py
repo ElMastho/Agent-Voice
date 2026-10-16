@@ -47,7 +47,8 @@ def test_read_along_leaves_with_the_voice(app):
     b.present(ITEM, 420, hold=True)
     assert b.until >= 1e12  # held for as long as the voice plays
     b.release()
-    assert b.until <= widget.time.time() + 0.5 and not b.holding
+    now = widget.time.time()
+    assert now + 4.5 <= b.until <= now + 5.5 and not b.holding  # 5 s more to finish reading it
 
 
 def _widget(st):

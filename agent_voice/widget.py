@@ -261,6 +261,10 @@ def _post(path: str, payload: dict | None = None) -> None:
 
 
 # -- the widget --------------------------------------------------------------------------
+# How long a notification stays (Chimes, Silent), and how long the read-along text stays once the voice ends.
+SHOW_FOR, LINGER = 10.0, 5.0
+
+
 class Banner(QWidget):
     """Chime mode's notification: the reply drops out from under the notch, stays a few seconds, and
     goes back up. Swipe it up to dismiss it; click it to open the conversation. Hovering keeps it."""
@@ -302,7 +306,7 @@ class Banner(QWidget):
         self.lines = self._wrap(item.get("text", ""), fm, width - 36)
         self.resize(width, int(40 + len(self.lines) * fm.lineSpacing() + 14 + (26 if self._can_reply() else 0)))
         words = len(item.get("text", "").split())
-        self.until = 1e12 if hold else time.time() + min(15.0, 5.0 + max(0, words - 12) * 0.25)  # ~5 s, more if long
+        self.until = 1e12 if hold else time.time() + min(30.0, SHOW_FOR + max(0, words - 12) * 0.5)  # more if long
         if not self.isVisible():
             self.t, self.v = 0.0, 0.0
             self.show()
@@ -345,7 +349,7 @@ class Banner(QWidget):
         """The voice stopped: go away with it."""
         if self.holding:
             self.holding = False
-            self.until = min(self.until, time.time() + 0.3)
+            self.until = min(self.until, time.time() + LINGER)  # time to finish reading it
 
     def step(self, anchor: QRectF) -> bool:
         """Move with the notch (or bar); returns True while it is animating."""

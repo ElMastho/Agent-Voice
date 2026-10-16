@@ -47,7 +47,7 @@ Everything runs **locally on the CPU**: no cloud, no API key, no audio leaving y
 | 📊 **Results and usage** | *Done · 3 files changed · tests passed*, each conversation's context, Claude's 5-hour and weekly limits. |
 | 📎 **Drop files on the notch** | Screenshots, logs, files: dropped on the notch, they land in the conversation's prompt. |
 | 🗣️ **Speaks every reply** | Final answers and the progress notes between tool calls, never twice. Markdown, code and paths are cleaned out so it sounds natural. |
-| 📖 **Read along** | The text being spoken hangs under the notch, from the sentence you're hearing, and leaves when the voice stops. |
+| 📖 **Read along** | The text being spoken hangs under the notch, from the sentence you're hearing, and leaves 5 seconds after the voice stops. |
 | ⏱️ **Live activity** | While an agent works: *Working · Edit widget.py · 14 steps* and a timer, like a Dynamic Island. |
 | 📝 **Summaries, not essays** | Long answers become one sentence (Claude Code is asked for a `Voice summary:` line). Full answers are one click away. |
 | 🎙️ **Answer by voice** | After the answer, a beep and the mic opens. Talk, pause, done: Whisper transcribes and your reply is typed (and sent, with auto-send) into the conversation it answers. |
@@ -125,7 +125,7 @@ The edge light only shows while the voice or the mic is live: it doubles as a "m
   <img src="docs/images/read-along.jpg" alt="The text being spoken shown under the notch" width="640">
 </p>
 
-While a reply is read out, its text hangs under the notch, starting at the sentence you're hearing, and disappears when the voice stops. Swipe it up to hide it for this reply; click it to open the conversation. (`read_along: false` turns it off.)
+While a reply is read out, its text hangs under the notch, starting at the sentence you're hearing, and stays 5 seconds after the voice stops, so you can finish reading. Swipe it up to hide it for this reply; click it to open the conversation. (`read_along: false` turns it off.)
 
 ### What you said, before it goes
 
@@ -141,7 +141,7 @@ Once your reply is transcribed, it drops down under the notch framed in green, t
   <img src="docs/images/banner.jpg" alt="Chime mode: the reply drops down under the tucked-away notch" width="640">
 </p>
 
-In **Chimes** (a soft sound) or **Silent** (no sound at all), nothing talks, not even a setting change. Each finished reply drops down as a banner for about 5 seconds: hover to keep it, swipe it up to dismiss it, click it to open the conversation. **Reply** opens a box under the notch to type your answer (Enter sends it to that conversation, wherever its window is); **Talk** opens the mic for it. Both are on the read-along banner too. While **another app holds the mic** (Teams, Zoom, Meet...), agent-voice switches to chimes by itself and back when the call ends; pick *Voice* during the call to override it.
+In **Chimes** (a soft sound) or **Silent** (no sound at all), nothing talks, not even a setting change. Each finished reply drops down as a banner for about 10 seconds (longer for long replies): hover to keep it, swipe it up to dismiss it, click it to open the conversation. **Reply** opens a box under the notch to type your answer (Enter sends it to that conversation, wherever its window is); **Talk** opens the mic for it. Both are on the read-along banner too. While **another app holds the mic** (Teams, Zoom, Meet...), agent-voice switches to chimes by itself and back when the call ends; pick *Voice* during the call to override it.
 
 ### Every action, one click away
 

@@ -79,7 +79,7 @@ In the reply window, say on its own *"repeat that"*, *"slower"*, *"faster"* or *
 ### Stop, and the three modes
 - **`Ctrl+Alt+S`**: stop the current speech (and cancel listening).
 - In Claude Code, sending a new prompt yourself also stops the voice instantly.
-- **Mode** (in the panel): **Voice**, **Chimes** (`Ctrl+Alt+C`: a soft sound when the agent is done or needs you) or **Silent** (`Ctrl+Alt+M`: no sound at all). In Chimes and Silent nothing talks, the mic doesn't open after answers, and each finished reply drops down under the notch as a **banner** for about 5 seconds (hover to keep it, swipe it up to dismiss it, click it to open the conversation).
+- **Mode** (in the panel): **Voice**, **Chimes** (`Ctrl+Alt+C`: a soft sound when the agent is done or needs you) or **Silent** (`Ctrl+Alt+M`: no sound at all). In Chimes and Silent nothing talks, the mic doesn't open after answers, and each finished reply drops down under the notch as a **banner** for about 10 seconds, longer for long replies (hover to keep it, swipe it up to dismiss it, click it to open the conversation).
 - **Calls**: while another app holds the microphone (Teams, Zoom, Meet in a browser...), agent-voice switches to chimes on its own and the notch says *In a call*; it goes back to the voice when the call ends. Pick *Voice* during the call to keep the voice.
 
 ### Approvals and questions

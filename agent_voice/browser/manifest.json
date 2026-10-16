@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "agent-voice",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "description": "Hear ChatGPT, Claude, Gemini, AI Studio, Perplexity and Copilot reply, and see them work in the agent-voice notch. Everything stays on your computer.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA/szC9FKu+dI4wWcuDeAlvZr3OlylNSFb6gKGKiWINEJ7lc0B4mKC6q/JM7VppbfGob4Gi9TjRAncOXOm/JqBrXlq75b3Se13s5JXRj2Vw0lGUer8xANGaFyhTvtfKH0INRY9XfPkdHwBsvNy3JvE5gy9kgRDeOONjAm/H1Ay8m9x+bsevRXZMDtt9YmusgjVblW5De/pDBLnqKhYnw6kT4e1yb8tXGWhl8cBC4gDioqzg9BUR3+BEMjG7i+PkURZ3Z7vd/YMut42UvLIoRCpdUOPRAYDGwjSoH+peCEdhgAQ9rieEiz3Sucsrsla8K1RWCesRdLpkc2zdYJt4xRXtwIDAQAB",
   "permissions": ["nativeMessaging"],

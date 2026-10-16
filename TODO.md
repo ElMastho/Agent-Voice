@@ -1,6 +1,6 @@
 # agent-voice: to-do
 
-Everything listed so far is released in 0.5.3. What's left:
+Everything listed so far is released in 0.6.0. What's left:
 
 ## To check live (built and tested, not yet seen working for real)
 - **Resume after a limit**: Claude Code's `StopFailure` hook firing on a real exhausted limit; "Continue." reaching the desktop-app conversation.

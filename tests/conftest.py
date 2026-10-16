@@ -4,3 +4,11 @@ import os
 import tempfile
 
 os.environ["AGENT_VOICE_HOME"] = tempfile.mkdtemp(prefix="agent-voice-tests-")
+
+
+def pytest_unconfigure(config):
+    # Something holding the exit (a thread, an audio driver): print where every thread is, and leave anyway.
+    import faulthandler
+    import sys
+
+    faulthandler.dump_traceback_later(30, exit=True, file=sys.stderr)

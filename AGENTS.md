@@ -25,6 +25,7 @@ agent_voice/
   config.py     defaults + ~/.agent-voice/{config,state}.json
   server.py     Daemon class (speak queue, auto-listen, push-to-talk, hotkeys) + HTTP handler
   tts.py        Speaker: Piper (or Kokoro) synth thread -> playback thread, sentence by sentence
+  history.py    every prompt and reply in a local SQLite FTS5 file, searched from the notch's History box
   kokoro.py     the natural voice (opt-in): Kokoro via kokoro-onnx, its verified one-time download
   stt.py        Recorder, energy-based voice-activity listener, faster-whisper Transcriber
   lang.py       FR/EN detection (lingua + word-hint heuristic), sentence segmentation
@@ -112,6 +113,8 @@ The daemon and widget run as `pythonw` in the background. **Code changes need a 
 - **Never resize the notch every frame**: resizing a see-through window re-uploads all of it (the jerky opening). The notch's window is a canvas sized once for where an animation is going and trimmed when it settles; the island is drawn at `_vw` x `_vis_h()` inside it, and `visual_rect()` is where it is on screen.
 - **Sounds never go through `sounddevice.play()` outside `tts.py`**: it shares one global stream with the voice, so a cue there would cut the speech off. Cues and chimes use `_play_apart` (a stream of their own), built by `tone_audio` (no harmonics above the note, eased in and out). Never `winsound.Beep`.
 - **Ducking restores what it lowered**: `Ducker` saves the original volumes to `state.json` (`ducked`) before fading, and the next start puts them back.
+- **Tests never touch `~/.agent-voice`**: `tests/conftest.py` points `AGENT_VOICE_HOME` at a temporary folder before anything is imported. Keep it first.
+- **Replies carry `full`** (hooks -> `/speak`): the whole reply when what's read out is only its summary. The preview and the history use it; never speak it.
 - **Barge-in listens only in headphones** (`_barge_ok`): through speakers the mic hears the voice and stops it. It needs 300 ms of sound (`start_blocks=10`) to cut in, and hands what you said to `_handle_heard`, the same path as the reply mic.
 - **Dictated sends go through `Daemon._send_spoken`** (the take-back: a few seconds under the notch, the mic open for "wait" / "cancel that"). Scheduled prompts, resumes and typed replies call `_paste` directly: never hold those.
 - **Window pictures copy the screen** (`winfocus.window_png`, BitBlt with the thread made DPI-aware for the capture): `PrintWindow` gives black for browsers and GPU-drawn apps.

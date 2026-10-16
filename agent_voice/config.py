@@ -125,6 +125,8 @@ DEFAULTS: dict = {
     # Talk over the voice and it stops: "stop" / "no, wait" opens the mic for what you want to say instead, a longer
     # sentence is your reply. In headphones only, unless `speakers` (the mic would hear the voice through them).
     "barge_in": {"enabled": True, "speakers": False},
+    # Every prompt and reply kept in a local, searchable file (~/.agent-voice/history.db) for `days` days.
+    "history": {"enabled": True, "days": 90},
     # Out of quota: once the limit resets, send this to the thread so it picks up where it stopped (auto: without
     # asking; off: only after "resume when it resets" or a click on Resume).
     "resume": {"auto": True, "message": "Continue."},

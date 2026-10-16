@@ -46,6 +46,7 @@ Everything runs **locally on the CPU**: no cloud, no API key, no audio leaving y
 | 🎯 **Focus** | In a call, presenting, or with an app full screen, replies are held (approvals still come through) and a catch-up follows. |
 | 🌇 **Daily recap** | At 18:00 (or *"Hey Claude, daily recap"*): what each thread did today, what's still waiting, your limits and tokens. |
 | 🗣️ **A natural voice** (opt-in) | *Voice: Natural* in the panel switches to [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M): expressive, close to a cloud voice, still offline. *Light* (Piper) stays the default, easier on the battery. |
+| 🔎 **History** | Every prompt and every reply, from every agent, searchable in one box: "which one fixed the login bug last week?" Kept on this PC (90 days). |
 | ⏳ **Take it back** | What you dictate waits 5 seconds under the notch before it's sent: say *"wait"* to fix it, *"cancel that"* to drop it, or keep talking to add to it. |
 | 👀 **"Look at this"** | *"Hey Claude, look at this and tell me why it's red"*: a picture of the window you're looking at goes to your thread, with your question. |
 | 🎧 **Headphones only** (opt-in) | The voice in your headphones; through the laptop's speakers (an open office), chimes and the banner instead. It switches by itself as you plug them in. |
@@ -176,6 +177,10 @@ While a reply is read out, its text hangs under the notch, starting at the sente
 
 Once your reply is transcribed, it drops down under the notch framed in green, the colour of your voice, so it's never mistaken for the agent's text: who it goes to, and whether it was **sent** (auto-send), **typed** into the prompt for you to check, taken as an **answer** to a question or approval, or as a **command**.
 
+<p align="center">
+  <img src="docs/images/take-back.jpg" alt="A dictated message waiting under the notch with a countdown, and Send now, Edit, Cancel" width="640">
+</p>
+
 **Take it back.** What you dictate and send waits 5 seconds under the notch first, with a countdown and *Send now*, *Edit* and *Cancel*. The mic stays open meanwhile: say *"wait"* (or *"attends"*) and it's typed into the conversation without being sent, to fix it there; *"cancel that"* drops it; *"send it"* sends it now; anything else you say is added to the message and the countdown starts again. Scheduled prompts and replies you type aren't held. `take_back.seconds` sets the wait (0: off).
 
 ### Chimes: the reply as a banner
@@ -222,6 +227,7 @@ Right-click the notch → *Float the widget again*: the same black island, round
 ## 💬 Talking to your agents
 
 - **Reply**: after each answer the mic opens for 15 s (`Ctrl+Alt+A` to skip the voice and answer right away). Your reply goes to the window and the conversation it answers, even if it's minimized or another app is in front; once sent, you're returned to where you were. In the **Claude desktop app**, with auto-send on, it's sent **without bringing the app forward**. The text also stays on the clipboard.
+- **History** ([picture](docs/images/history.jpg)): *History* in the panel's Threads header (or the tray's *Search history…*) opens a search box under the notch. Type a few words (*"login bug"*, *"migration codex"*): the best matches across every agent and thread, what you asked and what they answered, and the whole entry beside it, with *Copy* and *Open the thread*. Arrow keys move through the list, Enter opens the thread. Claude Code, Cline, Codex, Gemini CLI and Cursor replies are kept in full (not just their spoken summary), and your Claude Code and Cline prompts too. In a terminal: `agent-voice history login bug`.
 - **Talk over it** (in headphones): you don't have to wait for the voice to finish. Start talking and it stops at once; *"stop"* or *"no, wait"* (*"attends"*, *"arrête"*) opens the mic for what you want to say instead, and a whole sentence is taken as your reply. Through speakers it stays off (the mic would hear the voice itself) unless you set `barge_in.speakers: true`.
 - **Auto-send** (`Ctrl+Alt+H`): your spoken replies are submitted for you.
 - **Push-to-talk** (hold `Ctrl+Alt+Space`): dictate into any app.
@@ -365,6 +371,7 @@ sequenceDiagram
 | `focus` | `enabled: true`, `full_screen: true`, `calls: "hold"` | Hold replies in calls, presentations and full screen apps (`calls: "chimes"`: chimes in calls) |
 | `recap` | `enabled: true`, `at: "18:00"` | The daily recap's time |
 | `shortcuts` | *run the tests*, *commit this*, … | Saved prompts: `{"name you say": "prompt sent"}` |
+| `history` | `enabled: true`, `days: 90` | Every prompt and reply, searchable, in `~/.agent-voice/history.db` |
 | `barge_in` | `enabled: true`, `speakers: false` | Talk over the voice to stop it (in headphones; through speakers only if `speakers`) |
 | `take_back.seconds` | `5` | How long what you dictate waits under the notch before it's sent (0: at once) |
 | `headphones.only` | `false` | The voice only in headphones; chimes and banners on speakers |
@@ -403,6 +410,7 @@ agent-voice new "prompt" [--agent A] [--cwd D]  start a new thread (Claude app, 
 agent-voice apps [on|off|toggle]                read ChatGPT / Copilot / Perplexity desktop notifications
 agent-voice usage on|off                        Claude Code's rate limits in the notch (adds a status line)
 agent-voice recap                               today's recap: threads, what's waiting, limits, tokens
+agent-voice history [words] [--clear]           search every conversation (what you asked, what they answered)
 agent-voice schedule "prompt" --at WHEN [--thread NAME | --new [--agent A] [--cwd D]] [--repeat daily|weekdays]
 agent-voice schedule --list | --cancel ID       what's scheduled
 agent-voice phone on|off|test|new|status        phone notifications (ntfy)
@@ -416,6 +424,7 @@ agent-voice serve                               run in the foreground (debugging
 - **Offline by design**: text-to-speech, transcription, language detection and the wake word run locally. Audio never leaves the machine. agent-voice's own network calls are the model downloads on first use (the natural voice's too, from its GitHub release, checked against pinned SHA-256 sums), the optional release check, the new release's zip when you click *Update*, and, only if you turn them on, phone notifications.
 - **Phone notifications (opt-in, off by default)**: when you turn on *Phone*, notifications go to the ntfy server (`ntfy.sh` unless you set your own) over HTTPS, then to your phone. What leaves is the thread's name, what happened and, by default, its one-line summary (`ntfy.content: "titles"` sends no reply text at all, `"full"` sends the reply). Your audio, prompts, files and transcripts never do. The channel is a long random topic: anyone who has it (the QR code, the link) can read your notifications, so keep it private, and *New link* revokes it. ntfy.sh topics are public by name and messages are kept on the server for a while ([ntfy's docs](https://docs.ntfy.sh/)); for full control, run your own ntfy server and set `ntfy.server` and an access `ntfy.token` (never written to logs). Nothing is sent while it's off, and phones can't send anything back.
 - **Claude's limits**: agent-voice runs Claude Code's own `claude -p /usage` (a local command of the Claude Code you installed; it fetches your usage from Anthropic with your login, like the Usage page) and reads what it saves. agent-voice never reads Claude's credentials. Between readings it reads only the token counts in your local transcripts. `limits.claude_refresh_minutes: 0` turns this off.
+- **History**: kept in a local SQLite file (`~/.agent-voice/history.db`), never sent anywhere, trimmed to `history.days` (90). `agent-voice history --clear` forgets it all, `history.enabled: false` stops keeping it.
 - **"Look at this"**: the picture of your window is saved locally (`~/.agent-voice/shots`, the last 20) and handed to the agent you named, which reads it like any file you give it (and sends it to its model). It's only taken when you ask.
 - **Calls**: detected from Windows' own privacy records of which app uses the mic; no audio is touched.
 - **Local API only**: the service listens on `127.0.0.1` and rejects any request carrying an `Origin` header, a foreign `Host` (DNS rebinding) or a non-JSON body. Web pages can't drive it. The browser extension goes through a native messaging bridge that only its own id can start.

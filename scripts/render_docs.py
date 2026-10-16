@@ -408,6 +408,50 @@ def render_gif() -> None:
                 optimize=True, disposal=2)
 
 
+def render_take_back() -> None:
+    """What you dictated waits a moment under the notch: Send now, Edit, Cancel, or say "wait"."""
+    w, shot, k = notch_shot(status("waiting", thread={"title": "API refactor", "color": "#34D399"}))
+    b = W.Banner()
+    b.present({"id": 3, "kind": "pending", "pending": 1, "until": W.time.time() + 4.2, "title": "API refactor",
+               "color": "#34D399", "session": "b", "text": "Run the migration on staging first, then deploy."},
+              int(w.pw))
+    b.t = 1.0
+    banner = to_pil(b.grab().toImage())
+    w_, h_ = shot.width + int(120 * k), shot.height + banner.height + int(40 * k)
+    img = drop(backdrop(w_, h_, seed=21), shot, (w_ - shot.width) // 2, 0)
+    img = drop(img, banner, (w_ - banner.width) // 2, shot.height + int(8 * k))
+    img.convert("RGB").save(OUT / "take-back.jpg", quality=90, optimize=True)
+
+
+def render_history() -> None:
+    """Every conversation, searchable: the History box under the notch."""
+    w, shot, k = notch_shot(status("idle"))
+    box = W.HistoryBox()
+    box._get = lambda path, tag: None
+    box.resize(max(560, int(w.pw)), 460)
+    box.query.setText("login bug")
+    box._asked = "login bug"
+    CLOCK.now, before = 1_792_000_000.0, CLOCK.now  # a real date: entries from days ago
+    now = W.time.time()
+    rows = [{"id": 9, "at": now - 3 * 86400, "session": "a", "agent": "codex", "title": "Codex", "kind": "reply",
+             "snippet": "Fixed the [login] [bug]: the session token wasn't refreshed after the redirect..."},
+            {"id": 8, "at": now - 3 * 86400 - 300, "session": "a", "agent": "codex", "title": "Codex", "kind": "you",
+             "snippet": "Users get logged out after the OAuth redirect, find the [login] [bug]"},
+            {"id": 5, "at": now - 9 * 86400, "session": "c", "agent": "claude", "title": "Notch redesign",
+             "kind": "reply", "snippet": "The [login] screen no longer flickers; the [bug] was a race in..."}]
+    box._fill(rows)
+    box._present({"id": 9, "at": rows[0]["at"], "session": "a", "agent": "Codex", "title": "Codex", "kind": "reply",
+                  "text": "Fixed the login bug: the session token wasn't refreshed after the OAuth redirect.\n\n"
+                          "- `auth/session.py`: refresh the token in `on_redirect()`\n- a test for the expired "
+                          "token case\n\nAll 214 tests pass."})
+    shot_box = to_pil(box.grab().toImage())
+    CLOCK.now = before
+    w_, h_ = max(shot.width, shot_box.width) + int(120 * k), shot.height + shot_box.height + int(40 * k)
+    img = drop(backdrop(w_, h_, seed=23), shot, (w_ - shot.width) // 2, 0)
+    img = drop(img, shot_box, (w_ - shot_box.width) // 2, shot.height + int(8 * k))
+    img.convert("RGB").save(OUT / "history.jpg", quality=90, optimize=True)
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     QApplication(sys.argv)
@@ -417,6 +461,8 @@ def main() -> None:
     render_banner()
     render_read_along()
     render_you_said()
+    render_take_back()
+    render_history()
     render_companion()
     render_bar()
     render_gif()

@@ -76,6 +76,9 @@ If you say nothing for 15 s, a low beep closes the mic. Nothing is typed.
 ### Answer without waiting: *reply now*
 Press **`Ctrl+Alt+A`** (or the ⏭️ button on the widget while it speaks). The voice stops immediately and the mic opens.
 
+### Find anything you said or heard: *History*
+Click **History** in the panel's Threads header (or the tray's *Search history…*): a search box opens under the notch. Type a few words and the best matches come up, across every agent and every thread, what you asked as well as what they answered; the right side shows the whole entry (code and lists formatted), with *Copy* and *Open the thread*. Up/Down move through the results, Enter opens the thread, Esc closes. Replies are kept whole, not just the summary you heard; your prompts are kept for Claude Code and Cline (the others don't hand them over). Everything stays in `~/.agent-voice/history.db` for 90 days (`history.days`). From a terminal: `agent-voice history migration codex`; `agent-voice history --clear` erases it.
+
 ### Talk over it
 In headphones, the mic listens while the voice speaks: start talking and it stops at once, with whatever was queued after it. Say *"stop"* or *"no, wait"* (*"attends"*, *"arrête"*, *"tais-toi"*) and the mic opens for what you want to say instead; say a whole sentence (*"use the staging database instead"*) and it's your reply, as if you had waited. It takes about a third of a second of speech to cut in, so a cough or a click doesn't. Through the laptop's speakers it's off, since the mic would hear the voice itself; `barge_in.speakers: true` turns it on anyway (with a headset, or a quiet voice), `barge_in.enabled: false` turns it off.
 
@@ -313,6 +316,7 @@ File: `~/.agent-voice/config.json`. Only put the keys you want to change; they'r
 | `focus.enabled` / `full_screen` / `calls` | `true` / `true` / `"hold"` | Hold replies in focus; `calls: "chimes"` for chimes during calls |
 | `recap.enabled` / `at` | `true` / `"18:00"` | The daily recap |
 | `shortcuts` | 6 saved prompts | `{"name": "prompt"}` |
+| `history.enabled` / `days` | `true` / `90` | Every prompt and reply, searchable, kept this many days |
 | `barge_in.enabled` / `speakers` | `true` / `false` | Talk over the voice to stop it; through speakers too if `speakers` |
 | `take_back.seconds` | `5` | What you dictate waits this long before it's sent (0: at once) |
 | `headphones.only` | `false` | The voice only in headphones; chimes and banners through speakers |

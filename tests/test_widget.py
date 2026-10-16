@@ -408,3 +408,28 @@ def test_voice_engine_switch(app, monkeypatch):
     assert posted == [("/engine", {"engine": "kokoro"})] and "120 MB" in w._tooltip("engine:kokoro")
     w._on_status({"phase": "idle", "output": "chime", "threads": []})
     assert "engine:kokoro" not in w._rects()  # no voice to pick in Chimes
+
+
+def test_history_box_lists_and_shows_entries(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    asked = []
+    box = widget.HistoryBox()
+    monkeypatch.setattr(box, "_get", lambda path, tag: asked.append(path))
+    now = widget.time.time()
+    box._fill([{"id": 4, "at": now, "session": "a", "agent": "claude", "title": "Login", "kind": "reply",
+                "snippet": "Fixed the [login] bug"},
+               {"id": 2, "at": now - 60, "session": "a", "agent": "claude", "title": "Login", "kind": "you",
+                "snippet": "fix the login"}])
+    assert box.results.count() == 2 and "Fixed the login bug" in box.results.item(0).text()
+    assert asked == ["/history?id=4"]  # the first one opens on the right
+    box._arrived((("entry", 4), {"id": 4, "at": now, "session": "a", "agent": "claude", "title": "Login",
+                                 "kind": "reply", "text": "**Fixed** the login bug."}))
+    assert "Fixed the login bug." in box.body.toPlainText() and box.open_thread.isEnabled()
+    box._open_thread()
+    assert posted == [("/open_thread", {"session": "a"})]
+    box._asked = "zzz"
+    box._fill([])
+    assert "Nothing found" in box.body.toPlainText()
+    w = _widget({"phase": "idle", "threads": []})
+    assert "history" in w._rects() and "every conversation" in w._tooltip("history")

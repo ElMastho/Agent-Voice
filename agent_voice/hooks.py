@@ -379,6 +379,7 @@ def hook_claude(raw: str) -> None:
         from agent_voice import winfocus
 
         client.request("/prompt", {"hwnd": winfocus.foreground(), "session": str(data.get("session_id", "")),
+                                   "prompt": str(data.get("prompt") or "")[:20000],
                                    "source": "claude", "cwd": str(data.get("cwd") or "")}, timeout=1.0)
         if summary_enabled():
             # Claude Code adds this to the model's context for the turn.
@@ -438,11 +439,13 @@ def hook_claude(raw: str) -> None:
                 preface=strip_summary(text) if _config().get("speak_progress", True) else "",
             )
             return
-    text = _spoken(text) if final else strip_summary(text)
+    full = strip_summary(text)  # kept in the history and the preview, whatever is read out
+    text = _spoken(text) if final else full
     # On Stop, call even with nothing new to say: it marks the end of the turn (arms auto-listen).
     if text.strip() or final:
         # The session id lets the daemon type your spoken reply into this conversation (desktop app).
-        client.speak(text, source="claude", final=final, session=str(data.get("session_id", "")), result=result)
+        client.speak(text, source="claude", final=final, session=str(data.get("session_id", "")), result=result,
+                     full=full)
 
 
 def notify_question(session: str, agent: str, question: str, options: list[str], header: str = "",
@@ -469,7 +472,9 @@ def hook_cline(raw: str) -> dict:
     if name == "UserPromptSubmit":
         from agent_voice import winfocus
 
-        client.request("/prompt", {"hwnd": winfocus.foreground(), "session": task, "source": "cline"}, timeout=1.0)
+        prompt = str((data.get("userPromptSubmit") or {}).get("prompt") or "")[:20000]
+        client.request("/prompt", {"hwnd": winfocus.foreground(), "session": task, "source": "cline",
+                                   "prompt": prompt}, timeout=1.0)
         return {"contextModification": SUMMARY_INSTRUCTION} if summary_enabled() else {}
     if name == "Notification":
         note = data.get("notification") or {}
@@ -491,7 +496,8 @@ def hook_cline(raw: str) -> dict:
         elif question.strip():
             client.speak(question, source="cline", final=True, session=task)
     elif tool in CLINE_SPOKEN:
-        client.speak(_spoken(str(params.get(CLINE_SPOKEN[tool], ""))), source="cline", final=True, session=task)
+        said = str(params.get(CLINE_SPOKEN[tool], ""))
+        client.speak(_spoken(said), source="cline", final=True, session=task, full=strip_summary(said))
     return {}
 
 
@@ -528,9 +534,9 @@ def hook_payload(agent: str, raw: str) -> None:
             return
     text = extract_text(payload)
     if text.strip():
-        text = _spoken(text)
         # The terminal the agent runs in: messages you send it by name ("tell Codex to...") are typed there.
-        client.speak(text, source=agent, final=True, session=session, hwnd=winfocus.console_window())
+        client.speak(_spoken(text), source=agent, final=True, session=session, hwnd=winfocus.console_window(),
+                     full=strip_summary(text))
 
 
 def statusline(raw: str) -> str:

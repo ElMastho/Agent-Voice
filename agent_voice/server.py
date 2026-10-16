@@ -19,8 +19,8 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from agent_voice import (__version__, calls, claudeapp, install, keys, launch, ntfy, outputs, quota, schedule,
-                         textclean, updater, usage, winfocus)
+from agent_voice import (__version__, calls, claudeapp, history, install, keys, launch, ntfy, outputs, quota,
+                         schedule, textclean, updater, usage, winfocus)
 from agent_voice.config import HOME, LOG_DIR, LOOPBACK, load_config, load_state, save_state
 from agent_voice.hooks import strip_summary
 from agent_voice.textclean import result_label
@@ -558,6 +558,9 @@ class Daemon:
         self._output = outputs.OutputWatch()
         self._speaker_override = False
         # Talking over the voice (barge-in): the mic listens while it speaks, in headphones (no echo to hear).
+        # Every prompt and reply, searchable (a local SQLite file); None when `history.enabled` is off.
+        hist = config.get("history", {})
+        self.history_db = history.History(days=float(hist.get("days", 90))) if hist.get("enabled", True) else None
         self._barge_cancel = threading.Event()
         self._barging = False  # listening for you while it speaks
         self._barged = False  # ... and you spoke
@@ -1828,11 +1831,13 @@ class Daemon:
         session: str = "",
         hwnd: int = 0,
         result: dict | None = None,
+        full: str = "",
     ) -> int:
         """Queue text; `final` marks the end of an agent's turn and arms auto-listen.
 
         `hwnd`: the agent's window when its hook knows it (a terminal), so replies and messages can reach it.
         `result`: what the turn changed ({"files": 3, "tests": "passed"}), shown in the notch.
+        `full`: the whole reply when `text` is only its summary (for the preview and the history).
         """
         if session and self.question and self.question["session"] == session and not self.question.get("id"):
             self.question = None  # the agent moved on: the question was answered
@@ -1846,7 +1851,7 @@ class Daemon:
             if session and self._voice_session and session != self._voice_session and not interrupt and (
                     self.speaker.busy or self._listen_armed or self._listening):
                 # Another thread is talking (or waiting for your reply): this one waits its turn.
-                self._queue.append((text, lang, source, interrupt, final, voice, session, 0, result))
+                self._queue.append((text, lang, source, interrupt, final, voice, session, 0, result, full))
                 log.info("queued speech from another thread (%d waiting)", len(self._queue))
                 return 0
         if final and session and textclean.limit_reset(text) is not None:
@@ -1855,7 +1860,7 @@ class Daemon:
             return 0
         if session and text.strip():
             self._not_limited(session)
-        self._record_turn(session, source, text, lang, voice, final)
+        self._record_turn(session, source, text, lang, voice, final, full)
         if final:
             self.activity.pop(session, None)  # the agent is done working
             self._finished(session, source, text, result)
@@ -1889,13 +1894,16 @@ class Daemon:
             self._listen_armed = True
         return n
 
-    def _record_turn(self, session: str, source: str, text: str, lang, voice, final: bool) -> None:
-        """Collect what a conversation says in one turn (progress, then the end), for replay and copy."""
+    def _record_turn(self, session: str, source: str, text: str, lang, voice, final: bool, full: str = "") -> None:
+        """Collect what a conversation says in one turn (progress, then the end), for replay and copy; and all of
+        it (`full`: the reply behind a summary) for the preview and the history."""
         turn = self._turns.get(session)
-        if turn is None or (turn["done"] and text.strip()):
-            turn = {"texts": [], "done": False, "lang": lang, "voice": voice, "source": source}
+        if turn is None or (turn["done"] and (text.strip() or full.strip())):
+            turn = {"texts": [], "full": [], "done": False, "lang": lang, "voice": voice, "source": source}
             self._turns[session] = turn
             self._turns = dict(list(self._turns.items())[-20:])
+        if full.strip() or text.strip():
+            turn["full"].append((full or text).strip())
         if text.strip():
             turn["texts"].append(text.strip())
             turn["lang"], turn["voice"] = lang, voice
@@ -1914,6 +1922,12 @@ class Daemon:
         full = textclean.clean(strip_summary(self._turn_text(session) or summary or ""))
         self._push("done", self._title(session, source), said or full, full=full)
         self._log_turn(session, source, said or (textclean.clean(summary) if summary else ""))
+        whole = self._turn_full(session)
+        if self.history_db is not None and whole:
+            try:
+                self.history_db.add("reply", whole, session, source, self._title(session, source))
+            except Exception:
+                log.exception("history: reply not kept")
         if result and (result.get("files") or result.get("tests")):
             title = self._title(session, source)
             self.last_result = {"session": session, "title": title, "color": thread_color(session or title),
@@ -1928,6 +1942,11 @@ class Daemon:
 
     def _turn_text(self, session: str) -> str:
         return "\n\n".join((self._turns.get(session) or {}).get("texts") or [])
+
+    def _turn_full(self, session: str) -> str:
+        """The turn as the agent wrote it (not only what was read out), without its summary line."""
+        turn = self._turns.get(session) or {}
+        return strip_summary("\n\n".join(turn.get("full") or turn.get("texts") or [])).strip()
 
     def _pitch(self, session: str) -> float:
         """This conversation's voice: the first one natural, the next ones a little lower or higher."""
@@ -2149,10 +2168,12 @@ class Daemon:
         self.state["history"] = self.history
         save_state(self.state)
 
-    def prompt_submitted(self, hwnd: int, session: str = "", source: str = "", title: str = "", cwd: str = "") -> None:
+    def prompt_submitted(self, hwnd: int, session: str = "", source: str = "", title: str = "", cwd: str = "",
+                         prompt: str = "") -> None:
         """The user sent a new prompt: remember its window (and conversation), and stop talking/listening.
 
-        `title`: the conversation's name when the caller knows it (a browser tab's title).
+        `title`: the conversation's name when the caller knows it (a browser tab's title). `prompt`: what you wrote,
+        for the history.
         """
         if session and title:
             self._file_titles[session] = title
@@ -2183,6 +2204,11 @@ class Daemon:
                 self._turns[session]["done"] = True  # what comes next is a new turn
             now = time.time()
             self.activity[session] = {"source": source, "started": now, "last": now, "steps": 0, "label": "Thinking"}
+            if prompt.strip() and self.history_db is not None:
+                try:
+                    self.history_db.add("you", prompt, session, source, self._title(session, source))
+                except Exception:
+                    log.exception("history: prompt not kept")
         self.stop()
 
     def _hwnd_for(self, session: str) -> int:
@@ -2683,7 +2709,7 @@ class Daemon:
         title = self._title(session, info["source"])
         day = self._day()["threads"].get(session) or {}
         return {"session": session, "title": title, "color": thread_color(session or title),
-                "text": strip_summary(self._turn_text(session))[-12000:], "result": turn.get("result"),
+                "text": self._turn_full(session)[-12000:], "result": turn.get("result"),
                 "ago": int(time.time() - info["last"]), "turns": day.get("turns", 0),
                 "tokens": (self.usage.get(session) or {}).get("tokens") or day.get("tokens", 0),
                 "context": (self.usage.get(session) or {}).get("context")}
@@ -3263,6 +3289,14 @@ def _handler(daemon: Daemon):
                     if tag != wait or time.time() >= end:
                         return self._json(200, {**st, "tag": tag})
                     time.sleep(0.25)
+            if url.path == "/history":  # search every conversation (?q=), or one entry in full (?id=)
+                query = parse_qs(url.query)
+                if daemon.history_db is None:
+                    return self._json(200, {"results": [], "off": True})
+                if "id" in query:
+                    return self._json(200, daemon.history_db.get(_int(query["id"][0])))
+                limit = min(100, max(1, _int(query.get("limit", ["30"])[0])))
+                return self._json(200, {"results": daemon.history_db.search(query.get("q", [""])[0], limit)})
             if url.path == "/thread":  # a thread's last reply in full, for the preview on hover
                 return self._json(200, daemon.thread_detail(parse_qs(url.query).get("session", [""])[0]))
             self._json(404, {"error": "not found"})
@@ -3283,6 +3317,7 @@ def _handler(daemon: Daemon):
                     str(data.get("session") or ""),
                     _int(data.get("hwnd")),
                     data.get("result") if isinstance(data.get("result"), dict) else None,
+                    str(data.get("full") or "")[:100000],
                 )
                 daemon.jobs.put(lambda: daemon.speak(*args))
                 return self._json(200, {"queued": True, "muted": daemon.muted})
@@ -3401,7 +3436,7 @@ def _handler(daemon: Daemon):
             if self.path == "/prompt":
                 daemon.prompt_submitted(_int(data.get("hwnd")), str(data.get("session") or ""),
                                         str(data.get("source") or ""), str(data.get("title") or "")[:80],
-                                        str(data.get("cwd") or ""))
+                                        str(data.get("cwd") or ""), str(data.get("prompt") or "")[:20000])
                 return self._json(200, {"ok": True})
             if self.path == "/activity":
                 if data.get("done"):

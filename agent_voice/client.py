@@ -143,9 +143,13 @@ def speak(
     session: str = "",
     hwnd: int = 0,
     result: dict | None = None,
+    full: str = "",
 ) -> dict | None:
+    """`full`: the whole reply when `text` is only what's read out of it (its summary), for the history."""
     payload = {"text": text, "source": source, "lang": lang, "interrupt": interrupt, "final": final, "voice": voice,
                "session": session, "hwnd": hwnd, "result": result}
+    if full and full.strip() != text.strip():
+        payload["full"] = full[:100000]
     result = request("/speak", payload)
     if result is None and autostart and start_detached():
         result = request("/speak", payload)

@@ -932,6 +932,205 @@ class ReplyBox(QWidget):
         super().changeEvent(ev)
 
 
+class _Fetched(QObject):
+    """Answers fetched off the UI thread, delivered on it."""
+
+    done = Signal(object)
+
+
+def _when(at: float) -> str:
+    """'14:20' today, 'Mon 14:20' this week, '12 Oct' before."""
+    from datetime import datetime
+
+    then, now = datetime.fromtimestamp(at), datetime.fromtimestamp(time.time())
+    if then.date() == now.date():
+        return then.strftime("%H:%M")
+    return then.strftime("%a %H:%M" if (now - then).days < 6 else "%d %b").lstrip("0")
+
+
+class HistoryBox(QWidget):
+    """Search every conversation: what you asked and what each agent answered, across all of them. Type to search
+    (every word, as a prefix); the list shows the best matches, the right side the whole entry. Esc closes.
+
+    Like the reply box, it takes the keyboard (you type in it) and closes when you click elsewhere.
+    """
+
+    def __init__(self):
+        super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_MacAlwaysShowToolWindow)
+        from PySide6.QtWidgets import QListWidget
+
+        self.entry: dict = {}
+        self._asked = ""
+        self._fetched = _Fetched()
+        self._fetched.done.connect(self._arrived)
+        self._timer = QTimer(self, singleShot=True, interval=220, timeout=self._search)
+        box = QFrame(self)
+        box.setObjectName("box")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(16, 10, 16, 12)
+        layout.setSpacing(8)
+        self.title = QLabel("History · every conversation, on this PC")
+        self.query = QLineEdit()
+        self.query.setPlaceholderText("Search what you asked and what they answered (login bug, migration, Codex...)")
+        self.query.textChanged.connect(lambda _text: self._timer.start())
+        self.query.installEventFilter(self)
+        self.results = QListWidget()
+        self.results.setWordWrap(True)
+        self.results.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # entries wrap to the list's width
+        self.results.setResizeMode(QListWidget.Adjust)
+        self.results.currentRowChanged.connect(self._pick)
+        self.head = QLabel()
+        self.body = QTextBrowser()
+        self.body.setOpenLinks(False)
+        self.body.document().setDefaultStyleSheet(
+            "code, pre { font-family: Consolas, Menlo, monospace; background-color: #1E1E24; } a { color: #8B7CFF; }")
+        self.copy = QPushButton(f"{ICONS['copy']}  Copy")
+        self.copy.clicked.connect(self._copy)
+        self.open_thread = QPushButton(f"{ICONS['open']}  Open the thread")
+        self.open_thread.clicked.connect(self._open_thread)
+        for button in (self.copy, self.open_thread):
+            button.setObjectName("act")
+            button.setCursor(Qt.PointingHandCursor)
+        right = QWidget()
+        side = QVBoxLayout(right)
+        side.setContentsMargins(0, 0, 0, 0)
+        side.addWidget(self.head)
+        side.addWidget(self.body, 1)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(self.copy)
+        buttons.addWidget(self.open_thread)
+        side.addLayout(buttons)
+        split = QHBoxLayout()
+        split.addWidget(self.results, 4)
+        split.addWidget(right, 5)
+        for w in (self.title, self.query):
+            layout.addWidget(w)
+        layout.addLayout(split, 1)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(box)
+        small, text = _font(FONT_TEXT, 8).pointSize(), _font(FONT_TEXT, 9).pointSize()
+        self.setStyleSheet(
+            "#box{background:#000;border:1.5px solid #8B7CFF;border-radius:18px;}"
+            f"QLabel{{color:rgba(255,255,255,150);font-size:{small}pt;font-family:'{FONT_TEXT}';}}"
+            f"QLineEdit{{background:rgba(255,255,255,14);border:none;border-radius:8px;padding:5px 10px;color:#fff;"
+            f"font-size:{text}pt;font-family:'{FONT_TEXT}';selection-background-color:#8B7CFF;}}"
+            f"QListWidget{{background:transparent;border:none;color:rgba(255,255,255,210);font-size:{small}pt;"
+            f"font-family:'{FONT_TEXT}';outline:none;}}"
+            "QListWidget::item{padding:6px 8px;border-radius:8px;margin:1px 0;}"
+            "QListWidget::item:selected{background:rgba(139,124,255,70);color:#fff;}"
+            "QListWidget::item:hover{background:rgba(255,255,255,18);}"
+            f"QTextBrowser{{background:transparent;border:none;color:rgba(255,255,255,225);font-size:{text}pt;"
+            f"font-family:'{FONT_TEXT}';}}"
+            f"QPushButton#act{{background:rgba(255,255,255,18);border:none;border-radius:10px;padding:4px 12px;"
+            f"color:rgba(255,255,255,200);font-size:{small}pt;font-family:'{ICON_FONT}','{FONT_TEXT}';}}"
+            "QPushButton#act:hover{background:rgba(255,255,255,40);}"
+            "QScrollBar:vertical{width:6px;background:transparent;}"
+            "QScrollBar::handle:vertical{background:rgba(255,255,255,50);border-radius:3px;min-height:30px;}"
+            "QScrollBar::add-line, QScrollBar::sub-line{height:0;}")
+
+    def open(self, anchor: QRectF, width: int) -> None:
+        self.resize(max(560, width), 460)
+        geo = QApplication.primaryScreen().geometry()
+        self.move(int(anchor.center().x() - self.width() / 2), int(max(geo.top() + 4, anchor.bottom() + 8)))
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.query.setFocus()
+        self.query.selectAll()
+        self._search()
+
+    def _search(self) -> None:
+        from urllib.parse import quote
+
+        asked = self.query.text().strip()
+        self._asked = asked
+        self._get(f"/history?q={quote(asked)}&limit=40", ("list", asked))
+
+    def _get(self, path: str, tag: tuple) -> None:
+        def fetch():
+            try:
+                self._fetched.done.emit((tag, client.request(path, timeout=3.0)))
+            except RuntimeError:  # closed meanwhile
+                pass
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _arrived(self, answer) -> None:
+        (kind, *rest), data = answer
+        if kind == "list":
+            if rest[0] != self._asked:
+                return  # an older search: you typed on since
+            self._fill((data or {}).get("results") or [], off=bool((data or {}).get("off")), offline=data is None)
+        elif kind == "entry" and data and data.get("id") == rest[0]:
+            self._present(data)
+
+    def _fill(self, rows: list[dict], off: bool = False, offline: bool = False) -> None:
+        from PySide6.QtWidgets import QListWidgetItem
+
+        self.results.clear()
+        self.rows = rows
+        for row in rows:
+            who = "You" if row["kind"] == "you" else (row.get("title") or row.get("agent") or "Agent")
+            where = f" → {row['title']}" if row["kind"] == "you" and row.get("title") else ""
+            snippet = row.get("snippet", "").replace("[", "").replace("]", "")
+            QListWidgetItem(f"{who}{where} · {_when(row['at'])}\n{snippet}", self.results)
+        if rows:
+            self.results.setCurrentRow(0)
+            return
+        self.entry = {}
+        self.head.setText("")
+        self.body.setMarkdown("_agent-voice isn't running._" if offline else
+                              "_History is off (`history.enabled` in the config)._" if off else
+                              "_Nothing found._" if self._asked else "_Nothing yet: your conversations show up here._")
+
+    def _pick(self, row: int) -> None:
+        rows = getattr(self, "rows", [])
+        if 0 <= row < len(rows):
+            self._get(f"/history?id={rows[row]['id']}", ("entry", rows[row]["id"]))
+
+    def _present(self, entry: dict) -> None:
+        self.entry = entry
+        who = "You asked" if entry["kind"] == "you" else f"{entry.get('agent') or 'The agent'} answered"
+        self.head.setText(f"{who} · {entry.get('title') or ''} · {_when(entry['at'])}")
+        self.body.setMarkdown(entry.get("text") or "")
+        self.body.verticalScrollBar().setValue(0)
+        self.open_thread.setEnabled(bool(entry.get("session")))
+
+    def _copy(self) -> None:
+        if self.entry:
+            QApplication.clipboard().setText(self.entry.get("text", ""))
+            self.copy.setText(f"{ICONS['check']}  Copied")
+            QTimer.singleShot(1200, lambda: self.copy.setText(f"{ICONS['copy']}  Copy"))
+
+    def _open_thread(self) -> None:
+        if self.entry.get("session"):
+            self.hide()
+            _post("/open_thread", {"session": self.entry["session"]})
+
+    def eventFilter(self, obj, ev):
+        if obj is self.query and ev.type() == QEvent.KeyPress:
+            if ev.key() == Qt.Key_Escape:
+                self.hide()
+                return True
+            if ev.key() in (Qt.Key_Down, Qt.Key_Up) and self.results.count():
+                step = 1 if ev.key() == Qt.Key_Down else -1
+                self.results.setCurrentRow(max(0, min(self.results.count() - 1, self.results.currentRow() + step)))
+                return True
+            if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self._open_thread()
+                return True
+        return super().eventFilter(obj, ev)
+
+    def changeEvent(self, ev):
+        if ev.type() == QEvent.ActivationChange and not self.isActiveWindow() and self.isVisible():
+            self.hide()  # clicked elsewhere: out of the way
+        super().changeEvent(ev)
+
+
 class VoiceWidget(QWidget):
     def __init__(self):
         super().__init__(
@@ -962,6 +1161,7 @@ class VoiceWidget(QWidget):
         self.notch = False
         self.banner = Banner()
         self.reply_box = ReplyBox()
+        self.history_box = HistoryBox()
         self.preview = Preview()
         self._preview_for = ""  # the thread row the preview is (or is about to be) for
         self._preview_timer = QTimer(self)
@@ -1569,6 +1769,7 @@ class VoiceWidget(QWidget):
                 r[f"hist:{i}"] = self._history_row(i)
             r.update(self._agent_rects())
             r["newthread"] = self._new_rect()
+            r["history"] = self._history_rect()
             on = self._limit_on_rect()
             if on:
                 r["limits:on"] = on
@@ -2335,6 +2536,10 @@ class VoiceWidget(QWidget):
     def _new_rect(self) -> QRectF:
         return QRectF(self.cw - 14 - 52, self._threads_y() + 1, 52, 15)
 
+    def _history_rect(self) -> QRectF:
+        new = self._new_rect()
+        return QRectF(new.x() - 8 - 62, new.y(), 62, new.height())
+
     def _paint_threads(self, p: QPainter, progress: float) -> None:
         """Recent conversations with what each is doing; click one to open it. "+ New" starts another."""
         threads = self._threads()
@@ -2349,9 +2554,10 @@ class VoiceWidget(QWidget):
         p.setFont(self.f_hint)
         p.setPen(QColor(226, 232, 240, 105))
         queued = int(self.st.get("queued") or 0)
-        new = self._new_rect()
-        p.drawText(QRectF(14, self._threads_y(), new.x() - 22, 16), Qt.AlignRight | Qt.AlignVCenter,
+        new, past = self._new_rect(), self._history_rect()
+        p.drawText(QRectF(14, self._threads_y(), past.x() - 22, 16), Qt.AlignRight | Qt.AlignVCenter,
                    f"{queued} waiting to speak" if queued else "click to open" if threads else "none yet")
+        self._pill(p, past, "History", QColor(139, 124, 255, int(40 + 70 * self.hover_t.get("history", 0.0))))
         self._pill(p, new, "+ New", self._go_button("newthread"))
         labels = {"speaking": "speaking", "listening": "listening", "queued": "next up",
                   "question": "asks you", "permission": "needs approval", "working": "working",
@@ -2832,6 +3038,8 @@ class VoiceWidget(QWidget):
             return "Collapse" if self.expanded else "All actions"
         if key == "tuck":
             return "Tuck away until something new happens"
+        if key == "history":
+            return "Search every conversation: what you asked and what each agent answered (kept on this PC)"
         if key == "newthread":
             return f"Start a new thread: type or say its first prompt ({_hotkey_label(self.hotkeys.get('new_thread', ''))})"
         if key == "guide":
@@ -2956,6 +3164,8 @@ class VoiceWidget(QWidget):
             self.toggle_expanded()
         elif key == "tuck":
             self.tuck()
+        elif key == "history":
+            self.open_history()
         elif key == "newthread":
             self.open_new_thread()
         elif key.startswith("pill:"):
@@ -3142,6 +3352,10 @@ class VoiceWidget(QWidget):
         """Start a new thread: the box under the notch, with where it can run."""
         self.reply_box.open_new(list(self.st.get("new_targets") or []), self.st.get("new_default") or {},
                                 QRectF(self.visual_rect()), int(self.pw))
+
+    def open_history(self) -> None:
+        """Search every conversation, in a box under the notch."""
+        self.history_box.open(QRectF(self.visual_rect()), int(self.pw))
 
     def open_reply(self, item: dict) -> None:
         """Type a reply to a conversation (from its banner or its thread row)."""
@@ -3342,6 +3556,7 @@ class Tray(QSystemTrayIcon):
         add("Notch (top of the screen)", w.toggle_notch, checked=w.notch)
         m.addSeparator()
         add("New thread…", w.open_new_thread, online, key=hk.get("new_thread", ""))
+        add("Search history…", w.open_history, online)
         add("Reply now", lambda: _post("/reply"), online, key=hk.get("reply", ""))
         add("Stop", lambda: _post("/stop"), online, key=hk.get("stop", ""))
         add("Read selection", lambda: _post("/read"), online, key=hk.get("read_selection", ""))

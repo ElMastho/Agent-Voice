@@ -136,6 +136,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("agents", nargs="*", default=["all"])
 
     sub.add_parser("recap", help="today's recap: what each thread did, what's waiting, limits, tokens")
+    p = sub.add_parser("history", help="search every conversation (what you asked, what they answered)")
+    p.add_argument("words", nargs="*", help="what to look for (nothing: the latest)")
+    p.add_argument("--limit", type=int, default=15)
+    p.add_argument("--clear", action="store_true", help="forget the whole history")
     p = sub.add_parser("usage", help="show Claude Code's rate limits in the notch (adds a status line)")
     p.add_argument("mode", nargs="?", default="on", choices=["on", "off"])
 
@@ -283,6 +287,8 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:
                 print(f"{name}: failed: {exc}")
         return 0
+    if args.cmd == "history":
+        return _history(args)
     if args.cmd == "recap":
         reply = client.request("/recap", {"speak": False})
         print(reply["text"] if reply else "agent-voice isn't running (agent-voice start)")
@@ -314,6 +320,27 @@ def main(argv: list[str] | None = None) -> int:
         print("done")
         return 0
     return 1
+
+
+def _history(args) -> int:
+    """Read straight from the file: it works with the service stopped too."""
+    import time
+
+    from agent_voice.history import History
+
+    h = History()
+    if args.clear:
+        h.clear()
+        print("history cleared")
+        return 0
+    rows = h.search(" ".join(args.words), args.limit)
+    if not rows:
+        print("nothing found" if args.words else "nothing yet")
+    for row in rows:
+        who = "you" if row["kind"] == "you" else row.get("agent") or "agent"
+        stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(row["at"]))
+        print(f"{stamp}  {who:<8} {row.get('title') or '':<24.24} {row['snippet']}")
+    return 0
 
 
 # On/off commands: (endpoint, the field it answers with, what it's called, how "off" reads).

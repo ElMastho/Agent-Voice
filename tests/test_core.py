@@ -309,10 +309,11 @@ class FakeSpeaker:
 
 
 @pytest.fixture
-def daemon(monkeypatch):
+def daemon(monkeypatch, tmp_path):
     from agent_voice import config, server
 
     monkeypatch.setattr(server, "Speaker", FakeSpeaker)
+    monkeypatch.setattr(server.history, "PATH", tmp_path / "history.db")  # never your real history
     monkeypatch.setattr(server, "load_state", lambda: {})
     monkeypatch.setattr(server, "save_state", lambda state: None)
     monkeypatch.setattr(server.install, "agent_states", lambda: {})
@@ -1547,3 +1548,26 @@ def test_talking_over_the_voice_stops_it(daemon, monkeypatch):
     monkeypatch.setattr(stt, "listen_for_speech", lambda *a, **k: None)  # the voice finished first
     daemon._barge_once()
     assert len(handled) == 1 and len(replies) == 1
+
+
+def test_history_keeps_and_finds_every_conversation(daemon, tmp_path):
+    from agent_voice import history
+
+    h = history.History(tmp_path / "h.db", days=1)
+    h.add("you", "Corrige le bug de la journée de connexion", "a", "claude", "Login", at=1000.0)
+    h.add("reply", "Fixed the login bug: the token wasn't refreshed.", "a", "claude", "Login", at=2000.0)
+    h.add("reply", "Deployed the API.", "b", "codex", "API", at=3000.0)
+    found = h.search("login tok")  # every word, as a prefix
+    assert [r["kind"] for r in found] == ["reply"] and "[token]" in found[0]["snippet"]
+    assert h.search("journee")[0]["kind"] == "you"  # accents don't matter
+    assert [r["title"] for r in h.search("")] == ["API", "Login", "Login"]  # the latest first
+    assert h.get(found[0]["id"])["text"].startswith("Fixed the login bug")
+    h.add("reply", "Much later.", at=200000.0)  # a day later: the old ones go
+    assert len(h.search("")) == 1
+    daemon.prompt_submitted(0, "s", "claude", prompt="Run the tests please")
+    daemon.speak("Voice summary: tests pass.", source="claude", final=True, session="s",
+                 full="All 42 tests pass after the fix.\n\nVoice summary: tests pass.")
+    kinds = {r["kind"]: r for r in daemon.history_db.search("")}
+    assert kinds["you"]["snippet"] == "Run the tests please"
+    assert daemon.history_db.get(kinds["reply"]["id"])["text"] == "All 42 tests pass after the fix."  # all of it
+    assert daemon.thread_detail("s")["text"] == "All 42 tests pass after the fix."

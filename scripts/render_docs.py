@@ -80,6 +80,7 @@ def rounded_mask(size, radius) -> Image.Image:
 
 def make_widget(st: dict | None, expanded: bool = False, notch: bool = False) -> W.VoiceWidget:
     w = W.VoiceWidget()
+    w.poller.stop()
     w.poller.status.disconnect()
     # The mode is set here, whatever mode the widget on this machine was left in.
     w.notch, w.compact = notch, False
@@ -452,6 +453,78 @@ def render_history() -> None:
     img.convert("RGB").save(OUT / "history.jpg", quality=90, optimize=True)
 
 
+def render_widgets() -> None:
+    """Utils on the right (Pomodoro, timers, to-do, notes...) and the Companion on the left (what's playing, today's
+    meetings) beside the open panel; a Pomodoro, a timer and a meeting on the notch's second line."""
+    CLOCK.now, before = 1_792_000_000.0, CLOCK.now  # a real date: reminders today and on Monday
+    now = W.time.time()
+    box = {"timers": [{"id": 1, "label": "Tea", "total": 300, "end": now + 134, "left": 0.0}],
+           "stopwatch": {"start": 0.0, "elapsed": 0.0},
+           "todos": [{"id": 3, "text": "Review the Linux PR", "done": False, "source": "you", "at": 0},
+                     {"id": 4, "text": "Run the migration on staging", "done": False, "source": "claude", "at": 0,
+                      "session": "c"},
+                     {"id": 5, "text": "Call the bank", "done": False, "source": "you", "at": 0},
+                     {"id": 6, "text": "Release 0.6.0", "done": True, "source": "you", "at": 0}],
+           "reminders": [{"id": 7, "text": "Send the invoice", "at": now + 3 * 86400}],
+           "notes": [{"id": 9, "text": "The flicker only happens with two monitors", "at": 0},
+                     {"id": 10, "text": "Paul prefers Tuesdays for the review", "at": 0}],
+           "pomodoro": {"phase": "focus", "end": now + 892, "left": 0.0, "length": 1500, "round": 1, "today": 3,
+                        "day": W._today(now), "every": 4, "focus_length": 1500}}
+    def at(minutes):
+        return now - now % 300 + minutes * 60  # on the 5 minutes, like meetings
+
+    agenda = {"events": [{"title": "Design review", "location": "Room 3", "start": at(-15), "end": at(15),
+                          "all_day": False},
+                         {"title": "1:1 with Paul", "location": "", "start": at(45), "end": at(75), "all_day": False},
+                         {"title": "Release call", "location": "Teams", "start": at(150), "end": at(180),
+                          "all_day": False}], "sources": 1, "error": ""}
+    media = {"app": "Spotify", "title": "Get Lucky", "artist": "Daft Punk", "playing": True}
+    st = status("idle", last_heard=HISTORY[0]["text"], last_heard_lang="en", history=HISTORY, agents=AGENTS,
+                threads=THREADS, needs=NEEDS, limits=LIMITS, summary=True, day=DAY, schedules=SCHEDULES,
+                companion=box, media=media, agenda=agenda)
+    w, shot, k = notch_shot(st, expanded=True)
+    w.side_open.update(utils=True, companion=True)
+    w.side_widgets["utils"] = ["pomodoro", "timer", "todo", "notes", "clipboard"]
+    w.clips = ["git push origin main", "https://github.com/ElMastho/Agent-Voice/pull/42"]
+    w.hover, w.hover_t["tab:utils"] = "tab:utils", 1.0
+    w.update()
+    shot = frame(w)
+    panels = {}
+    for name, side in w.sides.items():
+        side._fit()
+        side.t = 1.0
+        panels[name] = to_pil(side.grab().toImage())
+    pad = int(40 * k)
+    tab = int((W.TAB_W + 2) * k)
+    left, right = panels["companion"], panels["utils"]
+    w_ = left.width + tab + shot.width + tab + right.width + 2 * pad
+    h_ = max(shot.height, left.height, right.height) + pad
+    img = drop(backdrop(w_, h_, seed=27), shot, pad + left.width + tab, 0)
+    mid = int(w._tab_rect("utils").center().y() * k)
+    canvas_left = pad + left.width + tab
+    island_left = canvas_left + int((w.width() - w.nw) / 2 * k)
+    island_right = canvas_left + int((w.width() + w.nw) / 2 * k)
+    img = drop(img, left, island_left - tab - left.width, max(int(8 * k), mid - left.height // 2))
+    img = drop(img, right, island_right + tab, max(int(8 * k), mid - right.height // 2))
+    gap = int(10 * k)
+    # At rest: the notch's second line with the running clocks.
+    w2, rest, _ = notch_shot(st)
+    timer = W.Banner()
+    timer.present({"id": 9, "kind": "timer", "tag": "Timer done", "text": "Tea", "at": now, "title": "",
+                   "snooze": {"kind": "timer", "seconds": 300, "label": "Tea"}}, int(W.NOTCH_W - 2 * W.NOTCH_EAR))
+    timer.t = 1.0
+    ended = to_pil(timer.grab().toImage())
+    below = int(20 * k)
+    tile_w = rest.width + ended.width + 3 * pad
+    tile = drop(backdrop(tile_w, max(rest.height, ended.height + int(30 * k)) + below, seed=28), rest, pad, 0)
+    tile = drop(tile, ended, rest.width + 2 * pad, int(30 * k))
+    out = Image.new("RGB", (max(img.width, tile.width), img.height + tile.height + gap), (13, 17, 23))
+    out.paste(img.convert("RGB"), (0, 0))
+    out.paste(tile.convert("RGB"), (0, img.height + gap))
+    out.save(OUT / "widgets.jpg", quality=90, optimize=True)
+    CLOCK.now = before
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     QApplication(sys.argv)
@@ -464,6 +537,7 @@ def main() -> None:
     render_take_back()
     render_history()
     render_companion()
+    render_widgets()
     render_bar()
     render_gif()
     for f in sorted(OUT.iterdir()):

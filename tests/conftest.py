@@ -8,6 +8,16 @@ os.environ["AGENT_VOICE_HOME"] = tempfile.mkdtemp(prefix="agent-voice-tests-")
 os.environ["PULSE_SERVER"] = "unix:/nonexistent/agent-voice-tests"
 
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def never_run_claude(monkeypatch):
+    """Installing for Claude Code runs its `claude mcp` command: never against the real one in a test."""
+    from agent_voice import install
+
+    monkeypatch.setattr(install, "claude_mcp", lambda remove=False: "to-do list (test)")
+
 
 def pytest_sessionfinish(session, exitstatus):
     session.config.agent_voice_status = int(exitstatus)

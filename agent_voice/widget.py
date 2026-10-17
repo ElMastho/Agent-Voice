@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -34,6 +35,8 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineE
                                QPushButton, QSystemTrayIcon, QTextBrowser, QToolTip, QVBoxLayout, QWidget)
 
 from agent_voice import client
+from agent_voice import companion
+from agent_voice.companion import clock as companion_clock, duration_words
 from agent_voice.config import HOME, load_config
 from agent_voice.launch import LABELS as TARGET_LABELS
 from agent_voice.textclean import result_label, tokens_label
@@ -44,7 +47,6 @@ SPEEDS = (1.0, 1.25, 1.5, 1.75, 2.0)
 MODES = (("voice", "Voice"), ("chime", "Chimes"), ("silent", "Do not disturb"))
 ENGINES = (("piper", "Light"), ("kokoro", "Natural"))  # the voice: Piper, or Kokoro (more expressive, more CPU)
 HIST_ROWS, THREAD_ROWS, ROW_H = 5, 4, 22
-LIMIT_H = 22  # a Limits row: the agent, then its 5-hour and weekly bars
 LIMIT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
 THREAD_H = 36  # a thread row: its title and state, then the start of its last reply
 # Tiles that only matter when replies are spoken: hidden in chime mode.
@@ -60,11 +62,16 @@ AGENTS_PER_ROW = 6
 NEED_ROWS, NEED_H = 3, 28  # "needs you" rows at the top of the panel
 # Banner kinds: the accent around it and its header.
 BANNER_KINDS = {"you": ("#10E0A0", ""), "pending": ("#10E0A0", ""), "needs": ("#FBBF24", ""), "catchup": ("#8B7CFF", "While you were away"),
-                "recap": ("#8B7CFF", "Today")}
+                "recap": ("#8B7CFF", "Today"), "timer": ("#FBBF24", "Timer done"), "reminder": ("#8B7CFF", "Reminder"),
+                "pomodoro": ("#F87171", "Pomodoro")}
 GUIDE_URL = "https://github.com/ElMastho/agent-voice/blob/main/docs/guide.md"
 COMPACT = 56  # compact mode: just the orb
 # Notch mode: docked to the top centre of the screen like a camera notch, tucked away when idle.
 NOTCH_W, NOTCH_H = 480, 44  # wide and short: one row of status, caption and chips
+STRIP_H = 22  # the notch's second line while a timer or the stopwatch runs
+TAB_W, TAB_H = 16, 52  # the side panels' arrows, on the open panel's edges
+# The side panels and the cards each can show: Utils on the right (the tools), the Companion on the left.
+SIDE_CARDS = {"utils": companion.WIDGETS, "companion": companion.COMPANION_WIDGETS}
 # Open, the notch takes a third of the screen (within these bounds); from TWO_COL_MIN its panel has two columns:
 # controls and threads on the left, today's numbers, limits, what you said and the agents on the right.
 PANEL_MAX_W, TWO_COL_MIN = 900, 600
@@ -122,6 +129,20 @@ ICONS = {
     "help": "",
     "keyboard": "",
     "tuck": "",
+    "more": "\ue712",
+    "play": "\ue768",
+    "pause": "\ue769",
+    "close": "\ue711",
+    "stopwatch": "\ue916",
+    "left": "\ue76b",
+    "right": "\ue76c",
+    "note": "\ue70b",
+    "paste": "\ue77f",
+    "usage": "\ue9d9",
+    "music": "\ue8d6",
+    "calendar": "\ue787",
+    "prev": "\ue892",
+    "next": "\ue893",
 }
 
 if sys.platform != "win32":
@@ -129,6 +150,8 @@ if sys.platform != "win32":
     ICONS.update({"mic": "●", "stop": "■", "skip": "⏭", "chat": "✎", "send": "➤", "volume": "♪", "mute": "✕",
                   "read": "☰", "power": "⏻", "bell": "♫", "copy": "⧉", "check": "✓", "bolt": "ϟ", "list": "≡",
                   "shield": "✓", "down": "⌄", "up": "⌃", "replay": "↻", "open": "↗", "help": "?", "keyboard": "⌨", "tuck": "–"})
+    ICONS.update({"more": "⋯", "play": "▶", "pause": "❚❚", "close": "✕", "stopwatch": "◔", "left": "‹", "right": "›"})
+    ICONS.update({"note": "✎", "paste": "⧉", "usage": "▤", "music": "♪", "calendar": "▦", "prev": "⏮", "next": "⏭"})
 
 # phase -> (accent colour, title, subtitle)
 PHASES = {
@@ -180,6 +203,12 @@ def _when_text(at: float, far: str = "%a") -> str:
 
     soon = at - time.time() < 20 * 3600
     return datetime.fromtimestamp(at).strftime("%H:%M" if soon else far)
+
+
+def _today(now: float) -> str:
+    from datetime import datetime
+
+    return datetime.fromtimestamp(now).strftime("%Y-%m-%d")
 
 
 def _round_pen(brush, width: float) -> QPen:
@@ -253,6 +282,15 @@ def _keep_on_top(hwnd: int) -> None:
                         SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER)
 
 
+def _over_us() -> bool:
+    """A menu, a tooltip or a box we opened (they take the keyboard) is showing: re-asserting "on top" now would
+    put the notch or the companion over it, and it would seem to vanish."""
+    if QToolTip.isVisible() or QApplication.activePopupWidget() is not None:
+        return True
+    active = QApplication.activeWindow()
+    return active is not None and type(active).__name__ in ("QuickInput", "ReplyBox", "HistoryBox")
+
+
 def _apply_windows_style(hwnd: int) -> None:
     """No focus stealing, no taskbar entry, always on top; no system rounding or border (we draw our shape)."""
     if sys.platform != "win32":
@@ -318,17 +356,25 @@ class Poller(QObject):
     def __init__(self, interval: float = 0.12):
         super().__init__()
         self.interval = interval
+        self.stopped = False
         threading.Thread(target=self._run, daemon=True).start()
+
+    def stop(self) -> None:
+        """No more polling (a widget that's only drawn, in the tests and the doc renders): emitting into a
+        widget Qt has deleted would crash."""
+        self.stopped = True
 
     def _run(self) -> None:
         tag = ""
-        while True:
+        while not self.stopped:
             # At rest, wait for the daemon to report a change (one request every 20 s) instead of asking
             # several times a second; while something moves, poll for the mic level and the animations.
             waiting = self.interval >= 0.5 and tag
             path = f"/status?wait={tag}&timeout=20" if waiting else "/status"
             st = client.request(path, timeout=25 if waiting else 0.5)
             tag = (st or {}).get("tag", "")
+            if self.stopped:
+                return
             try:
                 self.status.emit(st)
             except RuntimeError:  # widget closed
@@ -344,7 +390,8 @@ def _post(path: str, payload: dict | None = None) -> None:
 # -- the widget --------------------------------------------------------------------------
 # The banner's buttons: (icon, label).
 BANNER_BUTTONS = {"type": ("keyboard", "Reply"), "talk": ("mic", "Talk"), "send": ("send", "Send now"),
-                  "edit": ("keyboard", "Edit"), "cancel": ("stop", "Cancel")}
+                  "edit": ("keyboard", "Edit"), "cancel": ("stop", "Cancel"), "snooze": ("clock", "+5 min"),
+                  "ok": ("check", "Done")}
 # How long a notification stays (Chimes), and how long the read-along text stays once the voice ends.
 SHOW_FOR, LINGER = 10.0, 5.0
 
@@ -391,6 +438,8 @@ class Banner(QWidget):
         self._layout(width)
         words = len(item.get("text", "").split())
         self.until = 1e12 if hold else time.time() + min(30.0, SHOW_FOR + max(0, words - 12) * 0.5)  # more if long
+        if item.get("kind") in ("timer", "reminder"):  # yours: it stays until you say so (or a minute)
+            self.until = time.time() + 60.0
         if item.get("kind") == "pending":  # about to be sent: as long as it waits (what happens next replaces it)
             self.until = float(item.get("until") or time.time()) + 2.0
         if not self.isVisible():
@@ -409,7 +458,7 @@ class Banner(QWidget):
         return bool(item.get("session")) and item.get("kind") not in ("you", "catchup", "note", "recap")
 
     def _buttons_shown(self) -> bool:
-        return self._can_reply() or (self.item or {}).get("kind") == "pending"
+        return self._can_reply() or (self.item or {}).get("kind") in ("pending", "timer", "reminder")
 
     def _buttons(self) -> dict[str, QRectF]:
         """Reply by typing, or by voice, to the conversation this banner is from; or, for a message about to be
@@ -417,6 +466,8 @@ class Banner(QWidget):
         if not self._buttons_shown():
             return {}
         y, h, right = self.height() - 34, 22, self.width() - 16
+        if (self.item or {}).get("kind") in ("timer", "reminder"):  # a timer ended, a reminder: snooze, or done
+            return {"ok": QRectF(right - 70, y, 70, h), "snooze": QRectF(right - 70 - 8 - 82, y, 82, h)}
         if (self.item or {}).get("kind") == "pending":
             out = {}
             for key, w in (("cancel", 74), ("edit", 62), ("send", 90)):
@@ -492,7 +543,7 @@ class Banner(QWidget):
         opacity = max(0.0, min(1.0, self.t)) * (1 - min(1.0, -min(0.0, self.drag) / 60))
         if abs(self.windowOpacity() - opacity) > 0.004:
             self.setWindowOpacity(opacity)
-        if now - self._topmost_at > 1.0:
+        if now - self._topmost_at > 1.0 and not _over_us():
             self._topmost_at = now
             _keep_on_top(int(self.winId()))
         if not settled:
@@ -536,6 +587,8 @@ class Banner(QWidget):
         tag = "speaking" if self.holding else self.item.get("tag") or ("" if kind in BANNER_KINDS else "done")
         if kind == "pending":
             tag = f"in {self._left()} s · say “wait” or “cancel”"
+        elif kind in ("timer", "reminder"):
+            tag = _when_text(float(self.item.get("at") or time.time()))
         p.drawText(QRectF(0, 10, self.width() - 18, 20), Qt.AlignRight | Qt.AlignVCenter, tag)
         p.setFont(self.f_text)
         p.setPen(QColor(255, 255, 255, 228))
@@ -552,6 +605,8 @@ class Banner(QWidget):
             p.setFont(self.f_icon)
             p.setPen(QColor(255, 255, 255, 235))
             icon, label = BANNER_BUTTONS[key]
+            if key == "snooze":
+                label = f"+{(self.item.get('snooze') or {}).get('seconds', 300) // 60} min"
             icon_rect = QRectF(rect.x() + 8, rect.y(), 16, rect.height())
             p.drawText(icon_rect, Qt.AlignCenter, ICONS[icon])
             p.setFont(self.f_head)
@@ -594,6 +649,16 @@ class Banner(QWidget):
             self.dismiss()  # swiped away
         elif abs(moved.x()) + abs(moved.y()) < 5 and self.item:
             button = self._button_at(e.position())
+            if self.item.get("kind") in ("timer", "reminder"):
+                snooze = self.item.get("snooze") or {}
+                if button == "snooze" and snooze.get("kind") == "timer":
+                    _post("/timer", {"action": "start", "seconds": snooze.get("seconds", 300),
+                                     "label": snooze.get("label", "")})
+                elif button == "snooze":
+                    _post("/reminder", {"action": "add", "in": snooze.get("seconds", 600),
+                                        "text": snooze.get("text", "")})
+                self.dismiss()
+                return
             if self.item.get("kind") == "pending":
                 if button:  # what happens to it next replaces this banner
                     _post("/pending", {"id": self.item.get("pending"),
@@ -1131,6 +1196,734 @@ class HistoryBox(QWidget):
         super().changeEvent(ev)
 
 
+class QuickInput(QWidget):
+    """One line to type in, for the companion: a to-do, a reminder ("16:00 call Paul"), a timer ("12 min tea").
+
+    Like the reply box it takes the keyboard (you type in it), and closes when you click elsewhere or press Esc."""
+
+    HINTS = {"todo": "Add to your list (Enter)",
+             "reminder": "16:00 call Paul · in 20 minutes stretch · tomorrow at 9 send the invoice",
+             "timer": "12 min tea · 1h30 · 90 s",
+             "note": "A note (Enter): kept, and searchable in History",
+             "calendar": "Your calendar's iCal link (Outlook: Publish calendar; Google: Secret address in iCal format)"}
+
+    def __init__(self):
+        super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_MacAlwaysShowToolWindow)
+        self.mode = "todo"
+        box = QFrame(self)
+        box.setObjectName("box")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(12, 8, 12, 8)
+        self.edit = QLineEdit()
+        self.edit.installEventFilter(self)
+        self.edit.textChanged.connect(lambda _text: self.edit.setStyleSheet(""))
+        layout.addWidget(self.edit)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(box)
+        text = _font(FONT_TEXT, 9).pointSize()
+        self.setStyleSheet(
+            "#box{background:#000;border:1.5px solid #8B7CFF;border-radius:14px;}"
+            f"QLineEdit{{background:rgba(255,255,255,14);border:none;border-radius:8px;padding:5px 10px;color:#fff;"
+            f"font-size:{text}pt;font-family:'{FONT_TEXT}';selection-background-color:#8B7CFF;}}")
+
+    def open(self, mode: str, beside: QRect) -> None:
+        """Ask for a `mode` item, just under the companion `beside` (screen coordinates): never over it, which
+        re-asserts "on top" and would cover it."""
+        self.mode = mode
+        self.edit.setPlaceholderText(self.HINTS[mode])
+        self.resize(max(300, beside.width()), 52)
+        screen = (QApplication.screenAt(beside.center()) or QApplication.primaryScreen()).availableGeometry()
+        y = beside.bottom() + 8
+        if y + self.height() > screen.bottom():
+            y = beside.top() - 8 - self.height()
+        self.move(beside.left(), max(screen.top(), y))
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.edit.setFocus()
+        _keep_on_top(int(self.winId()))
+
+    def submit(self) -> None:
+        text = " ".join(self.edit.text().split())
+        if not text:
+            self.hide()
+            return
+        if self.mode == "todo":
+            _post("/todo", {"action": "add", "text": text})
+        elif self.mode == "note":
+            _post("/note", {"action": "add", "text": text})
+        elif self.mode == "calendar":
+            if not re.match(r"^(?:https?|webcal)://\S+$", text, re.I) and not os.path.isfile(os.path.expanduser(text)):
+                self.edit.setStyleSheet("background:rgba(248,113,113,60);")  # not a link: say so, keep it
+                return
+            _post("/calendar", {"action": "add", "source": text})
+        elif self.mode == "reminder":
+            found = companion.parse_reminder(text, time.time())
+            if not found:
+                self.edit.setStyleSheet("background:rgba(248,113,113,60);")  # not a time we understand: say so
+                return
+            _post("/reminder", {"action": "add", "at": found[0], "text": found[1]})
+        else:
+            found = companion.parse_command(f"timer {text}", time.time())
+            if not found or found["kind"] != "timer":
+                self.edit.setStyleSheet("background:rgba(248,113,113,60);")
+                return
+            _post("/timer", {"action": "start", "seconds": found["seconds"], "label": found["label"]})
+        self.edit.clear()
+        self.hide()
+
+    def eventFilter(self, obj, ev):
+        if obj is self.edit and ev.type() == QEvent.KeyPress:
+            if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self.submit()
+                return True
+            if ev.key() == Qt.Key_Escape:
+                self.hide()
+                return True
+        return super().eventFilter(obj, ev)
+
+    def changeEvent(self, ev):
+        if ev.type() == QEvent.ActivationChange and not self.isActiveWindow() and self.isVisible():
+            self.hide()  # clicked elsewhere (what you typed stays for next time)
+        super().changeEvent(ev)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        # While it had the keyboard, the notch and the companion stopped re-asserting "on top" (they'd cover it):
+        # do it now, and again once the window you clicked has come forward, rather than at the next tick.
+        for delay in (0, 150):
+            QTimer.singleShot(delay, _raise_ours)
+
+
+def _raise_ours() -> None:
+    for w in QApplication.topLevelWidgets():
+        if isinstance(w, (VoiceWidget, SidePanel)) and w.isVisible():
+            _keep_on_top(int(w.winId()))
+
+
+class SidePanel(QWidget):
+    """Beside the open panel: Utils on the right (Pomodoro, timers, stopwatch, to-do, reminders, notes, clipboard),
+    the Companion on the left (what's playing, today's meetings, your agents' usage); the cards you chose.
+
+    A view of the daemon's status, like the notch. It never takes the focus (typing goes through a QuickInput);
+    while a clock runs it repaints once a second (the Companion once a minute), at rest not at all."""
+
+    W = 300
+    PRESETS = (1, 5, 10, 15, 25, 60)  # minutes
+    TODO_ROWS, REMINDER_ROWS, TIMER_ROWS, NOTE_ROWS, CLIP_ROWS, EVENT_ROWS = 8, 5, 3, 4, 5, 6
+    LABELS = {"pomodoro": "Pomodoro", "timer": "Timer", "stopwatch": "Stopwatch", "todo": "To-do",
+              "reminders": "Reminders", "notes": "Notes", "clipboard": "Clipboard", "usage": "Usage",
+              "media": "Now playing", "calendar": "Today's meetings"}
+    TITLES = {"utils": "Utils", "companion": "Companion"}
+    TOMATO, BREAK = "#F87171", "#34D399"
+
+    def __init__(self, owner, name: str = "utils"):
+        super().__init__(
+            None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_MacAlwaysShowToolWindow)
+        self.setMouseTracking(True)
+        self.owner = owner  # the notch: its status and which cards you chose
+        self.name = name  # "utils" (right) or "companion" (left)
+        self.t, self.v = 0.0, 0.0  # appearance (a spring) and its velocity
+        self.hits: dict[str, QRectF] = {}
+        self.hot: str | None = None
+        self._press: str | None = None
+        self._clock = None  # the clocks as last painted: repaint when a second turns
+        self.scroll = 0.0  # never taller than the open panel: the cards scroll (the wheel) under the header
+        self._content_h = 0.0
+        self._refit = False
+        self._topmost_at = 0.0
+        self.input = QuickInput()
+        self.f_head = _font(FONT_TEXT, 8)
+        self.f_head.setWeight(QFont.DemiBold)
+        self.f_text = _font(FONT_TEXT, 8)
+        self.f_small = _font(FONT_TEXT, 7)
+        self.f_big = _font(FONT_DISPLAY, 13)
+        self.f_big.setWeight(QFont.DemiBold)
+        self.f_icon = _font(ICON_FONT, 8)
+        self.resize(self.W, 200)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        _apply_windows_style(int(self.winId()))
+
+    def data(self) -> dict:
+        return self.owner.st.get("companion") or {}
+
+    def clock_key(self) -> tuple:
+        """What the clocks show now, to the second: a change means one repaint."""
+        data, now = self.data(), time.time()
+        times = [int(t["end"] - now) if t["end"] else int(t["left"]) for t in data.get("timers") or []]
+        sw = data.get("stopwatch") or {}
+        pomo = data.get("pomodoro") or {}
+        if self.name == "companion":
+            return (int(now // 60),)  # "now", what's past: once a minute
+        return (tuple(times) + ((int(now - sw["start"]),) if sw.get("start") else ())
+                + ((int(pomo["end"] - now),) if pomo.get("end") else ()))
+
+    def step(self, anchor: QRect, want: bool, dt: float = FRAME, mid_y: float | None = None) -> bool:
+        """Beside `anchor` (the island) while `want`, its middle level with `mid_y` (the arrow) when given;
+        returns True while it is animating."""
+        target = 1.0 if want else 0.0
+        if not want and not self.isVisible():
+            return False
+        if want and not self.isVisible():
+            self.t, self.v = 0.0, 0.0
+            self._fit()
+            self.show()
+        self.t, self.v = _spring(self.t, self.v, target, dt, 0.62, 0.14)
+        settled = abs(target - self.t) < 0.003 and abs(self.v) < 0.003
+        if settled:
+            self.t, self.v = target, 0.0
+        if target == 0.0 and self.t <= 0.01:
+            self.hide()
+            self.input.hide()
+            return False
+        screen = (QApplication.screenAt(anchor.center()) or QApplication.primaryScreen()).availableGeometry()
+        if self.name == "utils":
+            x = anchor.right() + TAB_W + 2  # past the arrow on the island's edge
+            if x + self.W > screen.right() - 8:  # no room on the right: the left
+                x = anchor.left() - 10 - self.W
+            x = int(x - 14 * (1 - self.t))
+        else:
+            x = anchor.left() - TAB_W - 2 - self.W
+            if x < screen.left() + 8:
+                x = anchor.right() + 10
+            x = int(x + 14 * (1 - self.t))
+        y = anchor.top() + 8 if mid_y is None else mid_y - self.height() / 2
+        y = int(max(screen.top() + 8, min(y, screen.bottom() - 8 - self.height())))
+        if (x, y) != (self.x(), self.y()):
+            self.move(x, y)
+        opacity = max(0.0, min(1.0, self.t))
+        if abs(self.windowOpacity() - opacity) > 0.004:
+            self.setWindowOpacity(opacity)
+        now = time.time()
+        if now - self._topmost_at > 1.0 and not _over_us():
+            self._topmost_at = now
+            _keep_on_top(int(self.winId()))
+        if self._refit:
+            self._refit = False
+            self._fit()
+            self.update()
+        clock = self.clock_key()
+        if clock != self._clock:
+            self._clock = clock
+            self.update()
+        return not settled
+
+    def refresh(self) -> None:
+        """The status changed: fit the new content and draw it."""
+        if self.isVisible():
+            self._fit()
+            self.update()
+
+    def _fit(self) -> None:
+        scroll, self.scroll = self.scroll, 0.0
+        self._content_h = self._build(None)
+        h = int(min(self._content_h, max(160, self.owner._side_max_h())))
+        self.scroll = max(0.0, min(scroll, self._content_h - h))
+        if h != self.height():
+            self.resize(self.W, h)
+
+    def wheelEvent(self, e):
+        most = max(0.0, self._content_h - self.height())
+        scroll = max(0.0, min(most, self.scroll - e.angleDelta().y() / 2))
+        if scroll != self.scroll:
+            self.scroll = scroll
+            self.update()
+
+    # -- layout and painting in one pass: what is drawn is what is clickable -------------------------------
+    def _build(self, p: QPainter | None) -> float:
+        hits: dict[str, QRectF] = {}
+        data, now = self.data(), time.time()
+        y = 10.0
+        self._text(p, QRectF(16, y, 150, 22), self.TITLES[self.name], self.f_head, 230)
+        hits["menu"] = QRectF(self.W - 38, y - 1, 24, 24)
+        self._round_button(p, hits["menu"], ICONS["more"], "menu")
+        if self.name == "utils":  # say it: a timer, a to-do, a reminder, a note...
+            hits["mic"] = QRectF(self.W - 66, y - 1, 24, 24)
+            self._round_button(p, hits["mic"], ICONS["mic"], "mic")
+        if p is not None:  # the cards scroll under the header, never over it
+            p.setClipRect(QRectF(0, 40, self.width(), self.height() - 44))
+        y += 30 - self.scroll
+        cards = self.owner.side_widgets[self.name]
+        for card in cards:
+            y = getattr(self, f"_card_{card}")(p, hits, QRectF(10, y, self.W - 20, 0), data, now) + 8
+        if not cards:
+            self._text(p, QRectF(16, y, self.W - 32, 20), "Choose what to show with ⋯", self.f_small, 120)
+            y += 26
+        # Scrolled out of sight (under the header, or past the bottom): not clickable.
+        self.hits = {k: r for k, r in hits.items() if k in ("mic", "menu") or (
+            r.top() >= 38 and r.bottom() <= self.height() - 4) or p is None}
+        return y + 2 + self.scroll
+
+    def _text(self, p, rect: QRectF, text: str, font: QFont, alpha: int = 200, align=None, color: str = "",
+              strike: bool = False) -> None:
+        if p is None:
+            return
+        f = QFont(font)
+        f.setStrikeOut(strike)
+        p.setFont(f)
+        c = QColor(color or "#FFFFFF")
+        c.setAlpha(alpha)
+        p.setPen(c)
+        p.drawText(rect, align or (Qt.AlignLeft | Qt.AlignVCenter),
+                   QFontMetrics(f).elidedText(text, Qt.ElideRight, int(rect.width())))
+
+    def _round_button(self, p, rect: QRectF, icon: str, key: str, accent: str = "") -> None:
+        if p is None:
+            return
+        hot = self.hot == key
+        p.setPen(Qt.NoPen)
+        fill = QColor(accent) if accent else QColor(255, 255, 255)
+        fill.setAlpha((70 if hot else 40) if accent else (44 if hot else 20))
+        p.setBrush(fill)
+        p.drawEllipse(rect)
+        self._text(p, rect, icon, self.f_icon, 235, Qt.AlignCenter)
+
+    def _card(self, p, rect: QRectF, icon: str, title: str, right: str = "") -> None:
+        if p is None:
+            return
+        p.setPen(QPen(QColor(255, 255, 255, 22), 1))
+        p.setBrush(QColor(255, 255, 255, 12))
+        p.drawRoundedRect(rect, 12, 12)
+        self._text(p, QRectF(rect.x() + 10, rect.y() + 6, 18, 18), icon, self.f_icon, 170, Qt.AlignCenter)
+        self._text(p, QRectF(rect.x() + 32, rect.y() + 6, 140, 18), title, self.f_head, 215)
+        if right:
+            self._text(p, QRectF(rect.right() - 150, rect.y() + 6, 140, 18), right, self.f_small, 120,
+                       Qt.AlignRight | Qt.AlignVCenter)
+
+    def _chip(self, p, rect: QRectF, text: str, key: str, alpha: int = 20) -> None:
+        if p is None:
+            return
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, alpha + (26 if self.hot == key else 0)))
+        p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+        self._text(p, rect, text, self.f_small, 215, Qt.AlignCenter)
+
+    def _add_row(self, p, hits, rect: QRectF, key: str, label: str) -> None:
+        hits[key] = rect
+        self._text(p, rect.adjusted(12, 0, 0, 0), f"+  {label}", self.f_text, 170 if self.hot == key else 110)
+
+    def _card_timer(self, p, hits, area: QRectF, data: dict, now: float) -> float:
+        timers = (data.get("timers") or [])[:self.TIMER_ROWS]
+        rect = QRectF(area.x(), area.y(), area.width(), 30 + len(timers) * 42 + 30)
+        self._card(p, rect, ICONS["clock"], "Timer")
+        y = rect.y() + 30
+        for t in timers:
+            left = max(0.0, t["end"] - now) if t["end"] else float(t["left"])
+            running = bool(t["end"])
+            self._text(p, QRectF(rect.x() + 12, y, 96, 24), companion_clock(left), self.f_big,
+                       240 if running else 150)
+            self._text(p, QRectF(rect.x() + 104, y, rect.width() - 174, 24),
+                       t.get("label") or duration_words(int(t["total"])), self.f_small, 140)
+            for key, icon, dx in ((f"tpause:{t['id']}", ICONS["pause" if running else "play"], 62),
+                                  (f"tcancel:{t['id']}", ICONS["close"], 34)):
+                hits[key] = QRectF(rect.right() - dx, y + 1, 22, 22)
+                self._round_button(p, hits[key], icon, key)
+            if p is not None:
+                bar = QRectF(rect.x() + 12, y + 30, rect.width() - 24, 3)
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(255, 255, 255, 26))
+                p.drawRoundedRect(bar, 1.5, 1.5)
+                done = 1 - left / max(1.0, float(t["total"]))
+                p.setBrush(QColor("#FBBF24" if running else "#64748B"))
+                p.drawRoundedRect(QRectF(bar.x(), bar.y(), bar.width() * max(0.0, min(1.0, done)), 3), 1.5, 1.5)
+            y += 42
+        n = len(self.PRESETS) + 1
+        gap = 5.0
+        w = (rect.width() - 24 - gap * (n - 1)) / n
+        for i, minutes in enumerate((*self.PRESETS, 0)):
+            key = f"preset:{minutes}" if minutes else "tcustom"
+            hits[key] = QRectF(rect.x() + 12 + i * (w + gap), y + 2, w, 20)
+            label = "…" if not minutes else "1 h" if minutes == 60 else f"{minutes}m"
+            self._chip(p, hits[key], label, key)
+        return rect.bottom()
+
+    def _card_pomodoro(self, p, hits, area: QRectF, data: dict, now: float) -> float:
+        pomo = data.get("pomodoro") or {}
+        phase = pomo.get("phase") or ""
+        running = bool(pomo.get("end"))
+        left = (max(0.0, pomo["end"] - now) if running else float(pomo.get("left") or 0)) if phase else float(
+            pomo.get("focus_length") or 1500)
+        today = int(pomo.get("today") or 0) if pomo.get("day") == _today(now) else 0
+        rect = QRectF(area.x(), area.y(), area.width(), 72)
+        self._card(p, rect, ICONS["bolt"], "Pomodoro", f"{today} today" if today else "")
+        y = rect.y() + 30
+        color = self.BREAK if phase in ("short", "long") else self.TOMATO
+        self._text(p, QRectF(rect.x() + 12, y, 96, 24), companion_clock(left), self.f_big,
+                   240 if running else 150 if phase else 110, color=color if phase else "")
+        every = int(pomo.get("every") or 4)
+        label = ({"focus": f"Focus · {int(pomo.get('round') or 0) % every + 1} of {every}", "short": "Short break",
+                  "long": "Long break"}.get(phase, "25 min focus, then a break") + ("" if running or not phase
+                                                                                     else " · paused"))
+        self._text(p, QRectF(rect.x() + 104, y, rect.width() - 104 - (96 if phase else 40), 24), label,
+                   self.f_small, 150)
+        buttons = [("ptoggle", ICONS["pause" if running else "play"], 34 if not phase else 90)]
+        if phase:
+            buttons += [("pskip", ICONS["skip"], 62), ("pstop", ICONS["close"], 34)]
+        for key, icon, dx in buttons:
+            hits[key] = QRectF(rect.right() - dx, y + 1, 22, 22)
+            self._round_button(p, hits[key], icon, key, "" if running or key != "ptoggle" else color)
+        if p is not None and phase:
+            bar = QRectF(rect.x() + 12, y + 30, rect.width() - 24, 3)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 26))
+            p.drawRoundedRect(bar, 1.5, 1.5)
+            done = 1 - left / max(1.0, float(pomo.get("length") or 1))
+            p.setBrush(QColor(color))
+            p.drawRoundedRect(QRectF(bar.x(), bar.y(), bar.width() * max(0.0, min(1.0, done)), 3), 1.5, 1.5)
+        return rect.bottom()
+
+    def _card_stopwatch(self, p, hits, area: QRectF, data: dict, now: float) -> float:
+        sw = data.get("stopwatch") or {}
+        running = bool(sw.get("start"))
+        elapsed = float(sw.get("elapsed") or 0) + (now - sw["start"] if running else 0)
+        rect = QRectF(area.x(), area.y(), area.width(), 64)
+        self._card(p, rect, ICONS["stopwatch"], "Stopwatch")
+        y = rect.y() + 30
+        self._text(p, QRectF(rect.x() + 12, y, 120, 26), companion_clock(elapsed), self.f_big,
+                   240 if running else 150 if elapsed else 90)
+        hits["swtoggle"] = QRectF(rect.right() - 62, y + 2, 22, 22)
+        self._round_button(p, hits["swtoggle"], ICONS["pause" if running else "play"], "swtoggle",
+                           "" if running else "#10E0A0")
+        if running or elapsed:
+            hits["swreset"] = QRectF(rect.right() - 34, y + 2, 22, 22)
+            self._round_button(p, hits["swreset"], ICONS["replay"], "swreset")
+        return rect.bottom()
+
+    def _card_todo(self, p, hits, area: QRectF, data: dict, now: float) -> float:
+        todos = data.get("todos") or []
+        ordered = [t for t in todos if not t["done"]] + [t for t in todos if t["done"]]
+        shown = ordered[:self.TODO_ROWS]
+        left = sum(1 for t in todos if not t["done"])
+        rect = QRectF(area.x(), area.y(), area.width(), 30 + len(shown) * 24 + 26)
+        right = f"{left} left" if todos else ""
+        self._card(p, rect, ICONS["list"], "To-do", "" if any(t["done"] for t in todos) else right)
+        if any(t["done"] for t in todos):
+            hits["tclear"] = QRectF(rect.right() - 82, rect.y() + 6, 72, 18)
+            self._chip(p, hits["tclear"], "Clear done", "tclear")
+        y = rect.y() + 30
+        for t in shown:
+            row = QRectF(rect.x() + 4, y, rect.width() - 8, 22)
+            hits[f"todo:{t['id']}"] = QRectF(row.x(), y, 30, 22)
+            if p is not None:
+                box = QRectF(row.x() + 10, y + 5, 12, 12)
+                p.setPen(QPen(QColor(255, 255, 255, 150 if not t["done"] else 60), 1.2))
+                p.setBrush(QColor("#10E0A0") if t["done"] else Qt.NoBrush)
+                p.drawRoundedRect(box, 3, 3)
+                if t["done"]:
+                    self._text(p, box, ICONS["check"], self.f_icon, 230, Qt.AlignCenter, "#00110A")
+            source = t.get("source") or ""
+            tag = "" if source in ("", "you") else AGENT_NAMES.get(source, source.capitalize())
+            text_w = row.width() - 34 - 26 - (QFontMetrics(self.f_small).horizontalAdvance(tag) + 8 if tag else 0)
+            self._text(p, QRectF(row.x() + 30, y, text_w, 22), t["text"], self.f_text, 110 if t["done"] else 220,
+                       strike=t["done"])
+            if tag:
+                self._text(p, QRectF(row.x() + 30 + text_w + 4, y, row.width() - 64 - text_w, 22), tag, self.f_small,
+                           170, color="#A99BFF")
+            key = f"tdel:{t['id']}"
+            hits[key] = QRectF(row.right() - 22, y + 2, 18, 18)
+            if self.hot in (key, f"todo:{t['id']}", f"trow:{t['id']}"):
+                self._text(p, hits[key], ICONS["close"], self.f_icon, 200 if self.hot == key else 110, Qt.AlignCenter)
+            hits[f"trow:{t['id']}"] = QRectF(row.x() + 30, y, row.width() - 52, 22)
+            y += 24
+        self._add_row(p, hits, QRectF(rect.x() + 4, y, rect.width() - 8, 22), "todo_add",
+                      "Add" + (f"  ·  {len(ordered) - len(shown)} more" if len(ordered) > len(shown) else ""))
+        return rect.bottom()
+
+    def _card_reminders(self, p, hits, area: QRectF, data: dict, now: float) -> float:
+        reminders = (data.get("reminders") or [])[:self.REMINDER_ROWS]
+        rect = QRectF(area.x(), area.y(), area.width(), 30 + len(reminders) * 24 + 26)
+        self._card(p, rect, ICONS["bell"], "Reminders")
+        y = rect.y() + 30
+        for r in reminders:
+            when = _when_text(r["at"], "%a %H:%M")
+            self._text(p, QRectF(rect.x() + 14, y, 66, 22), when, self.f_text, 230, color="#A99BFF")
+            self._text(p, QRectF(rect.x() + 82, y, rect.width() - 112, 22), r["text"], self.f_text, 215)
+            key = f"rdel:{r['id']}"
+            hits[key] = QRectF(rect.right() - 26, y + 2, 18, 18)
+            hits[f"rrow:{r['id']}"] = QRectF(rect.x() + 4, y, rect.width() - 34, 22)
+            if self.hot in (key, f"rrow:{r['id']}"):
+                self._text(p, hits[key], ICONS["close"], self.f_icon, 200 if self.hot == key else 110, Qt.AlignCenter)
+            y += 24
+        self._add_row(p, hits, QRectF(rect.x() + 4, y, rect.width() - 8, 22), "rem_add", "Add a reminder")
+        return rect.bottom()
+
+    def _rows_card(self, p, hits, area: QRectF, icon: str, title: str, rows: int, right: str = "",
+                   add: str = "") -> QRectF:
+        """A card of `rows` lines of 24 px (and an "add" line): its rectangle, drawn."""
+        rect = QRectF(area.x(), area.y(), area.width(), 30 + rows * 24 + (26 if add else 6))
+        self._card(p, rect, icon, title, right)
+        return rect
+
+    def _card_notes(self, p, hits, area: QRectF, data: dict, now: float) -> float:
+        notes = (data.get("notes") or [])[:self.NOTE_ROWS]
+        rect = self._rows_card(p, hits, area, ICONS["note"], "Notes", max(1, len(notes)),
+                               "say “note: …”" if not notes else "", add="note")
+        y = rect.y() + 30
+        if not notes:
+            self._text(p, QRectF(rect.x() + 14, y, rect.width() - 28, 22), "One line, kept and searchable in History",
+                       self.f_small, 110)
+            y += 24
+        for n in notes:
+            hits[f"nrow:{n['id']}"] = QRectF(rect.x() + 4, y, rect.width() - 34, 22)
+            self._text(p, QRectF(rect.x() + 14, y, rect.width() - 44, 22), n["text"], self.f_text, 215)
+            key = f"ndel:{n['id']}"
+            hits[key] = QRectF(rect.right() - 26, y + 2, 18, 18)
+            if self.hot in (key, f"nrow:{n['id']}"):
+                self._text(p, hits[key], ICONS["close"], self.f_icon, 200 if self.hot == key else 110, Qt.AlignCenter)
+            y += 24
+        self._add_row(p, hits, QRectF(rect.x() + 4, y, rect.width() - 8, 22), "note_add", "Add a note")
+        return rect.bottom()
+
+    def _card_clipboard(self, p, hits, area: QRectF, data: dict, now: float) -> float:
+        clips = self.owner.clips[:self.CLIP_ROWS]
+        rect = self._rows_card(p, hits, area, ICONS["paste"], "Clipboard", max(1, len(clips)),
+                               "click to copy · ➤ to a thread" if clips else "")
+        y = rect.y() + 30
+        if not clips:
+            self._text(p, QRectF(rect.x() + 14, y, rect.width() - 28, 22),
+                       "What you copy shows here (kept in memory only)", self.f_small, 110)
+        for i, text in enumerate(clips):
+            hits[f"clip:{i}"] = QRectF(rect.x() + 4, y, rect.width() - 36, 22)
+            self._text(p, QRectF(rect.x() + 14, y, rect.width() - 50, 22), " ".join(text.split()), self.f_text,
+                       230 if self.hot == f"clip:{i}" else 200)
+            hits[f"clipsend:{i}"] = QRectF(rect.right() - 28, y + 1, 20, 20)
+            self._text(p, hits[f"clipsend:{i}"], ICONS["send"], self.f_icon,
+                       220 if self.hot == f"clipsend:{i}" else 110, Qt.AlignCenter)
+            y += 24
+        return rect.bottom()
+
+    def _card_usage(self, p, hits, area: QRectF, data: dict, now: float) -> float:
+        """Claude Code's and Codex's 5-hour and weekly limits: ↻ asks for fresh numbers; Claude Code without them
+        gets a row to turn its status line on."""
+        rows = self.owner._limit_rows()[:3]
+        lines = sum(1 + max(1, len(windows)) for _agent, windows in rows)
+        rect = QRectF(area.x(), area.y(), area.width(), 30 + lines * 20 + (6 if rows else 30))
+        estimated = any(w.get("est") for _agent, windows in rows for w in windows.values())
+        self._card(p, rect, ICONS["usage"], "Usage", "")
+        if rows:
+            spin = bool(self.owner.st.get("limits_refreshing"))
+            hits["urefresh"] = QRectF(rect.right() - 30, rect.y() + 5, 20, 20)
+            self._text(p, hits["urefresh"], ICONS["replay"], self.f_icon,
+                       230 if spin or self.hot == "urefresh" else 120, Qt.AlignCenter)
+            self._text(p, QRectF(rect.right() - 170, rect.y() + 6, 136, 18),
+                       "≈ from transcripts" if estimated else "used · resets", self.f_small, 110,
+                       Qt.AlignRight | Qt.AlignVCenter)
+        y = rect.y() + 30
+        if not rows:
+            self._text(p, QRectF(rect.x() + 14, y, rect.width() - 28, 22),
+                       "Claude Code's and Codex's limits, once they report them", self.f_small, 110)
+        for agent, windows in rows:
+            self._text(p, QRectF(rect.x() + 14, y, rect.width() - 28, 18), LIMIT_NAMES.get(agent, agent.capitalize()),
+                       self.f_text, 210)
+            y += 20
+            if not windows:  # Claude Code without numbers yet
+                off = self.owner.st.get("usage_line") == "off"
+                self._text(p, QRectF(rect.x() + 14, y, rect.width() - (100 if off else 28), 18),
+                           "Show its 5-hour and weekly limits" if off else "After its next reply, or its /usage",
+                           self.f_small, 120)
+                if off:
+                    hits["uon"] = QRectF(rect.right() - 80, y, 70, 18)
+                    self._chip(p, hits["uon"], "Turn on", "uon", 40)
+                y += 20
+                continue
+            for window in ("five_hour", "seven_day"):
+                w = windows.get(window)
+                if not w:
+                    continue
+                pct = w.get("pct")
+                self._text(p, QRectF(rect.x() + 14, y, 34, 18), "5h" if window == "five_hour" else "week",
+                           self.f_small, 120)
+                if p is not None:
+                    bar = QRectF(rect.x() + 52, y + 8, rect.width() - 150, 3)
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(QColor(255, 255, 255, 26))
+                    p.drawRoundedRect(bar, 1.5, 1.5)
+                    if pct is not None:
+                        p.setBrush(_limit_color(int(pct)))
+                        p.drawRoundedRect(QRectF(bar.x(), bar.y(), bar.width() * min(1.0, pct / 100), 3), 1.5, 1.5)
+                # Estimated from the transcripts: "≈"; not calibrated yet: the tokens used in the window instead.
+                amount = (f"{'≈' if w.get('est') else ''}{pct}%" if pct is not None
+                          else f"{tokens_label(int(w.get('tokens') or 0))} tok")
+                resets = f" · {_when_text(w['resets'])}" if w.get("resets") else ""
+                self._text(p, QRectF(rect.right() - 94, y, 84, 18), amount + resets, self.f_small, 170,
+                           Qt.AlignRight | Qt.AlignVCenter)
+                y += 20
+        return rect.bottom()
+
+    def _card_media(self, p, hits, area: QRectF, data: dict, now: float) -> float:
+        playing = self.owner.st.get("media")
+        rect = QRectF(area.x(), area.y(), area.width(), 84 if playing else 58)
+        self._card(p, rect, ICONS["music"], (playing or {}).get("app") or "Now playing",
+                   ("playing" if playing.get("playing") else "paused") if playing and playing.get("title") else "")
+        y = rect.y() + 30
+        if not playing:
+            self._text(p, QRectF(rect.x() + 14, y, rect.width() - 28, 22),
+                       "Spotify or YouTube shows here while it's open", self.f_small, 110)
+            return rect.bottom()
+        title = playing.get("title") or "Paused"
+        self._text(p, QRectF(rect.x() + 14, y, rect.width() - 110, 22), title, self.f_head, 235)
+        self._text(p, QRectF(rect.x() + 14, y + 22, rect.width() - 110, 18), playing.get("artist") or "",
+                   self.f_small, 140)
+        for key, icon, dx in (("mprev", ICONS["prev"], 90), ("mtoggle", ICONS["pause" if playing.get("playing")
+                                                                               else "play"], 62),
+                              ("mnext", ICONS["next"], 34)):
+            hits[key] = QRectF(rect.right() - dx, y + 8, 24, 24)
+            self._round_button(p, hits[key], icon, key, "#10E0A0" if key == "mtoggle" and not playing.get("playing")
+                               else "")
+        return rect.bottom()
+
+    def _card_calendar(self, p, hits, area: QRectF, data: dict, now: float) -> float:
+        info = self.owner.st.get("agenda") or {}
+        events = [e for e in info.get("events") or [] if e["all_day"] or e["end"] > now - 3600][:self.EVENT_ROWS]
+        sources = int(info.get("sources") or 0)
+        rows = max(1, len(events))
+        rect = self._rows_card(p, hits, area, ICONS["calendar"], "Today", rows,
+                               info.get("error") or "", add="calendar")
+        if sources and not info.get("error"):
+            hits["calunlink"] = QRectF(rect.right() - 70, rect.y() + 6, 60, 18)
+            self._chip(p, hits["calunlink"], "Unlink", "calunlink")
+        y = rect.y() + 30
+        if not events:
+            self._text(p, QRectF(rect.x() + 14, y, rect.width() - 28, 22),
+                       "No more meetings today" if sources or info.get("events") is not None and info.get("events")
+                       else "Add your calendar's iCal link, or open Outlook", self.f_small, 110)
+            y += 24
+        for e in events:
+            now_on = e["start"] <= now < e["end"] and not e["all_day"]
+            past = e["end"] <= now and not e["all_day"]
+            when = "all day" if e["all_day"] else f"{_when_text(e['start'])}"
+            self._text(p, QRectF(rect.x() + 14, y, 60, 22), "now" if now_on else when, self.f_text,
+                       240 if now_on else 110 if past else 220, color="" if past else "#A99BFF")
+            label = e["title"] + (f"  ·  {e['location']}" if e.get("location") else "")
+            self._text(p, QRectF(rect.x() + 76, y, rect.width() - 90, 22), label, self.f_text,
+                       110 if past else 235 if now_on else 215)
+            y += 24
+        self._add_row(p, hits, QRectF(rect.x() + 4, y, rect.width() - 8, 22), "cal_add",
+                      "Add a calendar link" if not sources else "Add another calendar link")
+        return rect.bottom()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        p.setPen(QPen(QColor(255, 255, 255, 30), 1))
+        p.setBrush(QColor(0, 0, 0, 245))
+        p.drawRoundedRect(QRectF(1, 1, self.width() - 2, self.height() - 2), 18, 18)
+        p.setClipRect(QRectF(0, 0, self.width(), self.height() - 4))
+        h = self._build(p)
+        if self._content_h > self.height() and p is not None:  # a thin bar: there's more, scroll for it
+            track = self.height() - 54
+            size = track * self.height() / self._content_h
+            top = 44 + (track - size) * self.scroll / max(1.0, self._content_h - self.height())
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 50))
+            p.drawRoundedRect(QRectF(self.width() - 6, top, 3, size), 1.5, 1.5)
+        p.end()
+        self._refit = abs(h - self._content_h) > 0.5  # the content changed size: fitted on the next step
+
+    # -- the mouse ---------------------------------------------------------------------------------------------
+    def _key_at(self, pos: QPointF) -> str | None:
+        return next((k for k, r in self.hits.items() if r.contains(pos)), None)
+
+    def mouseMoveEvent(self, e):
+        hot = self._key_at(e.position())
+        if hot != self.hot:
+            self.hot = hot
+            self.setCursor(Qt.PointingHandCursor if hot and not hot.startswith(("trow:", "rrow:", "nrow:"))
+                           or (hot or "").startswith("trow:") and self._todo_session(hot) else Qt.ArrowCursor)
+            self.update()
+
+    def leaveEvent(self, _e):
+        self.hot = None
+        self.update()
+
+    def mousePressEvent(self, e):
+        self._press = self._key_at(e.position()) if e.button() == Qt.LeftButton else None
+
+    def mouseReleaseEvent(self, e):
+        key, self._press = self._press, None
+        if key and key == self._key_at(e.position()):
+            self.activate(key)
+
+    def _todo_session(self, key: str) -> str:
+        item_id = int(key.partition(":")[2] or 0)
+        return next((t.get("session") or "" for t in self.data().get("todos") or [] if t["id"] == item_id), "")
+
+    def activate(self, key: str) -> None:
+        kind, _, arg = key.partition(":")
+        item_id = int(arg) if arg.isdigit() else 0
+        if kind == "mic":
+            _post("/companion_listen")
+        elif kind == "menu":
+            self.choose_widgets()
+        elif kind == "preset":
+            _post("/timer", {"action": "start", "seconds": int(arg) * 60})
+        elif kind in ("tcustom", "todo_add", "rem_add", "note_add", "cal_add"):
+            self.input.open({"tcustom": "timer", "todo_add": "todo", "rem_add": "reminder", "note_add": "note",
+                             "cal_add": "calendar"}[kind], self.geometry())
+        elif kind == "trow":  # an agent's to-do: open the conversation it came from
+            todo = next((t for t in self.data().get("todos") or [] if t["id"] == item_id), None)
+            if todo and todo.get("session"):
+                _post("/open_thread", {"session": todo["session"]})
+        elif kind == "ndel":
+            _post("/note", {"action": "remove", "id": item_id})
+        elif kind == "clip":
+            QApplication.clipboard().setText(self.owner.clips[int(arg)])
+        elif kind == "clipsend":  # into the thread's message box (not sent: you finish it there)
+            _post("/attach", {"paths": [], "text": self.owner.clips[int(arg)], "session": self.owner._last_thread()})
+        elif kind in ("mprev", "mtoggle", "mnext"):
+            _post("/media", {"action": {"mprev": "previous", "mtoggle": "toggle", "mnext": "next"}[kind]})
+        elif kind == "calunlink":
+            _post("/calendar", {"action": "clear"})
+        elif kind == "urefresh":
+            _post("/limits_refresh")
+            self.owner.st["limits_refreshing"] = True
+        elif kind == "uon":
+            _post("/usage_line", {"enable": True})
+            self.owner.st["usage_line"] = "on"  # the row stays until the first reply brings the numbers
+        elif kind == "tpause":
+            timer = next((t for t in self.data().get("timers") or [] if t["id"] == item_id), None)
+            if timer:
+                _post("/timer", {"action": "pause" if timer["end"] else "resume", "id": item_id})
+        elif kind == "tcancel":
+            _post("/timer", {"action": "cancel", "id": item_id})
+        elif kind in ("ptoggle", "pskip", "pstop"):
+            _post("/pomodoro", {"action": {"ptoggle": "toggle", "pskip": "skip", "pstop": "stop"}[kind]})
+        elif kind == "swtoggle":
+            _post("/stopwatch", {"action": "toggle"})
+        elif kind == "swreset":
+            _post("/stopwatch", {"action": "reset"})
+        elif kind == "todo":
+            _post("/todo", {"action": "toggle", "id": item_id})
+        elif kind == "tdel":
+            _post("/todo", {"action": "remove", "id": item_id})
+        elif kind == "tclear":
+            _post("/todo", {"action": "clear_done"})
+        elif kind == "rdel":
+            _post("/reminder", {"action": "remove", "id": item_id})
+
+    def choose_widgets(self) -> None:
+        """Which cards show, in their usual order (kept in widget.json)."""
+        menu = QMenu(self)
+        menu.setStyleSheet(MENU_STYLE)
+        chosen = self.owner.side_widgets[self.name]
+        for card in SIDE_CARDS[self.name]:
+            act = QAction(self.LABELS[card], menu)
+            act.setCheckable(True)
+            act.setChecked(card in chosen)
+            act.triggered.connect(lambda on, c=card: self.owner.set_side_widget(self.name, c, on))
+            menu.addAction(act)
+        menu.exec(self.mapToGlobal(self.hits["menu"].bottomLeft().toPoint()))
+
+
 class VoiceWidget(QWidget):
     def __init__(self):
         super().__init__(
@@ -1163,6 +1956,16 @@ class VoiceWidget(QWidget):
         self.reply_box = ReplyBox()
         self.history_box = HistoryBox()
         self.preview = Preview()
+        # The side panels beside the open panel: open or not, and their cards (kept in widget.json).
+        self.side_open = {name: False for name in SIDE_CARDS}
+        self.side_widgets = {name: list(cards) for name, cards in SIDE_CARDS.items()}
+        self.sides = {name: SidePanel(self, name) for name in SIDE_CARDS}
+        self.utils, self.companion = self.sides["utils"], self.sides["companion"]
+        self._sides_busy = False
+        self._folding = False  # closing the panel: the side panels go first, then the panel (see _tick)
+        self.clips: list[str] = []  # the last few things you copied: in memory only
+        QApplication.clipboard().dataChanged.connect(self._clip_changed)
+        self._strip_shown = None  # the notch's second line as last painted (its clocks, to the second)
         self._preview_for = ""  # the thread row the preview is (or is about to be) for
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
@@ -1251,6 +2054,12 @@ class VoiceWidget(QWidget):
             self.notch = bool(pos.get("notch", True))
             self.start_hidden = bool(pos.get("hidden", False))
             self.phone_folded = bool(pos.get("phone_folded", False))
+            sides = pos.get("sides") if isinstance(pos.get("sides"), dict) else {}
+            for name, cards in SIDE_CARDS.items():
+                side = sides.get(name) if isinstance(sides.get(name), dict) else {}
+                self.side_open[name] = bool(side.get("open", False))
+                if isinstance(side.get("widgets"), list):
+                    self.side_widgets[name] = [w for w in cards if w in side["widgets"]]
         except (OSError, ValueError, KeyError):
             x, y = screen.right() - NOTCH_W - 8, screen.top() + 64
             self.notch = True  # a fresh install starts as the notch
@@ -1342,7 +2151,7 @@ class VoiceWidget(QWidget):
         if self._question():
             w, h = WIDTH, BAR_H + int(self._question_layout()[3])
         else:
-            w, h = WIDTH, self._expanded_h() if self.expanded else BAR_H
+            w, h = WIDTH, self._expanded_h() if self.expanded else BAR_H + self._strip_h()
         if self.island:  # the island row on top, the same panels underneath
             return self.nw, NOTCH_H + h - BAR_H
         return w, h
@@ -1381,7 +2190,7 @@ class VoiceWidget(QWidget):
         """Top centre of the primary screen, sliding down when wanted and back up when not."""
         now = time.time()
         busy = (self.phase in ("speaking", "waiting", "recording", "transcribing") or bool(self._activity())
-                or bool(self._drop))
+                or bool(self._drop) or bool(self._strip_items()))  # a timer running: down, to see it
         dnd = self._output() == "silent"  # Do not disturb: it stays up until you hover it
         if self._tucked is not None and self._news() != self._tucked:
             self._tucked = None  # something new happened: show it
@@ -1424,7 +2233,9 @@ class VoiceWidget(QWidget):
             HOME.mkdir(parents=True, exist_ok=True)
             x, y = self._bar_pos if self.notch and self._bar_pos else (self.x(), self.y())
             state = {"x": x, "y": y, "expanded": self.expanded, "compact": self.compact, "notch": self.notch,
-                     "hidden": not self.isVisible(), "phone_folded": self.phone_folded}
+                     "hidden": not self.isVisible(), "phone_folded": self.phone_folded,
+                     "sides": {name: {"open": self.side_open[name], "widgets": self.side_widgets[name]}
+                               for name in SIDE_CARDS}}
             POS_FILE.write_text(json.dumps(state), encoding="utf-8")
         except OSError:
             pass
@@ -1448,10 +2259,14 @@ class VoiceWidget(QWidget):
         shown = {k: v for k, v in (st or {}).items() if k not in ("level", "threads")}
         shown["threads"] = [(t.get("session"), t.get("state"), t.get("ago", 0) // 60) for t in (st or {}).get("threads") or []]
         digest = json.dumps(shown, sort_keys=True, default=str)
-        if digest != self._shown_digest:
+        changed = digest != self._shown_digest
+        if changed:
             self._shown_digest, self._painted_still = digest, False
             self._kick()
         self.st = st or {}
+        if changed:
+            for side in self.sides.values():
+                side.refresh()
         boot = self.st.get("boot")
         if boot and self._boot and boot != self._boot:
             self._relaunch()  # the service restarted (an update, `agent-voice restart`): come back with its code
@@ -1542,7 +2357,7 @@ class VoiceWidget(QWidget):
         self._follow_size()
         if self.notch:
             self._place_notch()
-        if time.time() - self._topmost_at > 1.0:
+        if time.time() - self._topmost_at > 1.0 and not _over_us():
             self._topmost_at = time.time()
             _keep_on_top(int(self.winId()))
         # While you type in the reply box, notifications drop below it instead of over it.
@@ -1550,6 +2365,15 @@ class VoiceWidget(QWidget):
         anchor = self.reply_box.geometry() if boxed else self.visual_rect()
         width = anchor.width() if boxed else anchor.width() - (2 * NOTCH_EAR if self.island else 0)
         self._banner_busy = self.banner.step(QRectF(anchor), self._dt, max(300, int(width)))
+        busy = False
+        for name, side in self.sides.items():
+            tab = self._tab_rect(name)
+            busy = side.step(self.visual_rect(), self._side_wanted(name), self._dt,
+                             self.y() + tab.center().y() if tab is not None else None) or busy
+        self._sides_busy = busy
+        if self._folding and not any(side.isVisible() for side in self.sides.values()):  # gone: now the panel
+            self._folding = False
+            self.toggle_expanded()
         # Discreet when nothing happens, fully visible when active or hovered (the notch is always solid).
         active = (self.phase not in ("idle", "offline", "muted") or self._hovering or self.expanded
                   or self.notch or self._question())
@@ -1564,6 +2388,9 @@ class VoiceWidget(QWidget):
         interval = 66 if gliding else 250 if still else ANIMATE_MS
         if self.frame.interval() != interval:
             self.frame.setInterval(interval)
+        strip = self._strip_key()
+        if strip != self._strip_shown:  # a clock in the notch's second line: one repaint as each second turns
+            self._strip_shown, self._painted_still = strip, False
         if still and not gliding and self._painted_still:
             return
         self._painted_still = still and not gliding
@@ -1575,12 +2402,10 @@ class VoiceWidget(QWidget):
             return False
         if self._drop:
             return False
-        if self._banner_busy:
+        if self._banner_busy or self._sides_busy:
             return False
         if self._question() or time.time() - self._copied_at < 1.3:
             return False
-        if self.expanded and self.st.get("limits_refreshing"):
-            return False  # the ↻ turns
         settled = [
             abs(self.energy - 0.12) < 0.01,
             abs(self._opacity - opacity_target) < 0.01,
@@ -1689,6 +2514,12 @@ class VoiceWidget(QWidget):
         if self.notch:
             out["tuck"] = QRectF(self.nw - NOTCH_EAR - 96, (NOTCH_H - 24) / 2, 24, 24)
         out.update(self._pill_rects())
+        for name in SIDE_CARDS:
+            tab = self._tab_rect(name)
+            if tab is not None:
+                out[f"tab:{name}"] = tab
+        if self._strip_h() and not self.expanded:
+            out["strip"] = QRectF(NOTCH_EAR, NOTCH_H, self.nw - 2 * NOTCH_EAR, STRIP_H)
         if self._result():
             out["result"] = QRectF(NOTCH_EAR + 38, 23, self.nw / 2 - 40, 15)
         label = self._update_label()
@@ -1770,11 +2601,6 @@ class VoiceWidget(QWidget):
             r.update(self._agent_rects())
             r["newthread"] = self._new_rect()
             r["history"] = self._history_rect()
-            on = self._limit_on_rect()
-            if on:
-                r["limits:on"] = on
-            if self._limit_rows():
-                r["limits:refresh"] = QRectF(self.rx + 70, self._limits_y(), 18, 16)
             r.update(self._phone_rects())
             for i in range(len(self._schedules())):
                 row = self._sched_row(i)
@@ -1844,13 +2670,6 @@ class VoiceWidget(QWidget):
     def _sched_row(self, i: int) -> QRectF:
         return QRectF(self.rx + 10, self._sched_y() + 16 + i * SCHED_H, self.rw - 20, SCHED_H - 2)
 
-    def _limits_y(self) -> float:
-        return self._sched_y() + self._sched_h()
-
-    def _limit_h(self) -> float:
-        """A Limits row: one line (single column), or the name over a line per window (side column)."""
-        return 54 if self._two_col() else LIMIT_H
-
     def _limit_rows(self) -> list[tuple[str, dict]]:
         """(agent, its windows) per row. Claude Code without numbers still gets a row: to turn its status line on,
         or to say they're on their way."""
@@ -1860,24 +2679,8 @@ class VoiceWidget(QWidget):
             rows.append(("claude", {}))
         return rows
 
-    def _limit_row(self, i: int) -> QRectF:
-        return QRectF(self.rx + 10, self._limits_y() + 16 + i * self._limit_h(), self.rw - 20, self._limit_h() - 2)
-
-    def _limits_h(self) -> float:
-        n = len(self._limit_rows())
-        return 16 + n * self._limit_h() + 8 if n else 0
-
-    def _limit_on_rect(self) -> QRectF | None:
-        if self.st.get("usage_line") != "off":
-            return None  # on already (numbers on their way), or your own status line
-        for i, (_source, windows) in enumerate(self._limit_rows()):
-            if not windows:
-                row = self._limit_row(i)
-                return QRectF(row.right() - 64, row.y() + (min(row.height(), LIMIT_H - 2) - 16) / 2, 60, 16)
-        return None
-
     def _agents_y(self) -> float:
-        return self._limits_y() + self._limits_h()
+        return self._sched_y() + self._sched_h()  # the limits are in the Companion's Usage card
 
     def _agent_rects(self) -> dict[str, QRectF]:
         keys = [f"agent:{a}" for a, _ in AGENT_LABELS] + ["guide"]
@@ -1984,6 +2787,7 @@ class VoiceWidget(QWidget):
             p.setBrush(Qt.NoBrush)
             p.drawPath(path)
         self._paint_edge_light(p, w, h)
+        self._paint_side_tabs(p)
         p.end()
 
     def _body_path(self, w: float, h: float) -> QPainterPath:
@@ -2083,9 +2887,12 @@ class VoiceWidget(QWidget):
             p.translate(off, 0)
             p.setOpacity(show)
             self._paint_notch_row(p)
-            if h > NOTCH_H + 4:
+            strip = self._strip_h()
+            if h > NOTCH_H + strip + 4:
                 p.translate(NOTCH_EAR, NOTCH_H - BAR_H)
                 self._paint_panel(p)
+            elif strip:
+                self._paint_strip(p)
             p.restore()
 
     def _notch_chips(self) -> tuple[list[tuple[str, QRectF]], float]:
@@ -2407,7 +3214,6 @@ class VoiceWidget(QWidget):
         self._paint_today(p, progress)
         self._paint_phone(p, progress)
         self._paint_schedules(p, progress)
-        self._paint_limits(p, progress)
         self._paint_agents(p, progress)
 
     def _paint_needs(self, p: QPainter, rects: dict[str, QRectF]) -> None:
@@ -2759,79 +3565,6 @@ class VoiceWidget(QWidget):
             p.drawText(QRectF(row.right() - 20, row.y(), 18, row.height()), Qt.AlignCenter, "×")
         p.restore()
 
-    def _paint_limits(self, p: QPainter, progress: float) -> None:
-        """How much of each agent's 5-hour and weekly limits is used, and when they reset."""
-        rows = self._limit_rows()
-        appear = max(0.0, min(1.0, (progress - 0.58) / 0.42))
-        if not rows or appear <= 0:
-            return
-        p.save()
-        p.setOpacity(appear)
-        y = self._limits_y()
-        estimated = any(w.get("est") for _s, windows in rows for w in windows.values())
-        self._section_head(p, QRectF(self.rx + 14, y, self.rw - 28, 16), "Limits",
-                           "≈ from your transcripts · resets" if estimated else "used · resets")
-        spin = bool(self.st.get("limits_refreshing"))
-        p.save()  # ↻: ask for fresh numbers now (it turns while it does)
-        p.translate(self.rx + 79, y + 8)
-        if spin:
-            p.rotate((time.time() * 360) % 360)
-        p.setFont(self.f_icon_small)
-        p.setPen(QColor(255, 255, 255, int(110 + 130 * max(self.hover_t.get("limits:refresh", 0.0), float(spin)))))
-        p.drawText(QRectF(-9, -8, 18, 16), Qt.AlignCenter, ICONS["replay"])
-        p.restore()
-        fm = QFontMetrics(self.f_hint)
-        for i, (source, windows) in enumerate(rows):
-            row = self._limit_row(i)
-            stacked = self._two_col()  # the side column: the name, then a line per window
-            name_w = row.width() - 70 if stacked else 84
-            line = LIMIT_H - 2
-            p.setFont(self.f_sub)
-            p.setPen(QColor(226, 232, 240, 210))
-            p.drawText(QRectF(row.x() + 4, row.y(), name_w - 6, line), Qt.AlignLeft | Qt.AlignVCenter,
-                       QFontMetrics(self.f_sub).elidedText(LIMIT_NAMES.get(source, source.capitalize()),
-                                                           Qt.ElideRight, name_w - 6))
-            if not windows:  # Claude Code without numbers yet
-                on = self._limit_on_rect()
-                p.setFont(self.f_hint)
-                p.setPen(QColor(226, 232, 240, 120))
-                hint = QRectF(row.x() + 4, row.y() + line, row.width() - 8, line) if stacked else QRectF(
-                    row.x() + name_w, row.y(), (on.x() if on else row.right()) - row.x() - name_w - 6, line)
-                text = ("Shows after Claude Code's next reply in a terminal, or its /usage" if on is None
-                        else "Show its 5-hour and weekly limits")
-                p.drawText(hint, Qt.AlignLeft | Qt.AlignVCenter, fm.elidedText(text, Qt.ElideRight, int(hint.width())))
-                if on is None:
-                    continue
-                self._pill(p, on, "Turn on", self._go_button("limits:on"))
-                continue
-            half = row.width() - 8 if stacked else (row.width() - name_w - 8) / 2
-            for j, (key, label) in enumerate((("five_hour", "5h"), ("seven_day", "week"))):
-                x = row.x() + 4 if stacked else row.x() + name_w + j * (half + 8)
-                ly = row.y() + (1 + j) * (line - 4) + 2 if stacked else row.y()
-                w = windows.get(key)
-                p.setFont(self.f_hint)
-                p.setPen(QColor(226, 232, 240, 120))
-                p.drawText(QRectF(x, ly, 28, line), Qt.AlignLeft | Qt.AlignVCenter, label)
-                pct = w.get("pct") if w else None
-                # Estimated from the transcripts: "≈"; not calibrated yet: the tokens used in the window instead.
-                amount = (f"{'≈' if w.get('est') else ''}{pct}%" if pct is not None
-                          else f"{tokens_label(int(w.get('tokens') or 0))} tok") if w else ""
-                text = amount + (f" · {_when_text(w['resets'])}" if w.get("resets") else "") if w else "–"
-                tw = fm.horizontalAdvance("≈100% · 00:00") + 2  # the same for every row: the bars line up
-                bar = QRectF(x + 30, ly + line / 2 - 2, max(10.0, half - 30 - tw - 6), 4)
-                p.setPen(Qt.NoPen)
-                p.setBrush(QColor(255, 255, 255, 26))
-                p.drawRoundedRect(bar, 2, 2)
-                if pct is not None:
-                    fill = _limit_color(pct)
-                    if w.get("est"):
-                        fill.setAlpha(170)  # an estimate: a touch softer than a reading
-                    p.setBrush(fill)
-                    p.drawRoundedRect(QRectF(bar.x(), bar.y(), max(4.0, bar.width() * pct / 100), 4), 2, 2)
-                p.setPen(QColor(226, 232, 240, 200 if w else 90))
-                p.drawText(QRectF(bar.right() + 6, ly, tw, line), Qt.AlignLeft | Qt.AlignVCenter, text)
-        p.restore()
-
     def _paint_history(self, p: QPainter, progress: float) -> None:
         """The last few things you said, newest first; click one to copy it."""
         appear = max(0.0, min(1.0, (progress - 0.55) / 0.45))
@@ -2940,8 +3673,7 @@ class VoiceWidget(QWidget):
             tip = self._tooltip(hit)
             if tip:
                 at = e.globalPosition().toPoint()
-                below = self.mapToGlobal(QPointF(0, self.height())).toPoint().y() - 8
-                QToolTip.showText(QPoint(at.x(), max(at.y(), below)), tip, self)
+                QToolTip.showText(at + QPoint(12, 16), tip, self)  # beside the mouse, like any tooltip
             else:
                 QToolTip.hideText()
 
@@ -3026,16 +3758,19 @@ class VoiceWidget(QWidget):
                     "button turns them off)")
         if key and key.startswith("unsched:"):
             return "Cancel this scheduled prompt"
-        if key == "limits:refresh":
-            return "Refresh now: asks Claude Code for its usage (claude -p /usage) and re-reads the others"
-        if key == "limits:on":
-            return ("Adds agent-voice's status line to Claude Code: it reports the limits after each reply. "
-                    "Undo: agent-voice usage off")
         if key == "primary":
             prim = self._primary()
             return prim[2] if prim else ""
         if key == "chevron":
             return "Collapse" if self.expanded else "All actions"
+        if key == "tab:utils":
+            return ("Hide Utils" if self.side_open["utils"] else
+                    "Utils: Pomodoro, timers, your to-do list, reminders, notes, clipboard")
+        if key == "tab:companion":
+            return ("Hide the Companion" if self.side_open["companion"] else
+                    "Companion: what's playing, today's meetings, your agents' usage")
+        if key == "strip":
+            return "Open Utils"
         if key == "tuck":
             return "Tuck away until something new happens"
         if key == "history":
@@ -3162,6 +3897,13 @@ class VoiceWidget(QWidget):
             _post("/output", {"mode": mode})
         elif key == "chevron":
             self.toggle_expanded()
+        elif key.startswith("tab:"):
+            self.toggle_side(key[4:])
+        elif key == "strip":  # the running timer: open the panel and Utils
+            self.side_open["utils"] = True
+            if not self.expanded:
+                self.toggle_expanded()
+            self._save_position()
         elif key == "tuck":
             self.tuck()
         elif key == "history":
@@ -3260,12 +4002,6 @@ class VoiceWidget(QWidget):
             else:
                 self._note(f"{name[:1].upper()}{name[1:]} isn't installed on this PC. Install it, then click "
                            "here to connect it. The ? opens the setup guide.")
-        elif key == "limits:refresh":
-            _post("/limits_refresh")
-            self.st["limits_refreshing"] = True
-        elif key == "limits:on":
-            _post("/usage_line", {"enable": True})
-            self.st["usage_line"] = "on"  # the row goes until the first reply brings the numbers
         elif key == "guide":
             QDesktopServices.openUrl(QUrl(GUIDE_URL))
         elif key == "openchat":
@@ -3374,6 +4110,7 @@ class VoiceWidget(QWidget):
         self._tucked = self._news()
         self._tuck_hover = True
         self.expanded = False
+        self._panel_closed()
         self._reveal_until = 0.0
         QToolTip.hideText()
 
@@ -3444,9 +4181,170 @@ class VoiceWidget(QWidget):
     def toggle_expanded(self) -> None:
         if self.compact:
             self.toggle_compact()
+        if self._folding:  # changed your mind while the side panels fold away: they come back
+            self._folding = False
+            self._kick()
+            return
+        if self.expanded and any(side.isVisible() for side in self.sides.values()):
+            self._folding = True  # one thing at a time: the side panels fold away, then _tick closes the panel
+            self._kick()
+            return
         self.expanded = not self.expanded  # _follow_size() glides to the new height
+        if not self.expanded:
+            self._panel_closed()
         self._kick()
         self._save_position()
+
+    def _panel_closed(self) -> None:
+        """The boxes opened from the panel go with it (the history box may never have had the focus to lose)."""
+        self.history_box.hide()
+        for side in self.sides.values():
+            side.input.hide()
+
+    # -- the side panels: Utils on the right, the Companion on the left -------------------------------------
+    def toggle_side(self, name: str) -> None:
+        self.side_open[name] = not self.side_open[name]
+        if self.side_open[name] and not self.expanded:
+            self.toggle_expanded()
+        self._kick()
+        self._save_position()
+
+    def set_side_widget(self, name: str, card: str, on: bool) -> None:
+        chosen = set(self.side_widgets[name]) | {card} if on else set(self.side_widgets[name]) - {card}
+        self.side_widgets[name] = [w for w in SIDE_CARDS[name] if w in chosen]
+        self.sides[name].refresh()
+        self._save_position()
+
+    def _side_max_h(self) -> int:
+        """A side panel is never taller than the open panel beside it."""
+        if not self.island:
+            return 10_000
+        return int(NOTCH_H + self._expanded_h() - BAR_H) - 16
+
+    def _side_wanted(self, name: str) -> bool:
+        """Shown beside the open panel, once the notch is down and open (not over a question)."""
+        if not (self.side_open[name] and self.expanded and self.isVisible() and self.island and not self._folding
+                and not self._question() and (not self.notch or self._reveal > 0.9)):
+            return False
+        # Opening: the panel first, then the side panels (once it has stopped growing).
+        settled = abs(self._h - self._target_size()[1]) < 2 and abs(self._nw - self._nw_target()) < 1
+        return self.sides[name].isVisible() or settled
+
+    def _tab_rect(self, name: str = "utils") -> QRectF | None:
+        """A side panel's arrow, stuck to the open panel's edge (in the notch's canvas, beside the island)."""
+        if not (self.notch and self.expanded and not self._question()) or self._reveal < 0.9:
+            return None
+        mid = NOTCH_H + max(0.0, self._panel_h()) / 2
+        x = self.nw - NOTCH_EAR - 1 if name == "utils" else NOTCH_EAR + 1 - TAB_W
+        return QRectF(x, mid - TAB_H / 2, TAB_W, TAB_H)
+
+    def _paint_side_tabs(self, p: QPainter) -> None:
+        for name in SIDE_CARDS:
+            tab = self._tab_rect(name)
+            if tab is None:
+                continue
+            right = name == "utils"
+            p.save()
+            p.resetTransform()  # paintEvent moved it to the drawn island; the tab is placed from the canvas
+            p.translate((self.width() - self.nw) / 2, 0)
+            p.setOpacity(_smooth((self._reveal - 0.9) / 0.1) if self._reveal < 1 else 1.0)
+            path = QPainterPath()
+            path.addRoundedRect(tab, 8, 8)
+            square = QPainterPath()  # flush with the island: rounded on the outside only
+            square.addRect(QRectF(tab.x() if right else tab.right() - 8, tab.y(), 8, tab.height()))
+            p.fillPath(path.united(square), QColor(0, 0, 0))
+            ht = self.hover_t.get(f"tab:{name}", 0.0)
+            is_open = self.side_open[name]
+            p.setFont(self.f_icon_small)
+            p.setPen(QColor(169, 155, 255, int(170 + 85 * ht)) if is_open else
+                     QColor(255, 255, 255, int(150 + 105 * ht)))
+            pointing = ("left" if is_open else "right") if right else ("right" if is_open else "left")
+            p.drawText(tab.adjusted(1 if right else -1, 0, 0, 0), Qt.AlignCenter, ICONS[pointing])
+            p.restore()
+
+    def _clip_changed(self) -> None:
+        """Something was copied: kept in memory (the last few), never written anywhere. Password managers mark
+        their copies as private: those are left out."""
+        mime = QApplication.clipboard().mimeData()
+        if mime is None or any("ExcludeClipboardContentFromMonitorProcessing" in f or "Clipboard Viewer Ignore" in f
+                               for f in mime.formats()):
+            return
+        text = mime.text().strip() if mime.hasText() else ""
+        if not text or len(text) > 20000:
+            return
+        self.clips = [text, *[c for c in self.clips if c != text]][:10]
+        self.utils.refresh()
+
+    def _last_thread(self) -> str:
+        return ((self.st.get("thread") or {}).get("session") or (self.st.get("last_reply") or {}).get("session")
+                or "")
+
+    def _strip_items(self) -> list[tuple[str, str, str, float | None, str]]:
+        """The notch's second line: (icon, label, time, progress, colour) for the Pomodoro, each timer and a running
+        stopwatch.
+
+        Not in Do not disturb (the notch stays up then) nor in the floating bar's compact orb."""
+        data = self.st.get("companion") or {}
+        if not self.island or self._output() == "silent":
+            return []
+        now, items = time.time(), []
+        pomo = data.get("pomodoro") or {}
+        if pomo.get("phase"):
+            left = max(0.0, pomo["end"] - now) if pomo["end"] else float(pomo["left"])
+            items.append((ICONS["bolt"] if pomo["end"] else ICONS["pause"], companion.PHASES[pomo["phase"]],
+                          companion_clock(left), 1 - left / max(1.0, float(pomo["length"])),
+                          SidePanel.BREAK if pomo["phase"] != "focus" else SidePanel.TOMATO))
+        for t in data.get("timers") or []:
+            left = max(0.0, t["end"] - now) if t["end"] else float(t["left"])
+            items.append((ICONS["clock"] if t["end"] else ICONS["pause"], t.get("label") or "",
+                          companion_clock(left), 1 - left / max(1.0, float(t["total"])), "#FBBF24"))
+        sw = data.get("stopwatch") or {}
+        if sw.get("start"):
+            items.append((ICONS["stopwatch"], "", companion_clock(float(sw["elapsed"]) + now - sw["start"]), None,
+                          ""))
+        meeting = next((e for e in (self.st.get("agenda") or {}).get("events") or []  # on now, or within 15 min
+                        if not e["all_day"] and e["end"] > now and e["start"] - now < 15 * 60), None)
+        if meeting:
+            soon = meeting["start"] - now
+            items.append((ICONS["calendar"], meeting["title"],
+                          "now" if soon <= 0 else f"in {max(1, math.ceil(soon / 60))} min", None, ""))
+        return items[:3]
+
+    def _strip_h(self) -> int:
+        return STRIP_H if self._strip_items() and not self._question() else 0
+
+    def _strip_key(self) -> tuple | None:
+        """What the second line shows, to the second (None when it isn't seen)."""
+        if not self._strip_h() or self.expanded or (self.notch and self._reveal < 0.3):
+            return None
+        return tuple(item[2] for item in self._strip_items())
+
+    def _paint_strip(self, p: QPainter) -> None:
+        """Under the notch row: each running clock, and the first timer's progress along the bottom."""
+        items = self._strip_items()
+        x, y = NOTCH_EAR + 38.0, NOTCH_H - 4
+        fm = QFontMetrics(self.f_notch_sub)
+        for icon, label, shown, _done, _color in items:
+            p.setFont(self.f_icon_small)
+            p.setPen(QColor(251, 191, 36, 230) if icon == ICONS["clock"] else QColor(248, 113, 113, 230)
+                     if icon == ICONS["bolt"] else QColor(255, 255, 255, 160))
+            p.drawText(QRectF(x, y, 16, 18), Qt.AlignCenter, icon)
+            x += 19
+            text = f"{label}  {shown}" if label else shown
+            p.setFont(self.f_notch_sub)
+            p.setPen(QColor(255, 255, 255, 215))
+            width = min(fm.horizontalAdvance(text), 170)
+            p.drawText(QRectF(x, y, width + 2, 18), Qt.AlignLeft | Qt.AlignVCenter,
+                       fm.elidedText(text, Qt.ElideMiddle, int(width + 2)))
+            x += width + 18
+        progress, color = next(((done, c) for *_rest, done, c in items if done is not None), (None, ""))
+        if progress is not None:
+            bar = QRectF(NOTCH_EAR + 38, NOTCH_H + STRIP_H - 7, self.nw - 2 * NOTCH_EAR - 76, 2)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 30))
+            p.drawRoundedRect(bar, 1, 1)
+            p.setBrush(QColor(color))
+            p.drawRoundedRect(QRectF(bar.x(), bar.y(), bar.width() * max(0.0, min(1.0, progress)), 2), 1, 1)
 
     def contextMenuEvent(self, e):
         menu = QMenu(self)
@@ -3557,6 +4455,9 @@ class Tray(QSystemTrayIcon):
         m.addSeparator()
         add("New thread…", w.open_new_thread, online, key=hk.get("new_thread", ""))
         add("Search history…", w.open_history, online)
+        add("Utils (Pomodoro, timers, to-do, notes...)", lambda: w.toggle_side("utils"), online, w.side_open["utils"])
+        add("Companion (music, meetings, usage)", lambda: w.toggle_side("companion"), online,
+            w.side_open["companion"])
         add("Reply now", lambda: _post("/reply"), online, key=hk.get("reply", ""))
         add("Stop", lambda: _post("/stop"), online, key=hk.get("stop", ""))
         add("Read selection", lambda: _post("/read"), online, key=hk.get("read_selection", ""))

@@ -89,7 +89,33 @@ def claude(remove: bool = False) -> str:
     if remove and _ours(str((settings.get("statusLine") or {}).get("command", ""))):
         settings.pop("statusLine")
     _write_json(path, settings)
-    return f"{'removed from' if remove else 'installed in'} {path}"
+    return f"{'removed from' if remove else 'installed in'} {path}; {claude_mcp(remove)}"
+
+
+def claude_mcp(remove: bool = False) -> str:
+    """The to-do list for Claude Code: an MCP server with only those tools (its hooks do the rest).
+
+    Claude keeps user MCP servers in ~/.claude.json, which it rewrites itself: its own `claude mcp` command edits
+    it, never us. Run without a shell (Git Bash rewrites arguments)."""
+    import subprocess
+
+    from agent_voice.launch import find_cli
+
+    claude_cli = find_cli("claude")
+    if not claude_cli:
+        return "to-do list: Claude Code's `claude` command not found"
+    flags = {"creationflags": 0x08000000} if sys.platform == "win32" else {}  # CREATE_NO_WINDOW
+    try:
+        subprocess.run([claude_cli, "mcp", "remove", "--scope", "user", "agent-voice"], capture_output=True,
+                       timeout=60, **flags)
+        if remove:
+            return "to-do list removed"
+        entry = mcp_entry("claude", hooked=True)
+        done = subprocess.run([claude_cli, "mcp", "add", "--scope", "user", "agent-voice", "--", entry["command"],
+                               *entry["args"], "--todo-only"], capture_output=True, timeout=60, **flags)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"to-do list not added ({exc})"
+    return "to-do list added (MCP)" if done.returncode == 0 else "to-do list not added (`claude mcp add` failed)"
 
 
 def usage_line(enable: bool = True) -> str:

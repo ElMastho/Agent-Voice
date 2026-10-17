@@ -42,7 +42,7 @@ class History:
 
     def add(self, kind: str, text: str, session: str = "", agent: str = "", title: str = "",
             at: float | None = None) -> None:
-        """kind: 'you' (a prompt) or 'reply' (an agent's turn)."""
+        """kind: 'you' (a prompt), 'reply' (an agent's turn) or 'note'."""
         text = (text or "").strip()
         if not text:
             return

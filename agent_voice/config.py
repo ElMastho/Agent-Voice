@@ -127,6 +127,12 @@ DEFAULTS: dict = {
     "barge_in": {"enabled": True, "speakers": False},
     # Every prompt and reply kept in a local, searchable file (~/.agent-voice/history.db) for `days` days.
     "history": {"enabled": True, "days": 90},
+    # The companion's Pomodoro: `focus` minutes of work, a `short` break, and a `long` one after every `every` focus.
+    # hold: during a focus session, agents' replies wait (approvals still come through) and are told at the break.
+    "pomodoro": {"focus": 25, "short": 5, "long": 15, "every": 4, "hold": True},
+    # Today's meetings in the companion (calendar links are added from it). quiet_in_meetings: replies wait during a
+    # meeting, as in a call, and are told after it.
+    "calendar": {"quiet_in_meetings": False},
     # Out of quota: once the limit resets, send this to the thread so it picks up where it stopped (auto: without
     # asking; off: only after "resume when it resets" or a click on Resume).
     "resume": {"auto": True, "message": "Continue."},

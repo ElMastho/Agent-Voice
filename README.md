@@ -46,6 +46,8 @@ Everything runs **locally on the CPU**: no cloud, no API key, no audio leaving y
 | 🎯 **Focus** | In a call, presenting, or with an app full screen, replies are held (approvals still come through) and a catch-up follows. |
 | 🌇 **Daily recap** | At 18:00 (or *"Hey Claude, daily recap"*): what each thread did today, what's still waiting, your limits and tokens. |
 | 🗣️ **A natural voice** (opt-in) | *Voice: Natural* in the panel switches to [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M): expressive, close to a cloud voice, still offline. *Light* (Piper) stays the default, easier on the battery. |
+| 🧰 **Utils** (right) | The arrow on the open panel's right edge: a **Pomodoro** that holds agents' replies while you focus, **timers**, a **stopwatch**, your **to-do list** (agents add what only you can do), **reminders**, **notes** and your **clipboard**. *"Hey Claude, start a pomodoro"*, *"timer 10 minutes"*, *"remind me at 4 pm to call Paul"*, *"note: ..."*. |
+| 🎵 **Companion** (left) | The arrow on its left edge: **what's playing** (Spotify, YouTube) with its controls, **today's meetings** (from your calendar's iCal link, or Outlook) and your agents' **usage**. A meeting about to start shows on the notch. |
 | 🔎 **History** | Every prompt and every reply, from every agent, searchable in one box: "which one fixed the login bug last week?" Kept on this PC (90 days). |
 | ⏳ **Take it back** | What you dictate waits 5 seconds under the notch before it's sent: say *"wait"* to fix it, *"cancel that"* to drop it, or keep talking to add to it. |
 | 👀 **"Look at this"** | *"Hey Claude, look at this and tell me why it's red"*: a picture of the window you're looking at goes to your thread, with your question. |
@@ -57,7 +59,7 @@ Everything runs **locally on the CPU**: no cloud, no API key, no audio leaving y
 | ⚡ **Saved prompts** | *"Hey Claude, run the tests"*, *"tell Codex to commit this"*: a name you say, a full prompt sent (`shortcuts`). |
 | ➕ **Start a new thread** | `Ctrl+Alt+N`, *+ New* in the panel, or *"Hey Claude, new thread: add a health check"*: a new Claude Code session in the desktop app, or Claude Code / Codex / Gemini CLI in a new terminal tab. |
 | 📣 **Talk to any thread by name** | *"Tell Codex to run the tests"* is typed into Codex's window and sent, wherever you are. |
-| 📊 **Today, at a glance** | Open, the notch takes a third of the screen: today's turns, threads and tokens, the turns by hour, Claude Code's and Codex's 5-hour and weekly **limits** (a heads-up at 90%), *Done · 3 files changed · tests passed*, each conversation's context. Rest on a thread to read its last reply in full. |
+| 📊 **Today, at a glance** | Open, the notch takes a third of the screen: today's turns, threads and tokens, the turns by hour, Claude Code's and Codex's 5-hour and weekly **limits** (in the Companion; a heads-up at 90%), *Done · 3 files changed · tests passed*, each conversation's context. Rest on a thread to read its last reply in full. |
 | 📎 **Drop files on the notch** | Screenshots, logs, files: dropped on the notch, they land in the conversation's prompt. |
 | 🗣️ **Speaks every reply** | Final answers and the progress notes between tool calls, never twice. Markdown, code and paths are cleaned out so it sounds natural. |
 | 📖 **Read along** | The text being spoken hangs under the notch, from the sentence you're hearing, and leaves 5 seconds after the voice stops. |
@@ -185,6 +187,34 @@ Once your reply is transcribed, it drops down under the notch framed in green, t
 
 **Take it back.** What you dictate and send waits 5 seconds under the notch first, with a countdown and *Send now*, *Edit* and *Cancel*. The mic stays open meanwhile: say *"wait"* (or *"attends"*) and it's typed into the conversation without being sent, to fix it there; *"cancel that"* drops it; *"send it"* sends it now; anything else you say is added to the message and the countdown starts again. Scheduled prompts and replies you type aren't held. `take_back.seconds` sets the wait (0: off).
 
+### Utils and the Companion: either side of the panel
+
+<p align="center">
+  <img src="docs/images/widgets.jpg" alt="The Companion on the left of the open notch (what's playing, today's meetings, usage) and Utils on the right (Pomodoro, timer, to-do, notes, clipboard); the Pomodoro, a timer and a meeting on the notch's second line; a timer that ended" width="760">
+</p>
+
+Two small arrows on the open panel's edges open a panel on each side. **⋯** picks which cards each shows.
+
+**The Companion**, on the left, the friendly side:
+
+- **Now playing**: Spotify, or YouTube (and other sites) in a browser: the song, the artist, ⏮ ⏯ ⏭. Read from the players' window titles; the buttons are the keyboard's media keys. Or say *"pause the music"*, *"next song"*.
+- **Today**: your meetings, *now* highlighted. Paste your calendar's **iCal link** (Outlook: *Settings › Calendar › Shared calendars › Publish a calendar*, the ICS link; Google: *Settings › your calendar › Secret address in iCal format*), or a `.ics` file; Outlook (classic) is read while it's open. A meeting in the next 15 minutes shows on the notch (*Design review · in 10 min*). `calendar.quiet_in_meetings` holds replies during meetings, as in a call.
+- **Usage**: Claude Code's and Codex's 5-hour and weekly limits, and when they reset.
+
+**Utils**, on the right, the tools:
+
+- **Pomodoro**: 25 minutes of focus, a 5-minute break, a 15-minute one after every 4th; pause, skip, stop, and how many today (`pomodoro` in the config sets the lengths). **While you focus, agents' replies wait** (approvals still come through) and the break starts with a catch-up of what happened (`pomodoro.hold`).
+- **Timer**: one click on *1m*, *5m*, *10m*... (or **…** for *"12 min tea"*), several at once, paused and resumed.
+- **Stopwatch**: start, pause, reset.
+- **To-do**: tick, add, remove, *Clear done*. Your agents use it too: when a reply ends with *"To-do for you: run the migration on staging"* (Claude Code is asked to add such lines), it lands on your list, tagged with the agent; click it to open that conversation. Claude Code (through its own MCP server, added by `agent-voice install claude`) and every MCP app can also read the list, add to it and tick items off.
+- **Reminders**: *16:00 call Paul*, *in 20 minutes stretch*, *tomorrow at 9 send the invoice*.
+- **Notes**: one line, typed or said (*"note: the bug only happens with two monitors"*), kept and searchable in History.
+- **Clipboard**: the last things you copied (in memory only, never written; password managers' copies are left out): click one to copy it again, ➤ to put it in the current thread's message box.
+
+Or say it: Utils' 🎤, or *"Hey Claude, ..."*: *"start a pomodoro"*, *"skip the break"*, *"timer 10 minutes for the tea"*, *"start the stopwatch"*, *"add call the bank to my list"*, *"remind me at 4 pm to call Paul"*, *"minuteur 5 minutes"*, *"rappelle-moi dans 10 minutes de sortir le linge"*. Into Utils' mic, anything else joins the to-do list.
+
+While the Pomodoro, a timer or the stopwatch runs, the notch stays down with a **second line**: each clock and the timer's progress and a meeting about to start (click it to open Utils). When a timer ends or a reminder is due: a banner with *+5 min* and *Done*, a chime and the voice (*"Time's up: the tea."*); just the chime in Chimes, the banner alone in Do not disturb. Each Pomodoro phase ends the same way (*"Time for a break: 5 min."*, *"Back to focus."*), and the next one starts by itself. Everything is kept by the service, through restarts; a timer that ran out while the PC slept is still told.
+
 ### Chimes: the reply as a banner
 
 <p align="center">
@@ -283,7 +313,7 @@ Or click the agent in the notch's **Agents** row. Installers back up the file th
 
 ### The MCP server
 
-`agent-voice mcp` speaks the [Model Context Protocol](https://modelcontextprotocol.io) over stdio, so any MCP app can use it. It gives the agent four tools, and tells it when to use them:
+`agent-voice mcp` speaks the [Model Context Protocol](https://modelcontextprotocol.io) over stdio, so any MCP app can use it. It gives the agent these tools, and tells it when to use them:
 
 | Tool | What it does |
 |---|---|
@@ -291,8 +321,9 @@ Or click the agent in the notch's **Agents** row. Installers back up the file th
 | `set_status` | *Working · Running the tests* in the notch, with a timer. |
 | `ask_user` | Asks you a question, with options or free text, out loud and in the notch, and waits for your spoken or clicked answer. |
 | `notify` | A banner without the voice; `needs_you` puts it in **Needs you**. |
+| `todo_list`, `todo_add`, `todo_update` | Your to-do list in Utils: read it, add to it, tick items off, reword or remove them. |
 
-Apps that already speak through hooks (Codex, Gemini CLI, Cursor) get the server without `speak`, so nothing is read twice. To add it by hand elsewhere: command `agent-voice` (or `agent-voice.exe`), arguments `mcp --client <name>`.
+Apps that already speak through hooks (Codex, Gemini CLI, Cursor) get the server without `speak`, so nothing is read twice; Claude Code gets the to-do tools only (`--todo-only`: its hooks do the rest), added with its own `claude mcp add`. To add it by hand elsewhere: command `agent-voice` (or `agent-voice.exe`), arguments `mcp --client <name>`.
 
 ### In the browser
 

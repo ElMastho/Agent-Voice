@@ -59,6 +59,7 @@ def test_read_along_leaves_with_the_voice(app):
 
 def _widget(st):
     w = widget.VoiceWidget()
+    w.poller.stop()
     w.poller.status.disconnect()
     w.notch, w.compact, w.expanded = True, False, True
     w._on_status(st)
@@ -245,18 +246,22 @@ def test_update_chip_installs_and_the_widget_quits(app, monkeypatch):
     assert w._update_label() == "Restarting…" and quits == [widget.QApplication.quit]
 
 
-def test_limits_rows_and_turning_claude_on(app, monkeypatch):
+def test_usage_card_rows_refresh_and_turning_claude_on(app, monkeypatch):
     posted = []
     monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
     far = 4102444800
     w = _widget({"phase": "idle", "threads": [], "agents": {"claude": "on"}, "usage_line": "off",
                  "limits": {"codex": {"five_hour": {"pct": 48, "resets": far}}}})
     assert [s for s, _ in w._limit_rows()] == ["codex", "claude"]  # Claude: a row to turn it on
-    assert w._agents_y() == w._limits_y() + 16 + 2 * widget.LIMIT_H + 8
-    w._activate("limits:on")
-    assert posted == [("/usage_line", {"enable": True})] and "limits:on" not in w._rects()
-    assert [s for s, _ in w._limit_rows()] == ["codex", "claude"]  # still there: its numbers are on their way
-    w.grab()  # paints the section without errors
+    assert not any(k.startswith("limits:") for k in w._rects())  # only in the Companion's Usage card now
+    side = w.companion
+    side._build(None)
+    side.activate("uon")
+    side.activate("urefresh")
+    assert posted == [("/usage_line", {"enable": True}), ("/limits_refresh", None)]
+    side._build(None)
+    assert "uon" not in side.hits  # on its way: no button
+    side.grab()  # paints the card without errors
     assert widget._limit_color(95).name() == "#f87171"
 
 
@@ -291,7 +296,7 @@ def test_phone_card_and_upcoming(app, monkeypatch):
     w = _widget(st)
     rects = w._rects()
     assert {"phone", "phone:test", "phone:new", "phone:fold", "phone:copy", "unsched:0"} <= set(rects)
-    assert w._limits_y() == w._sched_y() + w._sched_h() and w._sched_y() == w._phone_y() + widget.PHONE_H + 10
+    assert w._agents_y() == w._sched_y() + w._sched_h() and w._sched_y() == w._phone_y() + widget.PHONE_H + 10
     w._activate("phone:test")
     w._activate("unsched:0")
     assert posted[:2] == [("/phone", {"action": "test"}), ("/schedule_cancel", {"id": 3})]
@@ -433,3 +438,228 @@ def test_history_box_lists_and_shows_entries(app, monkeypatch):
     assert "Nothing found" in box.body.toPlainText()
     w = _widget({"phase": "idle", "threads": []})
     assert "history" in w._rects() and "every conversation" in w._tooltip("history")
+
+
+COMPANION = {"timers": [{"id": 1, "label": "Tea", "total": 600, "end": 0, "left": 240.0}],
+             "stopwatch": {"start": 0.0, "elapsed": 0.0},
+             "todos": [{"id": 2, "text": "Review the PR", "done": False, "source": "claude", "at": 0},
+                       {"id": 3, "text": "Release 0.6.0", "done": True, "source": "you", "at": 0}],
+             "reminders": [{"id": 4, "text": "Stand-up", "at": 2_000_000_000}]}
+
+
+def test_companion_opens_beside_the_panel(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    w = _widget({"phase": "idle", "threads": [], "companion": COMPANION})
+    w._reveal = 1.0
+    assert "tab:utils" in w._rects() and "Utils" in w._tooltip("tab:utils")
+    w._activate("tab:utils")
+    w.show()
+    assert w.side_open['utils'] and w._side_wanted('utils')
+    w.utils.step(w.visual_rect(), True)
+    side, beside = w.utils.geometry(), w.visual_rect()
+    assert w.utils.isVisible() and (side.left() > beside.right() or side.right() < beside.left())  # apart
+    hits = w.utils.hits
+    assert {"preset:5", "tpause:1", "tcancel:1", "swtoggle", "todo:2", "tclear", "rdel:4", "todo_add"} <= set(hits)
+    for key in ("preset:5", "tpause:1", "todo:2", "tclear", "swtoggle"):
+        w.utils.activate(key)
+    assert posted == [("/timer", {"action": "start", "seconds": 300}), ("/timer", {"action": "resume", "id": 1}),
+                      ("/todo", {"action": "toggle", "id": 2}), ("/todo", {"action": "clear_done"}),
+                      ("/stopwatch", {"action": "toggle"})]
+    w.set_side_widget("utils", "stopwatch", False)
+    assert "swtoggle" not in w.utils.hits and w.side_widgets["utils"] == ["pomodoro", "timer", "todo", "reminders", "notes", "clipboard"]
+    w.toggle_expanded()  # the panel closes: Utils goes with it, and is back when it opens
+    assert not w._side_wanted('utils') and w.side_open['utils']
+    w.hide()
+
+
+def test_notch_shows_a_running_timer_on_a_second_line(app, monkeypatch):
+    now = widget.time.time()
+    running = {**COMPANION, "timers": [{"id": 1, "label": "Tea", "total": 600, "end": now + 125, "left": 0.0}]}
+    w = _widget({"phase": "idle", "threads": [], "companion": running})
+    w.expanded = False
+    assert w._target_size()[1] == widget.NOTCH_H + widget.STRIP_H and "strip" in w._rects()
+    w._reveal = 1.0
+    assert w._strip_key() in (("2:05",), ("2:04",))
+    w._on_status({"phase": "idle", "threads": [], "companion": running, "output": "silent"})
+    assert w._strip_h() == 0  # Do not disturb: the notch stays up
+    w._on_status({"phase": "idle", "threads": [], "companion": COMPANION})
+    assert w._strip_items()[0][2] == "4:00"  # paused: what was left
+
+
+def test_timer_banner_snoozes_or_ends(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    b = widget.Banner()
+    b.present({"id": 3, "text": "Tea", "kind": "timer", "tag": "Timer done", "at": 0,
+               "snooze": {"kind": "timer", "seconds": 300, "label": "Tea"}}, 420)
+    assert set(b._buttons()) == {"snooze", "ok"} and b.until > widget.time.time() + 50
+    QTest.mouseClick(b, Qt.LeftButton, Qt.NoModifier, b._buttons()["snooze"].center().toPoint())
+    assert posted == [("/timer", {"action": "start", "seconds": 300, "label": "Tea"})] and b.until == 0.0
+
+
+def test_quick_input_parses_before_sending(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    box = widget.QuickInput()
+    box.mode = "reminder"
+    box.edit.setText("someday stretch")
+    box.submit()
+    assert posted == [] and "248,113,113" in box.edit.styleSheet()  # not a time: said, kept
+    box.edit.setText("in 20 minutes stretch")
+    box.submit()
+    assert posted[0][0] == "/reminder" and posted[0][1]["text"] == "Stretch"
+    box.mode = "timer"
+    box.edit.setText("12 min tea")
+    box.submit()
+    assert posted[1] == ("/timer", {"action": "start", "seconds": 720, "label": "Tea"})
+
+
+def test_every_companion_control_answers_a_real_click(app, monkeypatch):
+    posted, opened = [], []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    running = {**COMPANION, "stopwatch": {"start": widget.time.time() - 5, "elapsed": 0.0}}
+    w = _widget({"phase": "idle", "threads": [], "companion": running})
+    w._reveal, w.side_open['utils'] = 1.0, True
+    w.show()
+    side = w.utils
+    side.step(w.visual_rect(), True)
+    side.repaint()  # what is drawn is what is clickable
+    monkeypatch.setattr(side.input, "open", lambda mode, at: opened.append(mode))
+    monkeypatch.setattr(side, "choose_widgets", lambda: opened.append("menu"))
+    expected = {"mic": ("/companion_listen", None), "preset:25": ("/timer", {"action": "start", "seconds": 1500}),
+                "tpause:1": ("/timer", {"action": "resume", "id": 1}), "tcancel:1": ("/timer", {"action": "cancel", "id": 1}),
+                "swtoggle": ("/stopwatch", {"action": "toggle"}), "swreset": ("/stopwatch", {"action": "reset"}),
+                "todo:2": ("/todo", {"action": "toggle", "id": 2}), "tdel:2": ("/todo", {"action": "remove", "id": 2}),
+                "tclear": ("/todo", {"action": "clear_done"}), "rdel:4": ("/reminder", {"action": "remove", "id": 4})}
+    for key, call in expected.items():
+        posted.clear()
+        QTest.mouseClick(side, Qt.LeftButton, Qt.NoModifier, side.hits[key].center().toPoint())
+        assert posted == [call], key
+    for key, mode in (("tcustom", "timer"), ("todo_add", "todo"), ("rem_add", "reminder"), ("menu", "menu")):
+        QTest.mouseClick(side, Qt.LeftButton, Qt.NoModifier, side.hits[key].center().toPoint())
+        assert opened[-1] == mode, key
+    w.hide()
+
+
+def test_pomodoro_card_and_second_line(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    now = widget.time.time()
+    pomo = {"phase": "focus", "end": now + 600, "left": 0.0, "length": 1500, "round": 1, "today": 1,
+            "day": widget._today(now), "every": 4, "focus_length": 1500}
+    w = _widget({"phase": "idle", "threads": [], "companion": {**COMPANION, "timers": [], "pomodoro": pomo}})
+    w._reveal, w.side_open['utils'] = 1.0, True
+    w.show()
+    w.utils.step(w.visual_rect(), True)
+    w.utils.repaint()
+    for key, action in (("ptoggle", "toggle"), ("pskip", "skip"), ("pstop", "stop")):
+        QTest.mouseClick(w.utils, Qt.LeftButton, Qt.NoModifier, w.utils.hits[key].center().toPoint())
+        assert posted[-1] == ("/pomodoro", {"action": action})
+    w.expanded = False
+    assert w._strip_items()[0][1] == "Focus" and w._strip_items()[0][2] in ("10:00", "9:59")
+    w.hide()
+
+
+def test_companion_folds_before_the_panel_and_opens_after_it(app):
+    w = _widget({"phase": "idle", "threads": [], "companion": COMPANION})
+    w._reveal, w.side_open['utils'] = 1.0, True
+    w.show()
+
+    def run(frames, until):
+        for _ in range(frames):
+            w._last_tick -= widget.FRAME
+            w._tick()
+            if until():
+                return True
+        return False
+
+    assert run(120, lambda: w.utils.isVisible())
+    w.toggle_expanded()  # close: the side panels first, the panel still open meanwhile
+    assert w.expanded and not w._side_wanted('utils')
+    assert run(200, lambda: not w.expanded) and not w.utils.isVisible()
+    assert run(200, lambda: abs(w._h - w._target_size()[1]) < 0.5)  # the panel has closed
+    w.toggle_expanded()  # open: the panel grows first, the side panels wait for it
+    w._tick()
+    assert w.expanded and not w.utils.isVisible()
+    assert run(200, lambda: w.utils.isVisible())
+    w.hide()
+
+
+def test_companion_is_never_taller_than_the_panel(app, monkeypatch):
+    todos = [{"id": 100 + i, "text": f"Item {i}", "done": False, "source": "you", "at": 0} for i in range(8)]
+    reminders = [{"id": 200 + i, "text": f"R {i}", "at": 2_000_000_000 + i} for i in range(5)]
+    timers = [{"id": 300 + i, "label": "", "total": 600, "end": 0, "left": 60.0} for i in range(3)]
+    w = _widget({"phase": "idle", "threads": [], "companion": {**COMPANION, "todos": todos, "reminders": reminders,
+                                                                  "timers": timers}})
+    w._reveal, w.side_open['utils'] = 1.0, True
+    monkeypatch.setattr(w, "_side_max_h", lambda: 400)
+    w.show()
+    side = w.utils
+    side.step(w.visual_rect(), True)
+    side.grab()  # paints it: what is drawn is what is clickable
+    assert side.height() == 400 and side._content_h > 400
+    assert "rdel:204" not in side.hits  # past the bottom: not clickable until scrolled to
+    side.scroll = side._content_h - side.height()
+    side.grab()  # paints it: what is drawn is what is clickable
+    assert "rdel:204" in side.hits and "preset:5" not in side.hits
+    w.hide()
+
+
+def test_companion_on_the_left_plays_music_and_shows_the_day(app, monkeypatch):
+    posted, opened = [], []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    now = widget.time.time()
+    st = {"phase": "idle", "threads": [], "companion": COMPANION,
+          "media": {"app": "Spotify", "title": "Get Lucky", "artist": "Daft Punk", "playing": True},
+          "agenda": {"events": [{"title": "Stand-up", "location": "", "start": now + 300, "end": now + 1200,
+                                 "all_day": False}], "sources": 1, "error": ""}}
+    w = _widget(st)
+    w._reveal = 1.0
+    assert {"tab:utils", "tab:companion"} <= set(w._rects())
+    w._activate("tab:companion")
+    w.show()
+    side = w.companion
+    side.step(w.visual_rect(), True)
+    side.grab()
+    beside = w.visual_rect()
+    room = beside.left() - widget.TAB_W - 2 - side.W >= side.screen().availableGeometry().left() + 8
+    assert side.isVisible() and (side.geometry().right() < beside.left() if room  # on the left (else the right)
+                                 else side.geometry().left() > beside.right())
+    assert "mic" not in side.hits  # the tools' mic is in Utils
+    monkeypatch.setattr(side.input, "open", lambda mode, at: opened.append(mode))
+    for key, call in (("mtoggle", ("/media", {"action": "toggle"})), ("mnext", ("/media", {"action": "next"})),
+                      ("calunlink", ("/calendar", {"action": "clear"}))):
+        QTest.mouseClick(side, Qt.LeftButton, Qt.NoModifier, side.hits[key].center().toPoint())
+        assert posted[-1] == call, key
+    QTest.mouseClick(side, Qt.LeftButton, Qt.NoModifier, side.hits["cal_add"].center().toPoint())
+    assert opened == ["calendar"]
+    w.expanded = False
+    assert any(item[1] == "Stand-up" and item[2] == "in 5 min" for item in w._strip_items())  # on the second line
+    w.hide()
+
+
+def test_utils_clipboard_notes_and_agent_todos(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    todos = [{"id": 2, "text": "Run the migration on staging", "done": False, "source": "claude", "at": 0,
+              "session": "a"}]
+    notes = [{"id": 5, "text": "Two monitors only", "at": 0}]
+    st = {"phase": "idle", "threads": [], "last_reply": {"session": "a"},
+          "companion": {**COMPANION, "todos": todos, "notes": notes}}
+    w = _widget(st)
+    w._reveal, w.side_open["utils"] = 1.0, True
+    QApplication.clipboard().setText("SELECT * FROM users;")
+    app.processEvents()
+    assert w.clips[0] == "SELECT * FROM users;"  # kept in memory
+    w.show()
+    side = w.utils
+    side.step(w.visual_rect(), True)
+    side.scroll = 0
+    side.grab()
+    w.utils.activate("trow:2")
+    w.utils.activate("ndel:5")
+    w.utils.activate("clipsend:0")
+    assert posted == [("/open_thread", {"session": "a"}), ("/note", {"action": "remove", "id": 5}),
+                      ("/attach", {"paths": [], "text": "SELECT * FROM users;", "session": "a"})]
+    w.hide()

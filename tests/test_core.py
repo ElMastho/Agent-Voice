@@ -451,6 +451,7 @@ def test_call_watch_switches_to_chimes_and_back(daemon, monkeypatch):
     seen = []
     monkeypatch.setattr(server.calls, "apps_using_mic", fake_apps)
     monkeypatch.setattr(daemon, "_check_output", lambda: None)  # not about headphones (and no real pactl)
+    monkeypatch.setattr(server.winfocus, "busy_state", lambda: "")  # not about your screen (an app full screen)
     monkeypatch.setattr(server.time, "sleep", lambda s: seen.append((daemon.in_call, daemon.chime)))
     with pytest.raises(SystemExit):
         daemon._call_watch()
@@ -658,7 +659,7 @@ def test_mcp_server_speaks_and_asks(monkeypatch):
     assert init["result"]["protocolVersion"] == "2025-06-18" and server.source == "antigravity"
     assert server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
     names = [t["name"] for t in server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]]
-    assert names == ["speak", "notify", "ask_user", "set_status"]
+    assert names == ["speak", "notify", "ask_user", "set_status", "todo_list", "todo_add", "todo_update"]
     out = server.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                          "params": {"name": "speak", "arguments": {"text": "Deployed."}}})
     assert out["result"]["content"][0]["text"] == "Said to the user."
@@ -1611,3 +1612,233 @@ def test_linux_desktop_entries(tmp_path):
     assert 'Exec="/home/me/my venv/bin/python" -m agent_voice open' in text and "Type=Application" in text
     install._desktop_entry(path, [], False)
     assert not path.exists()
+
+
+def test_companion_phrases():
+    from datetime import datetime
+
+    from agent_voice.companion import parse_command, parse_duration, parse_reminder
+
+    now = datetime(2026, 10, 16, 10, 0).timestamp()
+    assert parse_duration("10 minutes") == 600 and parse_duration("1h30") == 5400
+    assert parse_duration("1 hour 30") == 5400 and parse_duration("half an hour") == 1800
+    assert parse_duration("une demi-heure") == 1800 and parse_duration("2 minutes and a half") == 150
+    assert parse_duration("tea") is None and parse_duration("30 hours") is None
+    assert parse_command("Timer 10 minutes.", now) == {"kind": "timer", "seconds": 600, "label": ""}
+    assert parse_command("Set a timer for 25 minutes for the tea", now)["label"] == "The tea"
+    assert parse_command("a 5 minute timer", now)["seconds"] == 300
+    assert parse_command("Minuteur de 3 minutes pour les pâtes", now)["seconds"] == 180
+    assert parse_command("Lance le chrono", now) == {"kind": "stopwatch", "action": "start"}
+    assert parse_command("Cancel the timer", now) == {"kind": "timer_cancel"}
+    assert parse_command("Add buy milk to my list", now) == {"kind": "todo", "text": "Buy milk"}
+    assert parse_command("Ajoute à ma liste : appeler Paul", now)["text"] == "Appeler Paul"
+    reminder = parse_command("Remind me at 4 pm to call Paul", now)
+    assert reminder == {"kind": "reminder", "at": datetime(2026, 10, 16, 16, 0).timestamp(), "text": "Call Paul"}
+    assert parse_command("remind me to stretch in 20 minutes", now)["at"] == now + 1200
+    assert parse_command("Rappelle-moi dans 10 minutes de sortir le linge", now)["text"] == "Sortir le linge"
+    assert parse_command("In 20 minutes remind me to drink water", now)["text"] == "Drink water"
+    assert parse_command("Tell Codex to run the tests", now) is None
+    assert parse_reminder("16:00 tomatoes", now) == (datetime(2026, 10, 16, 16, 0).timestamp(), "Tomatoes")
+
+
+def test_companion_keeps_timers_todos_and_reminders():
+    from agent_voice.companion import Companion
+
+    saved = []
+    box = Companion(None, saved.append)
+    tea = box.timer("start", seconds=300, label="tea", now=1000)
+    assert tea["end"] == 1300 and tea["label"] == "Tea" and box.next_due() == 1300 and box.wake.is_set()
+    box.timer("pause", tea["id"], now=1100)
+    assert tea["end"] == 0 and tea["left"] == 200 and box.next_due() is None
+    box.timer("resume", tea["id"], now=2000)
+    assert tea["end"] == 2200
+    box.stopwatch("start", now=10)
+    box.stopwatch("pause", now=100)
+    assert box.status()["stopwatch"] == {"start": 0.0, "elapsed": 90.0}
+    milk = box.todo("add", text="  buy   milk ", source="claude")
+    box.todo("toggle", milk["id"])
+    assert box.status()["todos"][0] == {**milk, "text": "buy milk", "done": True, "source": "claude"}
+    assert box.todo("clear_done") == 1 and box.status()["todos"] == []
+    box.reminder("add", text="Call Paul", at=2100)
+    assert [kind for kind, _ in box.due(now=2300)] == ["reminder", "timer"]  # oldest first, then gone
+    assert box.status()["timers"] == [] and box.status()["reminders"] == [] and saved[-1] is box.data
+    for bad in (lambda: box.timer("start", seconds=0), lambda: box.todo("add", text=" "),
+                lambda: box.reminder("add", text="x")):
+        with pytest.raises(ValueError):
+            bad()
+
+
+def test_companion_said_and_due(daemon, monkeypatch):
+    monkeypatch.setattr(server_module(), "_beep", lambda freq: None)
+    assert daemon.companion_said("Timer 10 minutes for the pasta", "en")
+    assert daemon.companion_said("Add call the bank to my list", "en")
+    assert not daemon.companion_said("Run the tests again", "en")
+    st = daemon.status()["companion"]
+    assert st["timers"][0]["label"] == "The pasta" and st["todos"][0]["text"] == "Call the bank"
+    timer = st["timers"][0]
+    daemon._companion_due("timer", timer, now=timer["end"])
+    assert daemon.banner["kind"] == "timer" and daemon.banner["snooze"]["label"] == "The pasta"
+    assert daemon.chimes == ["attention"] and daemon.speaker.said[-1][0] == "Time's up: The pasta."
+    daemon.set_muted(True)
+    daemon._companion_due("reminder", {"id": 9, "text": "Stand-up", "at": 100}, now=100)
+    assert daemon.banner["kind"] == "reminder" and daemon.chimes == ["attention"]  # shown, silently
+    # The companion's mic: not a command, so it joins the to-do list
+    daemon._handle_heard("Water the plants", "en", server_module().COMPANION, 0, None, None, False)
+    assert daemon.status()["companion"]["todos"][-1]["text"] == "Water the plants"
+
+
+def server_module():
+    from agent_voice import server
+
+    return server
+
+
+def test_companion_endpoints_and_mcp_todo(daemon, monkeypatch):
+    import http.client
+    import threading as th
+
+    from agent_voice import client, mcp, server
+
+    httpd = server._Server(("127.0.0.1", 0), server._handler(daemon))
+    th.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+
+    def post(path, payload):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        conn.request("POST", path, json.dumps(payload), {"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        return resp.status, json.loads(resp.read() or b"{}")
+
+    try:
+        assert post("/timer", {"action": "start", "duration": "25 min", "label": "focus"})[0] == 200
+        assert post("/timer", {"action": "start", "seconds": 0})[0] == 400
+        status, out = post("/reminder", {"action": "add", "text": "in 20 minutes stretch"})
+        assert status == 200 and out["item"]["text"] == "Stretch"
+        assert post("/reminder", {"action": "add", "text": "stretch someday"})[0] == 400
+        assert post("/stopwatch", {"action": "toggle"})[1]["item"]["start"] > 0
+        assert post("/todo", {"action": "toggle", "id": 999})[0] == 404
+        monkeypatch.setattr(client, "request", lambda path, payload=None, timeout=2.0: post(path, payload)[1])
+        agent = mcp.Server("claude", hooked=True, todo_only=True)  # Claude Code: the list only, hooks do the rest
+        listed = agent.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
+        assert [t["name"] for t in listed] == ["todo_list", "todo_add", "todo_update"]
+        assert agent.call("todo_list", {}) == ("The to-do list is empty.", False)
+        text, error = agent.call("todo_add", {"text": "Review the migration"})
+        item_id = int(text.split()[-1].rstrip("."))
+        assert not error and "added by claude" in agent.call("todo_list", {})[0]
+        assert agent.call("todo_update", {"id": item_id, "done": True}) == ("Updated.", False)
+        assert "[x] Review the migration" in agent.call("todo_list", {})[0]
+        assert agent.call("todo_update", {"id": item_id, "remove": True}) == ("Removed.", False)
+        assert daemon.status()["companion"]["todos"] == []
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_pomodoro_cycles_focus_and_breaks(daemon, monkeypatch):
+    from agent_voice import server
+    from agent_voice.companion import Companion, parse_command
+
+    box = Companion(None, lambda data: None, {"focus": 25, "short": 5, "long": 15, "every": 2})
+    box.pomodoro("start", now=0)
+    assert box.data["pomodoro"]["phase"] == "focus" and box.next_due() == 1500
+    box.pomodoro("pause", now=600)
+    assert box.next_due() is None and box.data["pomodoro"]["left"] == 900
+    box.pomodoro("start", now=1000)  # on from where it was
+    phases = []
+    for _ in range(4):
+        now = box.next_due()
+        phases += [(e["phase"], e["next"]["phase"]) for _, e in box.due(now)]
+    assert phases == [("focus", "short"), ("short", "focus"), ("focus", "long"), ("long", "focus")]
+    assert box.data["pomodoro"]["today"] == 2 and box.data["pomodoro"]["round"] == 0
+    box.pomodoro("skip", now=box.next_due() - 60)  # focus skipped: a break, but not counted
+    assert box.data["pomodoro"]["phase"] == "short" and box.data["pomodoro"]["today"] == 2
+    box.pomodoro("stop")
+    assert box.data["pomodoro"]["phase"] == "" and box.data["pomodoro"]["today"] == 2
+    assert parse_command("Start a pomodoro", 0) == {"kind": "pomodoro", "action": "start"}
+    assert parse_command("Arrête le pomodoro", 0) == {"kind": "pomodoro", "action": "stop"}
+    # The daemon: the phase that ended, said; the next one has started
+    monkeypatch.setattr(server, "_beep", lambda freq: None)
+    assert daemon.companion_said("start the pomodoro", "en")
+    pomo = daemon.status()["companion"]["pomodoro"]
+    assert pomo["phase"] == "focus" and pomo["focus_length"] == 1500
+    for kind, item in daemon.companion.due(pomo["end"]):
+        daemon._companion_due(kind, item, now=pomo["end"])
+    assert daemon.banner["kind"] == "pomodoro" and "Focus done (1 today)" in daemon.banner["text"]
+    assert daemon.speaker.said[-1][0] == "Time for a break: 5 min."
+
+
+def test_now_playing_from_window_titles():
+    from agent_voice.media import parse_title
+
+    assert parse_title("Spotify.exe", "Daft Punk - Get Lucky") == {"app": "Spotify", "title": "Get Lucky",
+                                                                   "artist": "Daft Punk"}
+    assert parse_title("Spotify.exe", "Spotify Premium")["title"] == ""  # paused
+    assert parse_title("chrome.exe", "(3) Lo-fi beats - YouTube - Google Chrome") == {
+        "app": "YouTube", "title": "Lo-fi beats", "artist": ""}
+    assert parse_title("msedge.exe", "Inbox - Outlook - Microsoft Edge") is None
+    assert parse_title("notepad.exe", "a - YouTube") is None
+
+
+def test_agenda_reads_ical_repeats_and_exceptions():
+    from datetime import date, datetime
+
+    from agent_voice import agenda
+
+    ics = "\r\n".join([
+        "BEGIN:VCALENDAR", "BEGIN:VEVENT", "UID:a", "SUMMARY:Stand-up", "DTSTART;TZID=Europe/Paris:20261001T093000",
+        "DTEND;TZID=Europe/Paris:20261001T094500", "RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+        "EXDATE;TZID=Europe/Paris:20261020T093000", "END:VEVENT",
+        "BEGIN:VEVENT", "UID:b", "SUMMARY:Lunch with", "  Paul", "DTSTART:20261019T110000", "DURATION:PT1H",
+        "LOCATION:Café\\, rue X", "END:VEVENT",
+        "BEGIN:VEVENT", "UID:c", "SUMMARY:Off", "DTSTART;VALUE=DATE:20261019", "DTEND;VALUE=DATE:20261020",
+        "END:VEVENT",
+        "BEGIN:VEVENT", "UID:a", "RECURRENCE-ID;TZID=Europe/Paris:20261021T093000", "SUMMARY:Stand-up (moved)",
+        "DTSTART;TZID=Europe/Paris:20261021T100000", "DTEND;TZID=Europe/Paris:20261021T101500", "END:VEVENT",
+        "BEGIN:VEVENT", "UID:d", "SUMMARY:Review", "DTSTART:20261001T140000", "DTEND:20261001T150000",
+        "RRULE:FREQ=MONTHLY;BYDAY=3MO", "END:VEVENT",
+        "BEGIN:VEVENT", "UID:e", "SUMMARY:Gone", "DTSTART:20261019T160000", "STATUS:CANCELLED", "END:VEVENT",
+        "END:VCALENDAR"])
+    events = agenda.parse(ics)
+
+    def day(d):
+        return [(e["title"], datetime.fromtimestamp(e["start"]).strftime("%H:%M"), e["all_day"])
+                for e in agenda.on_day(events, date(2026, 10, d))]
+
+    assert day(19) == [("Off", "00:00", True), ("Stand-up", "09:30", False), ("Lunch with Paul", "11:00", False),
+                       ("Review", "14:00", False)]  # the third Monday
+    assert day(20) == []  # the stand-up was cancelled that day
+    assert day(21) == [("Stand-up (moved)", "10:00", False)]
+    assert day(24) == []  # Saturday
+    assert agenda.on_day(events, date(2026, 10, 19))[2]["location"] == "Café, rue X"
+
+
+def test_agent_todos_focus_sessions_and_notes(daemon, monkeypatch):
+    from agent_voice import server
+
+    monkeypatch.setattr(server, "_beep", lambda freq: None)
+    daemon.speak("All migrated.\n\nTo-do for you: run the migration on staging\nVoice summary: done.",
+                 source="claude", final=True, session="a")
+    daemon.speak("**To-do for you:** run the migration on staging", source="claude", final=True, session="a")
+    todos = daemon.status()["companion"]["todos"]
+    assert [(t["text"], t["source"], t["session"]) for t in todos] == [
+        ("run the migration on staging", "claude", "a")]  # once, with the thread it came from
+    # Focus: during a Pomodoro focus session, replies wait (and are told at the break)
+    daemon.companion.pomodoro("start")
+    assert daemon.focus == "focus session" and daemon._holding()
+    daemon.config["pomodoro"]["hold"] = False
+    assert daemon.focus == ""
+    daemon.companion.pomodoro("stop")
+    # A meeting holds them too, when asked
+    now = server.time.time()
+    daemon.agenda = [{"title": "Stand-up", "location": "", "start": now - 60, "end": now + 600, "all_day": False}]
+    assert daemon.focus == ""
+    daemon.config["calendar"]["quiet_in_meetings"] = True
+    assert daemon.focus == "meeting"
+    # Notes: "note: ..." by voice, kept, and in the history
+    assert daemon.companion_said("Note: the bug only shows with two monitors", "en")
+    assert daemon.status()["companion"]["notes"][0]["text"] == "The bug only shows with two monitors"
+    assert daemon.history_db.search("monitors")[0]["kind"] == "note"
+    with pytest.raises(ValueError):
+        daemon.set_calendar("add", "not a link")
+    assert daemon.set_calendar("add", "https://calendar.example/secret.ics") == ["https://calendar.example/secret.ics"]
+    assert daemon.set_calendar("clear") == []

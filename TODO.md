@@ -1,8 +1,9 @@
 # agent-voice: to-do
 
-Everything listed so far is released in 0.6.0. What's left:
+Everything listed so far is released in 0.7.0. What's left:
 
 ## To check live (built and tested, not yet seen working for real)
+- **Utils and the Companion**: both arrows and the open/fold order; the Pomodoro holding replies during a focus and the catch-up at the break; a "To-do for you:" line from Claude Code landing on the list; now playing with Spotify and YouTube; a real iCal link and Outlook classic; the clipboard skipping a password manager's copy.
 - **Resume after a limit**: Claude Code's `StopFailure` hook firing on a real exhausted limit; "Continue." reaching the desktop-app conversation.
 - **Phone (ntfy)**: scan the QR code with the ntfy app, press *Test*, then step away for 2 minutes and check that a reply, an approval and the recap arrive.
 - **Scheduled prompts**: by voice ("at 2 pm tell Codex to run the tests"), from the reply box's *When* field, and with `agent-voice schedule`; a new thread started at its time.

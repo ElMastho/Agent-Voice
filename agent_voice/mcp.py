@@ -1,7 +1,7 @@
 """MCP server: any app that speaks the Model Context Protocol talks to you through agent-voice.
 
 Antigravity, Claude Desktop, Cursor, Windsurf, VS Code, Codex, Gemini CLI... start `agent-voice mcp` and get
-four tools: speak, notify, ask_user and set_status. stdio JSON-RPC 2.0, one message per line.
+tools: speak, notify, ask_user, set_status, and the user's to-do list (todo_list, todo_add, todo_update). stdio JSON-RPC 2.0, one message per line.
 
 Stdlib only and never fatal, like the hooks: it runs inside the agent's process tree.
 """
@@ -27,11 +27,19 @@ INSTRUCTIONS = (
     "Call `set_status` with a few words when you start a task or a long step (\"Running the tests\"). "
     "At the end of every reply, call `speak` once with one short sentence (at most 25 words): what you did and "
     "anything the user must do next. Use `ask_user` instead of asking in the chat when you are blocked on a "
-    "decision; the user answers by voice or with a click. Use `notify` for something worth a glance."
+    "decision; the user answers by voice or with a click. Use `notify` for something worth a glance. "
+    "The user keeps a to-do list beside the notch: read it with `todo_list`, add to it (`todo_add`) when they ask "
+    "you to, or for a follow-up they must do themselves, and tick items off (`todo_update`) once done."
+)
+TODO_INSTRUCTIONS = (
+    "The user keeps a to-do list beside the notch at the top of their screen: read it with `todo_list`, add to it "
+    "(`todo_add`) when they ask you to note something or for a follow-up only they can do, and tick items off "
+    "(`todo_update`) once they're done."
 )
 HOOKED_INSTRUCTIONS = (
     "agent-voice already reads your replies aloud. Call `set_status` with a few words when you start a task or a "
-    "long step, and `ask_user` when you are blocked on a decision: the user answers by voice or with a click."
+    "long step, and `ask_user` when you are blocked on a decision: the user answers by voice or with a click. "
+    "The user keeps a to-do list beside the notch: `todo_list`, `todo_add`, `todo_update`."
 )
 
 TOOLS = [
@@ -59,13 +67,28 @@ TOOLS = [
                     "with a timer. Set done=true when you finish without a reply to speak.",
      "inputSchema": {"type": "object", "properties": {
          "label": {"type": "string"}, "done": {"type": "boolean", "default": False}}, "required": []}},
+    {"name": "todo_list",
+     "description": "The user's to-do list (beside the notch): each item's id, text, whether it's done, and who "
+                    "added it.",
+     "inputSchema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "todo_add",
+     "description": "Add an item to the user's to-do list: something they asked you to note, or a follow-up only "
+                    "they can do. One short line per item.",
+     "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
+    {"name": "todo_update",
+     "description": "Change an item of the user's to-do list (ids from todo_list): tick it off (done=true), untick "
+                    "it, reword it (text), or remove it (remove=true).",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "integer"}, "done": {"type": "boolean"}, "text": {"type": "string"},
+         "remove": {"type": "boolean", "default": False}}, "required": ["id"]}},
 ]
 
 
 class Server:
-    def __init__(self, client_name: str = "", hooked: bool = False):
+    def __init__(self, client_name: str = "", hooked: bool = False, todo_only: bool = False):
         self.source = client_name
         self.hooked = hooked  # the agent already speaks through its hooks: no `speak` tool
+        self.todo_only = todo_only  # Claude Code: its hooks report status and questions, this is for the list
         self.session = ""
         self._hwnd = 0
 
@@ -101,11 +124,13 @@ class Server:
             return {"protocolVersion": asked if asked in PROTOCOLS else PROTOCOLS[0],
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": "agent-voice", "version": __version__},
-                    "instructions": HOOKED_INSTRUCTIONS if self.hooked else INSTRUCTIONS}
+                    "instructions": TODO_INSTRUCTIONS if self.todo_only else
+                    HOOKED_INSTRUCTIONS if self.hooked else INSTRUCTIONS}
         if method == "ping":
             return {}
         if method == "tools/list":
-            return {"tools": [t for t in TOOLS if not (self.hooked and t["name"] == "speak")]}
+            return {"tools": [t for t in TOOLS if not (self.hooked and t["name"] == "speak")
+                              and (t["name"].startswith("todo_") or not self.todo_only)]}
         if method == "tools/call":
             text, error = self.call(str(params.get("name", "")), params.get("arguments") or {})
             return {"content": [{"type": "text", "text": text}], "isError": error}
@@ -133,7 +158,38 @@ class Server:
             return ("Status updated." if ok is not None else "agent-voice is not running."), ok is None
         if name == "ask_user":
             return self._ask(args)
+        if name.startswith("todo_"):
+            return self._todo(name, args)
         return f"Unknown tool {name}.", True
+
+    def _todo(self, name: str, args: dict) -> tuple[str, bool]:
+        """The user's to-do list, through the daemon (which keeps it)."""
+        if name == "todo_list":
+            out = client.request("/todo", {"action": "list"})
+            if out is None:
+                return "agent-voice is not running.", True
+            items = out.get("todos") or []
+            if not items:
+                return "The to-do list is empty.", False
+            return "\n".join(f"{t['id']}. [{'x' if t['done'] else ' '}] {t['text']}"
+                             + (f" (added by {t['source']})" if t.get("source") not in ("", "you") else "")
+                             for t in items), False
+        if name == "todo_add":
+            out = client.request("/todo", {"action": "add", "text": str(args.get("text") or "")[:300],
+                                           "source": self.source or "agent"})
+            if out is None:
+                return "agent-voice is not running, or the item was empty.", True
+            return f"Added as item {out['item']['id']}.", False
+        item_id = int(args.get("id") or 0)
+        steps = [{"action": "remove"}] if args.get("remove") else []
+        if not steps and str(args.get("text") or "").strip():
+            steps.append({"action": "edit", "text": str(args["text"])[:300]})
+        if not steps or (args.get("done") is not None and not args.get("remove")):
+            steps.append({"action": "done", "done": bool(args.get("done", True))})
+        for step in steps:
+            if client.request("/todo", {"id": item_id, **step}) is None:
+                return f"No item {item_id} (see todo_list), or agent-voice is not running.", True
+        return ("Removed." if args.get("remove") else "Updated."), False
 
     def _ask(self, args: dict) -> tuple[str, bool]:
         question = str(args.get("question") or "").strip()
@@ -157,9 +213,9 @@ class Server:
         return "The user didn't answer in time: ask in the chat instead, or go on with your best judgement.", False
 
 
-def run(name: str = "", hooked: bool = False) -> int:
-    """`agent-voice mcp [--client NAME] [--hooks]`: serve MCP on stdin/stdout until the app closes it."""
-    server = Server(name, hooked)
+def run(name: str = "", hooked: bool = False, todo_only: bool = False) -> int:
+    """`agent-voice mcp [--client NAME] [--hooks] [--todo-only]`: serve MCP on stdin/stdout until the app closes it."""
+    server = Server(name, hooked, todo_only)
     if not client.is_running():
         client.start_detached(wait=0)  # start the voice now, without holding up the app
     out = sys.stdout.buffer  # bytes: no \r\n translation on Windows, always UTF-8

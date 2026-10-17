@@ -89,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("mcp", help="MCP server (stdio): speak, notify, ask_user and set_status for any MCP app")
     p.add_argument("--client", default="", help="the app's name, when it doesn't say it itself")
     p.add_argument("--hooks", action="store_true", help="the app already speaks through hooks (no speak tool)")
+    p.add_argument("--todo-only", action="store_true", help="only the to-do list tools (Claude Code: its hooks do the rest)")
 
     p = sub.add_parser("watch", help="run a terminal agent (aider, opencode...) and announce when it waits for you")
     p.add_argument("command", nargs=argparse.REMAINDER)
@@ -161,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "mcp":
         from agent_voice.mcp import run
 
-        return run(args.client, args.hooks)
+        return run(args.client, args.hooks, args.todo_only)
     if args.cmd == "watch":
         from agent_voice.watch import run
 

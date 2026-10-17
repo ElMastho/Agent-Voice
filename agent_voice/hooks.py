@@ -36,7 +36,9 @@ SUMMARY_INSTRUCTION = (
     "[agent-voice] The user hears your replies through text-to-speech. End the final reply of this turn "
     "with one last line formatted exactly as `Voice summary: <one short sentence, at most 25 words, in the "
     "language of your reply, saying what happened and anything the user must do next>`. "
-    "Do not add it to intermediate messages."
+    "Do not add it to intermediate messages. If something is left that only the user can do (a step to run, a "
+    "check, a decision), put each one on its own line before it: `To-do for you: <the task, a few words>`: it "
+    "goes on their to-do list."
 )
 # Tools that stop and wait for the user: worth a chime even when nothing is spoken.
 ATTENTION_TOOLS = {"ExitPlanMode"}

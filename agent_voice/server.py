@@ -19,7 +19,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from agent_voice import (__version__, calls, claudeapp, history, install, keys, launch, ntfy, outputs, quota,
+from agent_voice import (__version__, agenda, calls, claudeapp, companion, history, media, install, keys, launch, ntfy, outputs, quota,
                          schedule, textclean, updater, usage, winfocus)
 from agent_voice.config import HOME, LOG_DIR, LOOPBACK, load_config, load_state, save_state
 from agent_voice.hooks import strip_summary
@@ -261,6 +261,7 @@ _NEW_THREAD = re.compile(
     r"(?:\s+(?:with|in|avec|dans)\s+(?P<agent>claude(?:\s+code)?|codex|gemini))?\s*[:,.]?\s*(?:to\s+|pour\s+)?"
     r"(?P<prompt>.+)$", re.I | re.S)
 NEW_THREAD = "__new__"  # the "session" a dictated new-thread prompt goes to
+COMPANION = "__companion__"  # ... and what's said into the companion's mic
 
 
 def parse_new_thread(text: str) -> tuple[str, str] | None:
@@ -564,6 +565,13 @@ class Daemon:
         self._barge_cancel = threading.Event()
         self._barging = False  # listening for you while it speaks
         self._barged = False  # ... and you spoke
+        # The companion beside the panel: timers, the stopwatch, the to-do list, reminders (kept in state.json).
+        self.companion = companion.Companion(self.state.get("companion"), self._save_companion,
+                                             config.get("pomodoro"))
+        self.media: dict | None = None  # what's playing (Spotify, YouTube...): the companion's player
+        self.agenda: list[dict] = []  # today's meetings (calendar links you added, Outlook while it's open)
+        self._agenda_error = ""
+        self._agenda_wake = threading.Event()
         if start_threads:
             threading.Thread(target=self._job_loop, name="jobs", daemon=True).start()
             threading.Thread(target=self._listen_monitor, name="listen", daemon=True).start()
@@ -576,6 +584,9 @@ class Daemon:
             threading.Thread(target=self._duck_loop, name="ducking", daemon=True).start()
             threading.Thread(target=self._barge_loop, name="barge-in", daemon=True).start()
             threading.Thread(target=self._ensure_start_menu, name="start-menu", daemon=True).start()
+            threading.Thread(target=self._companion_loop, name="companion", daemon=True).start()
+            threading.Thread(target=self._media_loop, name="media", daemon=True).start()
+            threading.Thread(target=self._agenda_loop, name="agenda", daemon=True).start()
 
     def _job_loop(self) -> None:
         while True:
@@ -725,7 +736,21 @@ class Daemon:
             return f"call ({self.in_call})"
         if cfg.get("enabled", True) and cfg.get("full_screen", True) and self._fullscreen:
             return self._fullscreen
+        if cfg.get("enabled", True) and self._focus_session():
+            return "focus session"
+        if cfg.get("enabled", True) and self.config.get("calendar", {}).get("quiet_in_meetings") and self._meeting():
+            return "meeting"
         return ""
+
+    def _focus_session(self) -> bool:
+        """The Pomodoro's focus is running (and holds replies until the break)."""
+        pomo = self.companion.data.get("pomodoro") or {}
+        return bool(self.config.get("pomodoro", {}).get("hold", True) and pomo.get("phase") == "focus"
+                    and pomo.get("end"))
+
+    def _meeting(self, now: float | None = None) -> dict | None:
+        now = time.time() if now is None else now
+        return next((e for e in self.agenda if not e["all_day"] and e["start"] <= now < e["end"]), None)
 
     def _holding(self) -> bool:
         """Focus: hold replies (approvals and questions still come through). Calls can keep chimes instead."""
@@ -1404,6 +1429,176 @@ class Daemon:
         return [{k: s[k] for k in ("id", "at", "title", "prompt", "repeat")}
                 for s in sorted(self._schedules, key=lambda s: s["at"])][:6]
 
+    # -- the companion: timers, stopwatch, to-do, reminders ------------------------
+    def _save_companion(self, data: dict) -> None:
+        self.state["companion"] = data
+        save_state(self.state)
+
+    def _companion_loop(self) -> None:
+        """Sleep until the next timer or reminder is due (woken by any change): no polling, nothing per second."""
+        while True:
+            due = self.companion.next_due()
+            self.companion.wake.wait(None if due is None else max(0.05, min(3600.0, due - time.time())))
+            self.companion.wake.clear()
+            try:
+                for kind, item in self.companion.due():
+                    self._companion_due(kind, item)
+            except Exception:
+                log.exception("companion check failed")
+
+    def _companion_due(self, kind: str, item: dict, now: float | None = None) -> None:
+        """A timer ended or a reminder's time came: the banner (even in Do not disturb, silently), a chime, the voice."""
+        now = time.time() if now is None else now
+        late = now - float(item.get("end") or item.get("at") or now) > 120  # the PC was asleep or off
+        if kind == "pomodoro":
+            self._pomodoro_due(item, late)
+            return
+        if kind == "timer":
+            what = item.get("label") or companion.duration_words(int(item.get("total") or 0))
+            title, text, said = "Timer done", what, f"Time's up: {what}." if item.get("label") else "Time's up."
+            snooze = {"kind": "timer", "seconds": 300, "label": item.get("label") or ""}
+        else:
+            title, text, said = "Reminder", item["text"], f"Reminder: {item['text']}"
+            snooze = {"kind": "reminder", "seconds": 600, "text": item["text"]}
+        if late:
+            text += f" (due at {time.strftime('%H:%M', time.localtime(item.get('end') or item.get('at')))})"
+        log.info("companion: %s due", kind)
+        self._show_banner(text, "", "", kind=kind, tag=title, extra={"snooze": snooze})
+        self._push("scheduled", title, text)
+        if self.muted or late:
+            return
+        self.play_chime("attention")
+        if not self.chime:
+            self.speaker.speak(said)
+
+    def _pomodoro_due(self, ended: dict, late: bool) -> None:
+        """A focus session or a break ended: the next one has started. Say so, softly."""
+        nxt = ended["next"]
+        minutes = companion.duration_words(int(nxt["length"]))
+        if ended["phase"] == "focus":
+            text = f"Focus done ({nxt['today']} today): {minutes} {'long ' if nxt['phase'] == 'long' else ''}break."
+            said = f"Time for a {'long ' if nxt['phase'] == 'long' else ''}break: {minutes}."
+        else:
+            text, said = f"Break over: {minutes} of focus.", "Back to focus."
+        self._show_banner(text, "", "", kind="pomodoro", tag="Pomodoro")
+        if self.muted or late:
+            return
+        self.play_chime("done" if ended["phase"] == "focus" else "attention")
+        if not self.chime:
+            self.speaker.speak(said)
+
+    def companion_said(self, text: str, lang: str = "") -> bool:
+        """'Timer 10 minutes', 'add milk to my list', 'remind me at 4 to call Paul': done here; False if it isn't one."""
+        action = companion.parse_command(text, time.time())
+        if action is None:
+            return False
+        self._heard(text, lang, "", tag="companion")
+        kind = action["kind"]
+        try:
+            if kind == "timer":
+                self.companion.timer("start", seconds=action["seconds"], label=action["label"])
+            elif kind == "timer_cancel":
+                self.companion.timer("cancel")
+            elif kind == "stopwatch":
+                self.companion.stopwatch(action["action"])
+            elif kind == "pomodoro":
+                self.companion.pomodoro(action["action"])
+            elif kind == "note":
+                self.add_note(action["text"])
+            elif kind == "media":
+                media.control(action["action"])
+            elif kind == "todo":
+                self.companion.todo("add", text=action["text"], source="you")
+            elif kind == "reminder":
+                self.companion.reminder("add", text=action["text"], at=action["at"])
+        except ValueError as exc:
+            self._show_banner(f"Not done: {exc}.", "", "", kind="note", tag="companion")
+            _beep(300)
+            return True
+        _beep(880)
+        return True
+
+    def add_note(self, text: str) -> dict:
+        item = self.companion.note("add", text=text)
+        if self.history_db is not None:  # searchable from History, with everything else
+            try:
+                self.history_db.add("note", item["text"], title="Note")
+            except Exception:
+                log.exception("note not kept in the history")
+        return item
+
+    # -- the companion: what's playing, today's meetings --------------------------
+    def _media_loop(self) -> None:
+        """Every 4 s: what's playing (a window title read: about a millisecond when nothing plays)."""
+        while True:
+            time.sleep(4)
+            self.media = media.now_playing()
+
+    def media_control(self, action: str) -> bool:
+        done = media.control(action)
+        if done:
+            threading.Timer(0.6, lambda: setattr(self, "media", media.now_playing())).start()  # show it at once
+        return done
+
+    def calendars(self) -> list[str]:
+        return [str(c) for c in self.state.get("calendars") or []]
+
+    def set_calendar(self, action: str, source: str = "") -> list[str]:
+        """Add or remove a calendar link (or .ics file); "clear" removes them all. Fetched right away."""
+        links = self.calendars()
+        source = source.strip()
+        if action == "add":
+            if not re.match(r"^(?:https?|webcal)://\S+$", source, re.I) and not Path(source).expanduser().is_file():
+                raise ValueError("an iCal link (https://... .ics) or a .ics file")
+            links = [*[c for c in links if c != source], source]
+        elif action == "remove":
+            links = [c for c in links if c != source]
+        elif action == "clear":
+            links = []
+        self.state["calendars"] = links[-5:]
+        save_state(self.state)
+        self._agenda_wake.set()
+        return self.calendars()
+
+    def _agenda_loop(self) -> None:
+        """Today's meetings: the links every 15 minutes (or when one is added), Outlook's every 5."""
+        from datetime import date
+
+        events: list[dict] = []
+        fetched = 0.0
+        while True:
+            now = time.time()
+            today = date.today()
+            if now - fetched > 900 or self._agenda_wake.is_set():
+                self._agenda_wake.clear()
+                events, errors = [], []
+                for link in self.calendars():
+                    try:
+                        events += agenda.parse(agenda.fetch(link))
+                    except Exception as exc:
+                        log.info("calendar link failed: %s", type(exc).__name__)
+                        errors.append(type(exc).__name__)
+                self._agenda_error = "couldn't read a calendar link" if errors else ""
+                fetched = now
+            try:
+                found = agenda.on_day(events, today) + agenda.outlook_day(today)
+                seen, self.agenda = set(), []
+                for e in sorted(found, key=lambda x: (not x["all_day"], x["start"])):
+                    key = (e["title"], int(e["start"]))
+                    if key not in seen:  # in both Outlook and a link
+                        seen.add(key)
+                        self.agenda.append(e)
+            except Exception:
+                log.exception("today's meetings unavailable")
+            self._agenda_wake.wait(300)
+
+    def _agenda_status(self) -> dict:
+        return {"events": self.agenda[:12], "sources": len(self.calendars()), "error": self._agenda_error}
+
+    def listen_companion(self) -> None:
+        """The companion's mic: what you say next is a timer, a to-do, a reminder (else it joins the to-do list)."""
+        self.reply_now(COMPANION)
+
     # -- the day ----------------------------------------------------------------
     def _day(self) -> dict:
         """Today's log (turns, tokens, what each thread did), started afresh each morning."""
@@ -1910,6 +2105,11 @@ class Daemon:
             self._last_session = session
         if final:
             turn["done"] = True
+            for task in companion.agent_todos("\n".join(turn["full"])):  # "To-do for you: ..." -> your list
+                try:
+                    self.companion.todo("add", text=task, source=source or "agent", session=session)
+                except ValueError:
+                    break
 
     def _finished(self, session: str, source: str, text: str, result: dict | None) -> None:
         """A turn ended: keep its outcome for the notch, and note it for when you come back."""
@@ -1973,16 +2173,18 @@ class Daemon:
         return {"text": textclean.clean(self._reading)[:1500], "title": title,
                 "color": thread_color(session or title), "session": session}
 
-    def _show_banner(self, text: str, session: str, source: str, kind: str = "reply", tag: str = "") -> None:
+    def _show_banner(self, text: str, session: str, source: str, kind: str = "reply", tag: str = "",
+                     extra: dict | None = None) -> None:
         """A notification under the notch: a reply in chime mode, or ("you") what you just said.
 
-        Do not disturb: only what you do yourself shows; the rest waits for the catch-up when you're back."""
-        if self.muted and kind not in ("you", "pending"):
+        Do not disturb: only what you do yourself shows (and your own timers, silently); the rest waits for the
+        catch-up when you're back."""
+        if self.muted and kind not in ("you", "pending", "timer", "reminder", "pomodoro"):
             return
         title = self._title(session, source) if session or source else ""
         self.banner = {"id": (self.banner or {}).get("id", 0) + 1, "text": textclean.clean(text)[:800],
                        "title": title, "color": thread_color(session or title), "session": session,
-                       "kind": kind, "tag": tag, "at": time.time()}
+                       "kind": kind, "tag": tag, "at": time.time(), **(extra or {})}
 
     def agent_states(self) -> dict[str, str]:
         """Which agents are connected; re-read every 30 s at most (status is polled 8 times a second).
@@ -2470,6 +2672,11 @@ class Daemon:
         if session == NEW_THREAD:  # dictating a new thread's first prompt
             pending, self._new_pending = self._new_pending, {}
             self.new_thread(text, pending.get("target", ""), pending.get("cwd", ""), lang)
+            return
+        if session == COMPANION:  # the companion's mic: a timer, a reminder... or a to-do
+            if not self.companion_said(text, lang):
+                self._heard(text, lang, "", tag="to-do")
+                self.companion.todo("add", text=text.strip(" .")[:300], source="you")
             return
         approving = permission is not None and permission is self.permission
         answering = approving or (question is not None and question is self.question)
@@ -2967,6 +3174,8 @@ class Daemon:
             if self._perms and self._voice_approval(command):  # "Hey Claude, approve Codex"
                 self._heard(command, lang, "", tag="answer")
                 continue
+            if self.companion_said(command, lang):  # "Hey Claude, timer 10 minutes", "... add milk to my list"
+                continue
             if self.schedule_said(command, lang, session):  # "Hey Claude, at 2 pm tell Codex to run the tests"
                 self._heard(command, lang, "", tag="scheduled")
                 continue
@@ -3060,6 +3269,9 @@ class Daemon:
             "pending": {"id": self._pending["id"], "until": self._pending["until"]} if self._pending else None,
             "phone": self._phone_status(),
             "schedules": self._schedules_status(),
+            "companion": self.companion.status(),
+            "media": self.media,
+            "agenda": self._agenda_status(),
             "day": self._day_status(),
             "banner": {**self.banner, "age": round(time.time() - self.banner["at"], 1)}
             if self.banner and time.time() - self.banner["at"] < 60 else None,
@@ -3301,6 +3513,57 @@ def _handler(daemon: Daemon):
                 return self._json(200, daemon.thread_detail(parse_qs(url.query).get("session", [""])[0]))
             self._json(404, {"error": "not found"})
 
+        def _companion(self, data: dict):
+            """The companion's endpoints: /timer, /stopwatch, /todo (agents use it too, through MCP), /reminder."""
+            action, item_id, now = str(data.get("action") or ""), _int(data.get("id")), time.time()
+            box = daemon.companion
+            try:
+                if self.path == "/companion_listen":
+                    daemon.listen_companion()
+                    return self._json(200, {"ok": True})
+                if self.path == "/media":
+                    return self._json(200, {"ok": daemon.media_control(action)})
+                if self.path == "/calendar":
+                    return self._json(200, {"calendars": len(daemon.set_calendar(action, str(data.get("source") or "")))})
+                if self.path == "/note":
+                    out = daemon.add_note(str(data.get("text") or "")) if action == "add" else box.note(action, item_id)
+                    if out is None:
+                        return self._json(404, {"error": "no such note"})
+                    return self._json(200, {"ok": True, "item": out})
+                if self.path == "/timer":
+                    seconds = data.get("seconds")
+                    if not isinstance(seconds, (int, float)):
+                        seconds = companion.parse_duration(str(data.get("duration") or "")) or 0
+                    out = box.timer(action, item_id, float(seconds), str(data.get("label") or ""), now)
+                elif self.path == "/stopwatch":
+                    out = box.stopwatch(action, now)
+                elif self.path == "/pomodoro":
+                    out = box.pomodoro(action, now)
+                elif self.path == "/todo":
+                    if action == "list":
+                        return self._json(200, {"todos": box.status()["todos"]})
+                    done = data.get("done")
+                    out = box.todo(action, item_id, str(data.get("text") or ""),
+                                   None if done is None else bool(done), str(data.get("source") or "you"),
+                                   str(data.get("session") or ""))
+                else:
+                    at = data.get("at")
+                    text = str(data.get("text") or "")
+                    if action == "add" and isinstance(data.get("in"), (int, float)):
+                        at = now + float(data["in"])
+                    elif action == "add" and not isinstance(at, (int, float)):
+                        found = companion.parse_reminder(text, now)  # "16:00 call Paul", "in 20 minutes stretch"
+                        if not found:
+                            return self._json(400, {"error": "when? Start with a time: 'at 16:00 ...', "
+                                                             "'in 20 minutes ...', 'tomorrow at 9 ...'"})
+                        at, text = found
+                    out = box.reminder(action, item_id, text, float(at or 0))
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc)})
+            if out is None:
+                return self._json(404, {"error": f"nothing to {action or 'do'} there"})
+            return self._json(200, {"ok": True, "item": out if isinstance(out, dict) else None})
+
         def do_POST(self):
             if not self._allowed(post=True):
                 return None
@@ -3409,6 +3672,9 @@ def _handler(daemon: Daemon):
                     return self._json(400, {"error": "engine must be piper or kokoro"})
                 _background(daemon.set_engine, name)
                 return self._json(200, {"engine": name})
+            if self.path in ("/timer", "/stopwatch", "/pomodoro", "/todo", "/reminder", "/companion_listen", "/note",
+                             "/media", "/calendar"):
+                return self._companion(data)
             if self.path == "/pending":  # the take-back banner's Send, Edit (hold) and Cancel
                 return self._json(200, {"ok": daemon.pending_action(_int(data.get("id")), str(data.get("action") or ""))})
             if self.path == "/widget_open":

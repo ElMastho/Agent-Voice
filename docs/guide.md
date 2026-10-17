@@ -148,6 +148,30 @@ Send a prompt later, to a thread or as a new thread:
 
 They wait in the panel's **Upcoming** list (× cancels one) and survive restarts. At that time the prompt is typed into the thread's own window and sent (saved prompts expand), and your phone hears about it if that's on. If the PC was off and it's more than 6 hours late, you're told and nothing is sent.
 
+### The Companion (left): music, today's meetings, usage
+Open the panel: the small arrow on its **left** edge opens the Companion (the tray's *Companion* too).
+
+- **Now playing**: what Spotify plays, or YouTube (YouTube Music, Deezer, SoundCloud, Twitch) in Chrome, Edge, Brave, Firefox...: the title and artist, ⏮ ⏯ ⏭ (the keyboard's media keys). By voice: *"pause the music"*, *"play the music"*, *"next song"*, *"previous song"*, *"chanson suivante"*. Linux: through `playerctl`.
+- **Today**: today's meetings, the one on *now* highlighted, and on the notch's second line from 15 minutes before (*Design review · in 10 min*). Where they come from: *Add a calendar link* and paste your calendar's iCal address (Outlook on the web: *Settings › Calendar › Shared calendars › Publish a calendar*, copy the ICS link; Google Calendar: *Settings › your calendar › Integrate calendar › Secret address in iCal format*), or the path of a `.ics` file. It's fetched then, and every 15 minutes; *Unlink* forgets them. Outlook (classic) is read directly while it's open (never started for this). With `"calendar": {"quiet_in_meetings": true}`, replies wait during a meeting, as in a call, and you're told after.
+- **Usage**: Claude Code's and Codex's 5-hour and weekly limits, with when they reset.
+
+### Utils (right): Pomodoro, timers, to-do, reminders, notes, clipboard
+The small arrow on the open panel's **right** edge opens Utils (the tray's *Utils* too). In both, **⋯** chooses the cards; a panel comes back open next time if you leave it open, is never taller than the panel beside it (the wheel scrolls), folds away before the panel closes and slides out once it has opened.
+
+- **Pomodoro**: ▶ starts 25 minutes of focus (and **while you focus, agents' replies wait**: approvals and questions still come through, and the break starts with a catch-up; `pomodoro.hold: false` turns that off); then a 5-minute break starts by itself, then focus again, and a 15-minute break after every 4th focus. Pause, skip (a skipped focus isn't counted) and stop; the card shows which focus of the cycle it is and how many you did today. A chime and a word mark each change (*"Time for a break: 5 min."*, *"Back to focus."*); in Do not disturb only the banner. Lengths: `"pomodoro": {"focus": 25, "short": 5, "long": 15, "every": 4}` in the config.
+- **Timer**: *1m* to *1 h* in one click, **…** for your own (*"12 min tea"*, *1h30*, *90 s*); pause, resume, cancel; several at once.
+- **Stopwatch**: start, pause, reset.
+- **To-do**: click the box to tick an item, × to remove it, *Clear done* for the ticked ones, *Add* to type one.
+- **Notes**: *Add a note*, or say *"note: ..."* / *"prends note : ..."*: one line, kept (the latest 200), searchable in History; × removes one.
+- **Clipboard**: the last 10 things you copied, kept in memory only (never written to disk; what password managers copy is marked private and left out). Click one to copy it again; ➤ puts it in the current conversation's message box, for you to finish and send.
+- **Reminders**: *Add a reminder* takes a time and what: *16:00 call Paul*, *in 20 minutes stretch*, *tomorrow at 9 send the invoice*, *demain à 9h ...*.
+
+**By voice**, with the companion's 🎤 or after *"Hey Claude"*: *"start a pomodoro"*, *"pause the pomodoro"*, *"skip the break"*, *"stop the pomodoro"*, *"timer 10 minutes for the tea"*, *"a 5 minute timer"*, *"cancel the timer"*, *"start / stop the stopwatch"*, *"add call the bank to my list"*, *"remind me at 4 pm to call Paul"*, *"in 20 minutes remind me to stretch"*; in French *"lance un pomodoro"*, *"minuteur de 3 minutes"*, *"lance le chrono"*, *"ajoute appeler Paul à ma liste"*, *"rappelle-moi dans 10 minutes de sortir le linge"*. Into the companion's 🎤, anything that isn't one of these is added to the to-do list.
+
+**Your agents and the list.** Claude Code is asked to end a reply with *"To-do for you: ..."* for anything only you can do (run something, check, decide); each such line from any agent goes on your list, once, tagged with the agent; click it to open that conversation. MCP apps also get `todo_list`, `todo_add` and `todo_update`, and are told to add a follow-up only you can do and to tick items off once done. Claude Code gets them through an MCP server of its own, with only those tools (`agent-voice install claude` adds it with `claude mcp add`; `agent-voice uninstall` removes it). An item an agent added shows its name.
+
+**While something runs**, the notch stays down with a second line: the Pomodoro's phase, each timer (and its progress along the bottom) and the stopwatch; click it to open the companion. Not in Do not disturb: the notch stays up then. **When a timer ends** or a reminder is due: a banner with *+5 min* (*+10 min* for a reminder) and *Done*, a chime and the voice (*"Time's up: the tea."*). In Chimes, just the chime; in Do not disturb, only the banner, silently; your phone hears about it if that's on and you're away. Everything is kept by the service (in `state.json`) through restarts; a timer that ran out while the PC slept is told when it wakes, without the sound.
+
 ### Take it back before it's sent
 Anything you dictate that sends itself (auto-send, *Talk* on a thread, *"Hey Claude, ..."*, *"tell Codex to ..."*) first waits 5 seconds under the notch, framed in green, with a countdown. The mic stays open: say *"wait"* and it's typed into the conversation's input without being sent, so you can fix it and press Enter; *"cancel that"* drops it; *"send it"* sends it now. Keep talking and what you add joins the message (the countdown starts again). The banner has the same three as buttons: *Send now*, *Edit*, *Cancel*. Pressing Stop meanwhile keeps it unsent, on the clipboard. `take_back.seconds: 0` sends at once, as before.
 
@@ -280,7 +304,7 @@ Hooks and the MCP server start the service automatically if it isn't running.
 **Claude Code specifics:** progress messages are spoken between tool calls (`"speak_progress": false` to only hear final answers); each tool call updates the notch's live activity; the window and conversation you prompted from are remembered, so replies are typed back there even if you clicked elsewhere meanwhile.
 
 ### MCP apps (Antigravity, Claude Desktop, Windsurf, VS Code...)
-`agent-voice mcp` gives the agent four tools, and asks it to use them: `speak` (a one-sentence summary at the end of each reply), `set_status` (*Working · Running the tests* in the notch), `ask_user` (a question, with options or free text, answered by voice or a click) and `notify` (a banner; `needs_you` puts it in *Needs you*). Agents follow these instructions more or less faithfully: if yours forgets to speak, add to its rules: *"At the end of every reply, call the agent-voice `speak` tool with one short sentence."*
+`agent-voice mcp` gives the agent these tools, and asks it to use them: `speak` (a one-sentence summary at the end of each reply), `set_status` (*Working · Running the tests* in the notch), `ask_user` (a question, with options or free text, answered by voice or a click), `notify` (a banner; `needs_you` puts it in *Needs you*), and `todo_list` / `todo_add` / `todo_update` (your to-do list in the companion). Agents follow these instructions more or less faithfully: if yours forgets to speak, add to its rules: *"At the end of every reply, call the agent-voice `speak` tool with one short sentence."*
 For an MCP app not listed: command `agent-voice` (or the full path to `agent-voice.exe`), arguments `mcp --client <its name>`.
 
 ### ChatGPT, Claude, Gemini... in the browser

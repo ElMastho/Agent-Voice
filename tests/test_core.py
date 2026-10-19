@@ -1812,6 +1812,42 @@ def test_agenda_reads_ical_repeats_and_exceptions():
     assert agenda.on_day(events, date(2026, 10, 19))[2]["location"] == "Café, rue X"
 
 
+def test_agenda_reads_outlook_items_without_indexing():
+    from datetime import date, datetime
+    from types import SimpleNamespace
+
+    from agent_voice import agenda
+
+    class Found:  # Outlook's Restrict result: 1-based, so comtypes' iteration (item 0) fails
+        def __init__(self, items):
+            self.items, self.at = items, -1
+
+        def __getitem__(self, index):
+            raise OSError("Array index out of bounds.")
+
+        def GetFirst(self):
+            self.at = -1
+            return self.GetNext()
+
+        def GetNext(self):
+            self.at += 1
+            return self.items[self.at] if self.at < len(self.items) else None
+
+    items = [SimpleNamespace(Subject="Stand-up", Location=None, AllDayEvent=False,
+                             Start=46314.375, End=46314.390625),  # late-bound: OLE days
+             SimpleNamespace(Subject="", Location="Room 2", AllDayEvent=True,
+                             Start=datetime(2026, 10, 19), End=datetime(2026, 10, 20))]
+    got = agenda._outlook_items(Found(items))
+    assert [(e["title"], datetime.fromtimestamp(e["start"]).strftime("%d/%m %H:%M"),
+             datetime.fromtimestamp(e["end"]).strftime("%H:%M"), e["location"], e["all_day"]) for e in got] == [
+        ("Stand-up", "19/10 09:00", "09:22", "", False), ("(no title)", "19/10 00:00", "00:00", "Room 2", True)]
+    assert len(agenda._outlook_items(Found(items * 20), limit=30)) == 30
+
+    query = agenda._outlook_filter(date(2026, 10, 5))  # never '10/05/2026', which a French Outlook reads as 10 May
+    assert query.startswith('@SQL="urn:schemas:calendar:dtstart" < \'2026-10-0')
+    assert "/" not in query
+
+
 def test_agent_todos_focus_sessions_and_notes(daemon, monkeypatch):
     from agent_voice import server
 

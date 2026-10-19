@@ -182,6 +182,34 @@ def on_day(events: list[dict], day: date) -> list[dict]:
     return sorted(out, key=lambda x: (not x["all_day"], x["start"]))
 
 
+def _ole_time(value) -> datetime:
+    """An Outlook date as a local naive datetime: a datetime, or (late-bound comtypes) an OLE date's day count."""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None, second=0, microsecond=0)
+    return (datetime(1899, 12, 30) + timedelta(days=float(value))).replace(second=0, microsecond=0)
+
+
+def _outlook_filter(day: date) -> str:
+    """Restrict's query for the items overlapping `day`. DASL with UTC times, because Jet's '[Start] < ...' reads its
+    dates in the system locale: '10/05' was the 10th of May on a French Windows."""
+    start, end = (datetime.combine(d, datetime.min.time()).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+                  for d in (day, day + timedelta(days=1)))  # each midnight on its own: a DST day isn't 24 h
+    return f"@SQL=\"urn:schemas:calendar:dtstart\" < '{end}' AND \"urn:schemas:calendar:dtend\" > '{start}'"
+
+
+def _outlook_items(found, limit: int = 30) -> list[dict]:
+    """GetFirst/GetNext, never indexing: Outlook counts from 1 (comtypes' iteration asks for item 0, 'Array index
+    out of bounds'), and with IncludeRecurrences the collection's Count is meaningless."""
+    out = []
+    item = found.GetFirst()
+    while item is not None and len(out) < limit:
+        out.append({"title": str(item.Subject or "(no title)"), "location": str(item.Location or ""),
+                    "start": _ole_time(item.Start).timestamp(), "end": _ole_time(item.End).timestamp(),
+                    "all_day": bool(item.AllDayEvent)})
+        item = found.GetNext()
+    return out
+
+
 def outlook_day(day: date) -> list[dict]:
     """Outlook (classic)'s calendar for `day`, only while Outlook is open (it's never started for this)."""
     if sys.platform != "win32":
@@ -198,19 +226,7 @@ def outlook_day(day: date) -> list[dict]:
         items = app.GetNamespace("MAPI").GetDefaultFolder(9).Items  # olFolderCalendar
         items.IncludeRecurrences = True
         items.Sort("[Start]")
-        first = datetime.combine(day, datetime.min.time())
-        found = items.Restrict(f"[Start] < '{(first + timedelta(days=1)):%m/%d/%Y %H:%M}' AND "
-                               f"[End] > '{first:%m/%d/%Y %H:%M}'")
-        out = []
-        for item in found:
-            start, end = item.Start, item.End
-            out.append({"title": str(item.Subject or "(no title)"), "location": str(item.Location or ""),
-                        "start": datetime(start.year, start.month, start.day, start.hour, start.minute).timestamp(),
-                        "end": datetime(end.year, end.month, end.day, end.hour, end.minute).timestamp(),
-                        "all_day": bool(item.AllDayEvent)})
-            if len(out) >= 30:
-                break
-        return out
+        return _outlook_items(items.Restrict(_outlook_filter(day)))
     except Exception:
         log.exception("Outlook's calendar unavailable")
         return []

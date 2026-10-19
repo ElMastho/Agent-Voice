@@ -2251,3 +2251,100 @@ def test_device_rows_show_the_device_in_brackets():
     assert widget._device_label("Odyssey G65B (2- HD Audio Driver for Display Audio)") == "Odyssey G65B"
     shown = widget._device_label("Speakers (Cirrus Logic XU (with APO Extensions))")
     assert shown.startswith("Cirrus Logic XU (") and shown.endswith("…") and len(shown) == 30
+
+
+def test_meeting_join_links():
+    from agent_voice import agenda
+
+    ics = ("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:1\nSUMMARY:Design review\nDTSTART:20261020T100000\n"
+           "DTEND:20261020T103000\nLOCATION:Microsoft Teams Meeting\nDESCRIPTION:Join: <https://teams.microsoft.com/l/"
+           "meetup-join/19%3ameeting_x%40thread.v2/0?context=%7b%7d>\\nhttps://example.com/other\nEND:VEVENT\n"
+           "BEGIN:VEVENT\nUID:2\nSUMMARY:Standup\nDTSTART:20261020T090000\nDTEND:20261020T091500\n"
+           "X-GOOGLE-CONFERENCE:https://meet.google.com/abc-defg-hij\nDESCRIPTION:https://zoom.us/j/1\nEND:VEVENT\n"
+           "BEGIN:VEVENT\nUID:3\nSUMMARY:Lunch\nDTSTART:20261020T120000\nDTEND:20261020T130000\n"
+           "LOCATION:https://zoom.us.evil.example/j/1 https://evil.example/?u=https://zoom.us/j/1\nEND:VEVENT\n"
+           "END:VCALENDAR\n")
+    from datetime import date
+
+    day = {e["title"]: e for e in agenda.on_day(agenda.parse(ics), date(2026, 10, 20))}
+    assert day["Design review"]["join"].startswith("https://teams.microsoft.com/l/meetup-join/")
+    assert day["Standup"]["join"] == "https://meet.google.com/abc-defg-hij"  # Meet's own field before the text
+    assert day["Lunch"]["join"] == ""  # only the meeting services' own hosts
+    assert agenda.join_link("Zoom: https://us02web.zoom.us/j/123?pwd=ab.") == "https://us02web.zoom.us/j/123?pwd=ab"
+    assert "_texts" not in agenda.parse(ics)[0]  # the invitation's text isn't kept
+
+
+def test_join_a_meeting(daemon, monkeypatch):
+    import time as t
+    import webbrowser
+
+    from agent_voice import server
+
+    assert server.match_join("Join my meeting.") and server.match_join("rejoins la réunion")
+    assert not server.match_join("join the two lists in utils.py")
+    opened = []
+    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url))
+    now = t.time()
+    daemon.agenda = [
+        {"title": "Later", "location": "", "join": "https://zoom.us/j/2", "start": now + 3 * 3600,
+         "end": now + 4 * 3600, "all_day": False},
+        {"title": "Standup", "location": "", "join": "https://meet.google.com/abc", "start": now + 300,
+         "end": now + 1200, "all_day": False},
+        {"title": "Forged", "location": "", "join": "https://evil.example/x", "start": now + 5 * 3600,
+         "end": now + 6 * 3600, "all_day": False}]
+    daemon.agenda.sort(key=lambda e: e["start"])
+    assert daemon.join_meeting() == "Standup" and opened == ["https://meet.google.com/abc"]
+    assert daemon.join_meeting(start=daemon.agenda[1]["start"]) == "Later"  # the agenda's Join: that one
+    assert daemon.join_meeting(start=daemon.agenda[2]["start"]) == "" and len(opened) == 2  # never another host
+    daemon.agenda = daemon.agenda[1:]
+    assert daemon.join_meeting() == ""  # nothing within 15 minutes
+
+
+def test_morning_brief(daemon, monkeypatch):
+    import time as t
+
+    from agent_voice import server
+
+    assert server.match_brief("Morning brief.") and server.match_brief("What's my day?")
+    assert server.match_brief("c'est quoi ma journée ?") and not server.match_brief("brief Codex on the bug")
+    assert daemon.brief_text() == ("", "")  # nothing to tell: no banner by itself
+    now = t.time()
+    daemon.state["day"] = {"date": "2026-01-01", "hours": [0] * 24,
+                           "threads": {"a": {"source": "claude", "turns": 7, "tokens": 0, "last": "", "title": "Notch"}}}
+    daemon.agenda = [{"title": "Design review", "location": "", "join": "", "start": now + 600, "end": now + 2400,
+                      "all_day": False}]
+    daemon.companion.todo("add", text="call Paul")
+    daemon.request_permission("c", "Bash", "deploy", source="codex")
+    shown, said = daemon.brief_text()
+    assert "1 meeting:" in shown and "Design review" in shown and "1 to-do: call Paul." in shown
+    assert "Still waiting on you: Codex." in shown and "Last time: 7 turns in 1 thread, most of it in Notch." in shown
+    assert "Design review at" in said and "Codex still needs you." in said
+    daemon.config["brief"] = {"enabled": False}
+    daemon.brief(asked=True)  # asked for outside the morning: the morning's still comes
+    assert daemon.banner["kind"] == "brief" and "brief_day" not in daemon.state
+    daemon.config["brief"] = {"enabled": True, "from": "00:00", "until": "24:00"}
+    daemon.banner = None
+    daemon._check_brief(now, idle=2)
+    assert daemon.banner["kind"] == "brief"
+    daemon.banner = None
+    daemon._check_brief(now, idle=2)
+    assert daemon.banner is None  # once a day
+
+
+def test_usage_forecast(daemon):
+    import time as t
+
+    now = t.time()
+    daemon._estimator.rate["five_hour"] = 1.0  # a dollar of requests is one percent
+    daemon._ledger.items = [(now - 1800 + i * 60, 0.5, 100) for i in range(30)]  # 15 % in the last half hour
+    w = {"pct": 40, "resets": now + 4.5 * 3600, "est": True}  # the window started half an hour ago
+    full = daemon._forecast("claude", "five_hour", w, now)
+    assert full and abs(full - (now + 60 / 15 * 1800)) < 400  # 60 % left at 15 % per half hour: two hours
+    assert not daemon._forecast("claude", "five_hour", {**w, "resets": now + 3600}, now)  # resets first
+    daemon._ledger.items = [(now - 1800, 15.0, 100)]
+    assert not daemon._forecast("claude", "five_hour", w, now)  # nothing in the last 15 minutes
+    # Another agent: from how its readings rose.
+    daemon._pace[("codex", "five_hour")] = [(now - 3000, 20.0, int((now + 3 * 3600) // 600)),
+                                            (now - 1200, 30.0, int((now + 3 * 3600) // 600))]
+    full = daemon._forecast("codex", "five_hour", {"pct": 40, "resets": now + 3 * 3600}, now)
+    assert full and abs(full - (now + 60 / 20 * 3000)) < 400

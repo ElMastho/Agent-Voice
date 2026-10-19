@@ -129,6 +129,9 @@ Open the panel: the notch takes a third of the screen (up to 600 px) and shows w
 ### The daily recap
 At 18:00 (`recap.at`), once a day and only if something happened, a violet *Today* banner sums up the day: turns and tokens, each thread with its last summary, what's still waiting on you, and where your limits are; in Voice mode it's also said in a sentence or two. If you're away or in focus at that time, it waits for you. Ask for it any time: *"Hey Claude, daily recap"*, *"what did I do today?"*, *"résumé de la journée"*, the tray's *Today's recap*, or `agent-voice recap` in a terminal.
 
+### The morning brief
+The first time you're at the PC in the morning (between `brief.from`, 05:00, and `brief.until`, 12:00), once a day, a violet *Your day* banner tells you what's ahead: today's meetings, what's due later (reminders and scheduled prompts), your open to-dos, what's still waiting on you, what finished while you were away, the last day you worked, and your limits. In Voice mode it's said in a few sentences, starting with *"Good morning."* Coming back after the night, it takes the place of the *While you were away* banner. With nothing to tell, nothing shows. Ask for it any time: *"Hey Claude, what's my day?"*, *"morning brief"*, *"c'est quoi ma journée"*, the tray's *Morning brief*, or `agent-voice brief`.
+
 ### Your video turns down while it talks
 On Windows, while the voice speaks, every other app (a YouTube video, Spotify, a game) fades to 30% of its own volume and comes back when the voice is done. While you reply, they go quiet entirely and a video or song that's playing is **paused** (the media key, which browsers and players obey), then played again when you're done. Only what agent-voice paused is resumed; if you change an app's volume in the meantime, it's yours and stays as you set it. If agent-voice ever stops mid-way, the next start puts the volumes back. Settings: `ducking.voice` (0 to 1), `ducking.listen`, `ducking.pause_media`, or `ducking.enabled: false`.
 
@@ -352,6 +355,7 @@ File: `~/.agent-voice/config.json`. Only put the keys you want to change; they'r
 | `resume.auto` / `message` | `true` / `"Continue."` | Out of quota: send this once the limit resets (`false`: only when you ask) |
 | `focus.enabled` / `full_screen` / `calls` | `true` / `true` / `"hold"` | Hold replies in focus; `calls: "chimes"` for chimes during calls |
 | `recap.enabled` / `at` | `true` / `"18:00"` | The daily recap |
+| `brief.enabled` / `from` / `until` | `true` / `"05:00"` / `"12:00"` | The morning brief, the first time you're there in that span |
 | `shortcuts` | 6 saved prompts | `{"name": "prompt"}` |
 | `history.enabled` / `days` | `true` / `90` | Every prompt and reply, searchable, kept this many days |
 | `barge_in.enabled` / `speakers` | `true` / `false` | Talk over the voice to stop it; through speakers too if `speakers` |

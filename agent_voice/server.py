@@ -385,6 +385,24 @@ def match_recap(text: str) -> bool:
     return bool(_RECAP.match(_plain(text).replace(" s ", "'s ")) or _RECAP.match(text.strip().lower()))
 
 
+_BRIEF = re.compile(r"^(?:give me\s+)?(?:the\s+|my\s+)?(?:morning\s+brief(?:ing)?|brief(?:ing)?|what'?s (?:on )?my day|"
+                    r"what does my day look like|(?:my )?plan for today|(?:le |mon )?brief(?: du matin)?|"
+                    r"(?:c'?est )?quoi (?:ma journée|mon programme)|(?:le |mon )?programme du jour)\W*$", re.I)
+_JOIN = re.compile(r"^(?:please\s+)?(?:(?:join|open|start)\s+(?:the\s+|my\s+)?(?:next\s+)?(?:meeting|call|teams|zoom|meet)"
+                   r"(?:\s+(?:call|meeting))?|(?:rejoin(?:dre|s)?|lance(?:r)?|ouvr(?:e|ir))\s+(?:la\s+|ma\s+)?"
+                   r"(?:prochaine\s+)?(?:réunion|reunion|visio|teams|zoom))\W*$", re.I)
+
+
+def match_brief(text: str) -> bool:
+    """'Morning brief', "what's my day", 'brief du matin'."""
+    return bool(_BRIEF.match(_plain(text).replace(" s ", "'s ")) or _BRIEF.match(text.strip().lower()))
+
+
+def match_join(text: str) -> bool:
+    """'Join my meeting', 'rejoins la réunion'."""
+    return bool(_JOIN.match(" ".join(text.strip().split())))
+
+
 def spoken_number(words: set[str], most: int) -> int | None:
     """'two', '2', 'the second one' -> 2 (up to `most`); 'one' alone only when nothing else is said."""
     found = [n for n, keys in _ORDINALS.items() if n <= most and any(k in words for k in keys)]
@@ -538,6 +556,7 @@ class Daemon:
         self._ledger = usage.Ledger()
         self._estimator = usage.Estimator(self._ledger, self.state.get("claude_usage"))
         self._claude_est: dict[str, dict] = {}
+        self._pace: dict[tuple[str, str], list[tuple[float, float, int]]] = {}  # (at, pct, reset) per window: its pace
         self._claude_asked = 0.0  # the last time we ran `claude -p /usage`
         self._claude_seen = 0.0  # ~/.claude.json's mtime when last read
         self._codex_seen: tuple = (None, 0.0)  # Codex's latest log and its mtime when last read
@@ -1679,18 +1698,41 @@ class Daemon:
                 fetched = now
             try:
                 found = agenda.on_day(events, today) + agenda.outlook_day(today)
-                seen, self.agenda = set(), []
+                seen: dict[tuple, dict] = {}
                 for e in sorted(found, key=lambda x: (not x["all_day"], x["start"])):
                     key = (e["title"], int(e["start"]))
                     if key not in seen:  # in both Outlook and a link
-                        seen.add(key)
-                        self.agenda.append(e)
+                        seen[key] = e
+                    elif e.get("join") and not seen[key].get("join"):
+                        seen[key] = {**seen[key], "join": e["join"]}
+                self.agenda = list(seen.values())
             except Exception:
                 log.exception("today's meetings unavailable")
             self._agenda_wake.wait(300)
 
     def _agenda_status(self) -> dict:
         return {"events": self.agenda[:12], "sources": len(self.calendars()), "error": self._agenda_error}
+
+    def _joinable(self, now: float | None = None, start: float = 0) -> dict | None:
+        """The meeting to join: the one starting at `start`, else the one on now, else the next in 15 minutes (with
+        a video link: Teams, Zoom, Meet...)."""
+        now = time.time() if now is None else now
+        meetings = [e for e in self.agenda if e.get("join") and not e["all_day"] and e["end"] > now]
+        if start:
+            return next((e for e in meetings if int(e["start"]) == int(start)), None)
+        return next((e for e in meetings if e["start"] - now < 15 * 60), None)
+
+    def join_meeting(self, start: float = 0) -> str:
+        """Open the meeting's link (Teams, Zoom, Meet... open their app from it); its title, "" when there's none."""
+        import webbrowser
+
+        meeting = self._joinable(start=start)
+        link = agenda.join_link(meeting["join"]) if meeting else ""
+        if not link:
+            return ""
+        log.info("joining the meeting %r", meeting["title"][:60])
+        webbrowser.open(link)
+        return meeting["title"]
 
     def listen_companion(self) -> None:
         """The companion's mic: what you say next is a timer, a to-do, a reminder (else it joins the to-do list)."""
@@ -1702,6 +1744,11 @@ class Daemon:
         today = time.strftime("%Y-%m-%d")
         day = self.state.get("day")
         if not isinstance(day, dict) or day.get("date") != today:
+            if isinstance(day, dict) and day.get("threads"):  # for the morning brief: the last day you worked
+                done = list(day["threads"].values())
+                top = max(done, key=lambda t: t.get("turns", 0))
+                self.state["yesterday"] = {"date": day.get("date"), "turns": sum(t.get("turns", 0) for t in done),
+                                           "threads": len(done), "top": top.get("title") or ""}
             day = {"date": today, "threads": {}, "hours": [0] * 24}
             self.state["day"] = day
         return day
@@ -1739,6 +1786,18 @@ class Daemon:
         waiting = sorted({n["title"] for n in self._needs_status()})
         if waiting:
             lines.append(tr("Still waiting on you: {who}.", who=_join(waiting)))
+        lines += self._limits_lines()
+        top, sl = threads[0][1], self.language
+        said = tr("Today: {turns} turns in {threads} threads, most of it in {top}.", in_lang=sl, turns=stats['turns'],
+                  threads=stats['threads'], top=top.get('title') or tr('one thread', in_lang=sl))
+        if waiting:
+            said += " " + plural(len(waiting), "{who} still needs you.", "{who} still need you.", in_lang=sl,
+                                 who=_join(waiting, sl))
+        said += self._week_said()
+        return " ".join(lines), said
+
+    def _limits_lines(self) -> list[str]:
+        """'Limits: Claude 5h 40%, week ~62%.' (none when no agent reports any)."""
         limits = []
         for source, windows in self._limits_status().items():
             parts = [(tr("5h") if k == "five_hour" else tr("week")) + " "
@@ -1746,19 +1805,112 @@ class Daemon:
                         else tr("{tokens} tokens", tokens=textclean.tokens_label(w.get('tokens', 0))))
                      for k, w in sorted(windows.items())]
             limits.append(f"{AGENT_TITLES.get(source, source.capitalize())} {', '.join(parts)}")
-        if limits:
-            lines.append(tr("Limits: ") + "; ".join(limits) + ".")
-        top, sl = threads[0][1], self.language
-        said = tr("Today: {turns} turns in {threads} threads, most of it in {top}.", in_lang=sl, turns=stats['turns'],
-                  threads=stats['threads'], top=top.get('title') or tr('one thread', in_lang=sl))
-        if waiting:
-            said += " " + plural(len(waiting), "{who} still needs you.", "{who} still need you.", in_lang=sl,
-                                 who=_join(waiting, sl))
+        return [tr("Limits: ") + "; ".join(limits) + "."] if limits else []
+
+    def _week_said(self) -> str:
         week = [w["pct"] for windows in self._limits_status().values() for k, w in windows.items()
                 if k == "seven_day" and w.get("pct") is not None]
-        if week:
-            said += " " + tr("You've used {pct}% of your weekly limit.", in_lang=sl, pct=max(week))
-        return " ".join(lines), said
+        return " " + tr("You've used {pct}% of your weekly limit.", in_lang=self.language, pct=max(week)) if week else ""
+
+    # -- the morning brief ------------------------------------------------------
+    def brief_text(self, away: list[dict] | None = None) -> tuple[str, str]:
+        """(shown, spoken): today's meetings, what's due later (reminders, scheduled prompts), your open to-dos,
+        what's waiting on you, what finished while you were away, the last day you worked, the limits.
+        ("", "") when there's nothing to tell."""
+        from datetime import date, datetime, timedelta
+
+        now, sl = time.time(), self.language
+        self._day()  # a new day: the last one is put aside first
+        tonight = datetime.combine(date.today() + timedelta(days=1), datetime.min.time()).timestamp()
+
+        def hm(at: float) -> str:
+            return datetime.fromtimestamp(at).strftime("%H:%M")
+
+        shown, said = [], []
+        meetings = [e for e in self.agenda if not e["all_day"] and e["end"] > now]
+        if meetings:
+            first = meetings[0]
+            shown.append(plural(len(meetings), "{n} meeting: {list}.", "{n} meetings: {list}.",
+                                list=", ".join(f"{hm(e['start'])} {e['title']}" for e in meetings[:3])))
+            said.append(plural(len(meetings), "You have {n} meeting today: {title} at {time}.",
+                               "You have {n} meetings today, the first is {title} at {time}.", in_lang=sl,
+                               title=first["title"], time=hm(first["start"])))
+        elif self.calendars():
+            shown.append(tr("No meetings today."))
+            said.append(tr("No meetings today.", in_lang=sl))
+        later = [(r["at"], r["text"]) for r in self.companion.data.get("reminders") or [] if now <= r["at"] < tonight]
+        later += [(s["at"], f"{s['title']}: {s['prompt']}") for s in self._schedules if now <= s["at"] < tonight]
+        if later:
+            later.sort(key=lambda x: x[0])
+            shown.append(tr("Later today: {list}.",
+                            list="; ".join(f"{hm(at)} {textclean.truncate(text, 60)}" for at, text in later[:3])))
+            said.append(plural(len(later), "One thing later today, at {time}.", "{n} things later today, the first at {time}.",
+                               in_lang=sl, time=hm(later[0][0])))
+        todos = [t for t in self.companion.data.get("todos") or [] if not t["done"]]
+        if todos:
+            mine = [t for t in todos if (t.get("source") or "you") == "you"] or todos
+            shown.append(plural(len(todos), "{n} to-do: {list}.", "{n} to-dos: {list}.",
+                                list=", ".join(textclean.truncate(t["text"], 40) for t in mine[:3])))
+            said.append(plural(len(todos), "{n} to-do is open.", "{n} to-dos are open.", in_lang=sl))
+        done = list(dict.fromkeys(self._title(e["session"], e["source"]) for e in away or [] if e["kind"] == "done"))
+        if done:
+            shown.append(tr("While you were away: {news}.", news=plural(len(done), "{who} finished", "{who} finished",
+                                                                         who=_join(done))))
+        waiting = sorted({n["title"] for n in self._needs_status()})
+        if waiting:
+            shown.append(tr("Still waiting on you: {who}.", who=_join(waiting)))
+            said.append(plural(len(waiting), "{who} still needs you.", "{who} still need you.", in_lang=sl,
+                               who=_join(waiting, sl)))
+        last = self.state.get("yesterday") or {}
+        if last.get("turns") and shown:  # only beside something else: it's no news on its own
+            when = tr("Yesterday") if last.get("date") == (date.today() - timedelta(days=1)).isoformat() else tr("Last time")
+            shown.append(f"{when}: " + plural(int(last["turns"]), "{n} turn", "{n} turns") + " "
+                         + plural(int(last.get("threads") or 1), "in {n} thread", "in {n} threads")
+                         + (tr(", most of it in {top}", top=last["top"]) if last.get("top") else "") + ".")
+        if not shown:
+            return "", ""
+        shown += self._limits_lines()
+        hello = [tr("Good morning.", in_lang=sl)] if time.localtime(now).tm_hour < 12 else []
+        return " ".join(shown), " ".join([*hello, *said]) + self._week_said()
+
+    def brief(self, spoken: bool = True, away: list[dict] | None = None, asked: bool = False) -> None:
+        """The morning brief: once a day by itself (`_check_brief`), or when you ask for it (at night, that doesn't
+        stand in for the morning's)."""
+        if not asked or self._brief_due(time.time()):
+            self.state["brief_day"] = time.strftime("%Y-%m-%d")
+            save_state(self.state)
+        shown, said = self.brief_text(away)
+        if not shown:
+            if not asked:
+                if away:
+                    self._catch_up(away)
+                return
+            shown, said = tr("Nothing planned today."), tr("Nothing planned today.", in_lang=self.language)
+        log.info("morning brief: %s", said)
+        self._show_banner(shown, "", "", kind="brief")
+        if spoken and not self.quiet:
+            self._wake_cancel.set()
+            self.speaker.speak(said, self.language)
+
+    def _brief_due(self, now: float) -> bool:
+        """Not given yet today, and it's morning (`brief.from` to `brief.until`)."""
+        cfg = self.config.get("brief", {})
+        if not cfg.get("enabled", True) or self.focus:
+            return False
+        local = time.localtime(now)
+        if self.state.get("brief_day") == time.strftime("%Y-%m-%d", local):
+            return False
+        try:
+            start, end = (tuple(int(x) for x in str(cfg.get(k, d)).split(":", 1))
+                          for k, d in (("from", "05:00"), ("until", "12:00")))
+        except ValueError:
+            return False
+        return start <= (local.tm_hour, local.tm_min) < end
+
+    def _check_brief(self, now: float, idle: float) -> None:
+        """The first time you're at the PC in the morning (back from the night's away: `_check_away`)."""
+        if idle < 60 and not self._away_since and self._brief_due(now):
+            self.brief()
 
     def recap(self, spoken: bool = True) -> None:
         shown, said = self.recap_text()
@@ -1799,7 +1951,9 @@ class Daemon:
             time.sleep(5)
             try:
                 now = time.time()
-                self._check_away(winfocus.idle_seconds(), now)
+                idle = winfocus.idle_seconds()
+                self._check_away(idle, now)
+                self._check_brief(now, idle)
                 self._check_resumes(now)
                 self._check_schedules(now)
                 self._check_recap(now)
@@ -1817,7 +1971,11 @@ class Daemon:
             self._away_since = now - (0 if held and idle < 60 else idle)
         elif not away and self._away_since:
             since, self._away_since = self._away_since, 0.0
-            self._catch_up([e for e in self._events if e["at"] >= since])
+            events = [e for e in self._events if e["at"] >= since]
+            if self._brief_due(now):  # the first time you're back in the morning: the brief tells it all
+                self.brief(away=events)
+            else:
+                self._catch_up(events)
 
     def _catch_up(self, events: list[dict]) -> None:
         """'While you were away: Notch redesign finished; Codex needs you.' Once, as you come back."""
@@ -2080,7 +2238,45 @@ class Daemon:
                 continue
             if not e["resets"] or e["resets"] > now:
                 out.setdefault("claude", {})[window] = e
+        for source, windows in out.items():
+            for window, w in windows.items():
+                full = self._forecast(source, window, w, now)
+                if full:
+                    windows[window] = {**w, "full_at": full}
         return {source: windows for source, windows in out.items() if windows}
+
+    def _forecast(self, source: str, window: str, w: dict, now: float) -> int:
+        """When this window is full at the pace of the last hour (of the last day, for the weekly one): epoch seconds,
+        to the 5 minutes; 0 when it won't be before it resets, or nothing was used in the last 15 minutes.
+
+        Claude: its requests' cost in the transcripts, over what one percent costs (`usage.Estimator`). Others:
+        how their readings rose."""
+        pct, resets = w.get("pct"), float(w.get("resets") or 0)
+        key = (source, window)
+        samples = [s for s in self._pace.get(key, []) if now - s[0] < 86400 and s[2] == int(resets // 600)]
+        if pct is not None and (not samples or now - samples[-1][0] >= 60):
+            samples.append((now, float(pct), int(resets // 600)))
+        self._pace[key] = samples
+        if pct is None or not resets or not 10 <= pct < 100:
+            return 0
+        span = 3600.0 if window == "five_hour" else 86400.0
+        start = max(now - span, resets - usage.SPANS[window])
+        rate = self._estimator.rate.get(window) if source == "claude" else None
+        if rate:
+            recent = [i for i in self._ledger.items if i[0] >= start]
+            if not recent or now - recent[-1][0] > 900:
+                return 0
+            pace = sum(i[1] for i in recent) / rate / max(900.0, now - start)  # percent per second
+        else:
+            before = [s for s in samples if s[0] >= start]
+            ago = [s for s in before if s[0] <= now - 900]
+            if not ago or pct <= ago[-1][1]:  # nothing moved in the last 15 minutes
+                return 0
+            pace = (pct - before[0][1]) / max(900.0, now - before[0][0])
+        if pace <= 0:
+            return 0
+        full = now + (100 - pct) / pace
+        return 0 if full >= resets - 300 else int(round(full / 300) * 300)
 
     def usage_line(self, enable: bool) -> None:
         """Turn Claude Code's status line (its limits, for the notch) on or off from the widget."""
@@ -3404,6 +3600,15 @@ class Daemon:
                 self._heard(command, lang, "", tag="command")
                 self.recap()
                 continue
+            if match_brief(command):  # "Hey Claude, what's my day?"
+                self._heard(command, lang, "", tag="command")
+                self.brief(asked=True)
+                continue
+            if match_join(command):  # "Hey Claude, join my meeting"
+                self._heard(command, lang, "", tag="command")
+                if not self.join_meeting():
+                    self._confirm("No meeting to join right now.")
+                continue
             if self._limited and match_resume(command):  # "Hey Claude, resume Codex when it resets"
                 named = self._mentioned(command, set(self._limited))
                 if self.set_resume(named or ""):
@@ -3751,6 +3956,9 @@ def _handler(daemon: Daemon):
                     return self._json(200, {"ok": True})
                 if self.path == "/media":
                     return self._json(200, {"ok": daemon.media_control(action)})
+                if self.path == "/calendar" and action == "join":  # the meeting's Teams / Zoom / Meet link
+                    title = daemon.join_meeting(float(data.get("start") or 0))
+                    return self._json(200 if title else 404, {"title": title} if title else {"error": "no meeting to join"})
                 if self.path == "/calendar":
                     return self._json(200, {"calendars": len(daemon.set_calendar(action, str(data.get("source") or "")))})
                 if self.path == "/note":
@@ -3887,6 +4095,9 @@ def _handler(daemon: Daemon):
             if self.path == "/recap":
                 daemon.recap(spoken=bool(data.get("speak", True)))
                 return self._json(200, {"text": daemon.recap_text()[0]})
+            if self.path == "/brief":
+                daemon.brief(spoken=bool(data.get("speak", True)), asked=True)
+                return self._json(200, {"text": daemon.brief_text()[0] or tr("Nothing planned today.")})
             if self.path == "/resume":
                 ok = daemon.set_resume(str(data.get("session") or ""), bool(data.get("on", True)))
                 return self._json(200, {"ok": ok})

@@ -95,7 +95,7 @@ AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI"
 NEED_ROWS, NEED_H = 3, 28  # "needs you" rows at the top of the panel
 # Banner kinds: the accent around it and its header.
 BANNER_KINDS = {"you": ("#10E0A0", ""), "pending": ("#10E0A0", ""), "needs": ("#FBBF24", ""), "catchup": ("#8B7CFF", "While you were away"),
-                "recap": ("#8B7CFF", "Today"), "timer": ("#FBBF24", "Timer done"), "reminder": ("#8B7CFF", "Reminder"),
+                "recap": ("#8B7CFF", "Today"), "brief": ("#8B7CFF", "Your day"), "timer": ("#FBBF24", "Timer done"), "reminder": ("#8B7CFF", "Reminder"),
                 "pomodoro": ("#F87171", "Pomodoro")}
 GUIDE_URL = "https://github.com/ElMastho/Agent-Voice/blob/main/docs/guide.md"
 COMPACT = 56  # compact mode: just the orb
@@ -2014,7 +2014,8 @@ class SidePanel(QWidget):
         gets a row to turn its status line on."""
         rows = self.owner._limit_rows()[:3]
         lines = sum(1 + max(1, len(windows)) for _agent, windows in rows)
-        rect = QRectF(area.x(), area.y(), area.width(), 30 + lines * 20 + (6 if rows else 30))
+        forecasts = sum(1 for _agent, windows in rows for w in windows.values() if w.get("full_at"))
+        rect = QRectF(area.x(), area.y(), area.width(), 30 + lines * 20 + forecasts * 16 + (6 if rows else 30))
         estimated = any(w.get("est") for _agent, windows in rows for w in windows.values())
         self._card(p, rect, ICONS["usage"], tr("Usage"), "")
         if rows:
@@ -2065,6 +2066,11 @@ class SidePanel(QWidget):
                 self._text(p, QRectF(rect.right() - 94, y, 84, 18), amount + resets, self.f_small, 170,
                            Qt.AlignRight | Qt.AlignVCenter)
                 y += 20
+                if w.get("full_at"):  # at the pace of the last hour (day), full before it resets
+                    self._text(p, QRectF(rect.x() + 52, y - 3, rect.width() - 62, 18),
+                               tr("at this pace, full around {time}", time=_when_text(w["full_at"], "%a %H:%M")),
+                               self.f_small, 200, color="#FBBF24")
+                    y += 16
         return rect.bottom()
 
     def _card_media(self, p, hits, area: QRectF, data: dict, now: float) -> float:
@@ -2117,6 +2123,9 @@ class SidePanel(QWidget):
             if kind == "meeting":
                 now_on = item["start"] <= now < item["end"] and not item["all_day"]
                 past = item["end"] <= now and not item["all_day"]
+                if item.get("join") and not past and not item["all_day"]:  # its Teams / Zoom / Meet link
+                    key = f"join:{int(item['start'])}"
+                    hits[key] = QRectF(rect.right() - 58, y + 2, 48, 18)
                 when = tr("now") if now_on else tr("all day") if item["all_day"] else _when_text(item["start"])
                 text, icon = item["title"] + (f"  ·  {item['location']}" if item.get("location") else ""), "calendar"
             elif kind == "reminder":
@@ -2129,9 +2138,11 @@ class SidePanel(QWidget):
             self._text(p, QRectF(rect.x() + 14, y, 64, 22), when, self.f_text, 240 if now_on else 110 if past else 220,
                        color="" if past else "#A99BFF")
             self._text(p, QRectF(rect.x() + 80, y, 16, 22), ICONS[icon], self.f_icon, 90 if past else 140, Qt.AlignCenter)
-            self._text(p, QRectF(rect.x() + 100, y, rect.width() - 130, 22), text, self.f_text,
-                       110 if past else 235 if now_on else 215)
-            if key:
+            self._text(p, QRectF(rect.x() + 100, y, rect.width() - (166 if key.startswith("join:") else 130), 22),
+                       text, self.f_text, 110 if past else 235 if now_on else 215)
+            if key.startswith("join:"):
+                self._chip(p, hits[key], tr("Join"), key, 60 if now_on else 30)
+            elif key:
                 hits[key] = QRectF(rect.right() - 26, y + 2, 18, 18)
                 hits[row] = QRectF(rect.x() + 4, y, rect.width() - 34, 22)
                 if self.hot in (key, row):
@@ -2292,6 +2303,8 @@ class SidePanel(QWidget):
             _post("/media", {"action": {"mprev": "previous", "mtoggle": "toggle", "mnext": "next"}[kind]})
         elif kind == "calunlink":
             _post("/calendar", {"action": "clear"})
+        elif kind == "join":  # the meeting's video link, opened by the service
+            _post("/calendar", {"action": "join", "start": item_id})
         elif kind == "urefresh":
             _post("/limits_refresh")
             self.owner.st["limits_refreshing"] = True
@@ -4354,6 +4367,8 @@ class VoiceWidget(QWidget):
     def _tooltip_text(self, key: str | None) -> str:
         if key in ("sprev", "snext"):
             return tr("Previous song") if key == "sprev" else tr("Next song")
+        if key == "sjoin":
+            return tr("Join {title}", title=(self._strip_meeting() or {}).get("title") or tr("the meeting"))
         if key == "splay":
             return tr("Pause") if (self.st.get("media") or {}).get("playing") else tr("Play")
         if key == "phone:test":
@@ -4524,6 +4539,10 @@ class VoiceWidget(QWidget):
             self.toggle_expanded()
         elif key.startswith("tab:"):
             self.toggle_side(key[4:])
+        elif key == "sjoin":  # the meeting about to start: its Teams / Zoom / Meet link
+            meeting = self._strip_meeting()
+            if meeting:
+                _post("/calendar", {"action": "join", "start": int(meeting["start"])})
         elif key in ("sprev", "snext", "splay"):  # the song on the second line
             _post("/media", {"action": {"sprev": "previous", "snext": "next", "splay": "toggle"}[key]})
             if key == "splay" and self.st.get("media"):  # at once: the next look at the player confirms it
@@ -4911,6 +4930,12 @@ class VoiceWidget(QWidget):
         return ((self.st.get("thread") or {}).get("session") or (self.st.get("last_reply") or {}).get("session")
                 or "")
 
+    def _strip_meeting(self) -> dict | None:
+        """The meeting on the second line: on now, or within 15 minutes."""
+        now = time.time()
+        return next((e for e in (self.st.get("agenda") or {}).get("events") or []
+                     if not e["all_day"] and e["end"] > now and e["start"] - now < 15 * 60), None)
+
     def _strip_items(self) -> list[tuple[str, str, str, float | None, str]]:
         """The notch's second line: (icon, label, time, progress, colour) for the Pomodoro, each timer, a running
         stopwatch, a meeting about to start and the song playing.
@@ -4934,8 +4959,7 @@ class VoiceWidget(QWidget):
         if sw.get("start"):
             items.append((ICONS["stopwatch"], "", companion_clock(float(sw["elapsed"]) + now - sw["start"]), None,
                           ""))
-        meeting = next((e for e in (self.st.get("agenda") or {}).get("events") or []  # on now, or within 15 min
-                        if not e["all_day"] and e["end"] > now and e["start"] - now < 15 * 60), None)
+        meeting = self._strip_meeting()
         if meeting:
             soon = meeting["start"] - now
             items.append((ICONS["calendar"], meeting["title"],
@@ -4973,8 +4997,10 @@ class VoiceWidget(QWidget):
         x, y = left, NOTCH_H - 4.0
         fm = QFontMetrics(self.f_notch_sub)
         spans, buttons = [], {}
+        join = bool((self._strip_meeting() or {}).get("join"))
         for icon, label, shown, _done, _color in self._strip_items():
-            extra = 58 if icon == ICONS["music"] else 0  # previous, play/pause, next
+            # previous, play/pause, next; a meeting's Join
+            extra = 58 if icon == ICONS["music"] else 44 if icon == ICONS["calendar"] and join else 0
             width = min(fm.horizontalAdvance(f"{label}  {shown}" if label else shown), 170, right - left - 19 - extra)
             if x > left and x + 19 + width + extra > right:
                 x, y = left, y + STRIP_H
@@ -4985,6 +5011,9 @@ class VoiceWidget(QWidget):
                 buttons["splay"] = QRectF(x + 6, y, 18, 18)
                 buttons["snext"] = QRectF(x + 26, y, 18, 18)
                 x += 58
+            elif extra:
+                buttons["sjoin"] = QRectF(x - 12, y + 1, 40, 16)
+                x += 44
         return spans, buttons
 
     def _paint_strip(self, p: QPainter) -> None:
@@ -5006,6 +5035,15 @@ class VoiceWidget(QWidget):
                        fm.elidedText(text, Qt.ElideMiddle, int(width + 2)))
         p.setFont(self.f_icon_small)
         for key, rect in buttons.items():
+            if key == "sjoin":
+                p.setPen(Qt.NoPen)
+                p.setBrush(_tone(QColor(16, 224, 160, int(60 + 60 * self.hover_t.get(key, 0.0)))))
+                p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+                p.setFont(self.f_notch_sub)
+                p.setPen(_ink(235))
+                p.drawText(rect, Qt.AlignCenter, tr("Join"))
+                p.setFont(self.f_icon_small)
+                continue
             p.setPen(_ink(int(150 + 90 * self.hover_t.get(key, 0.0) + (15 if self.pressed == key else 0))))
             playing = bool((self.st.get("media") or {}).get("playing"))
             icon = {"sprev": "prev", "snext": "next"}.get(key) or ("pause" if playing else "play")
@@ -5121,6 +5159,7 @@ class Tray(QSystemTrayIcon):
                        "Update available: v{v} (how to)", v=update['version'])
             add(label, w.start_update, enabled=not state)
             m.addSeparator()
+        add(tr("Morning brief"), lambda: _post("/brief"), enabled=online)
         add(tr("Today's recap"), lambda: _post("/recap"), enabled=online)
         add(tr("Check for updates (and install)"), lambda: _post("/update_check", {"install": True}), enabled=online)
         m.addSeparator()

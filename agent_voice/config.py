@@ -108,6 +108,7 @@ DEFAULTS: dict = {
     # The day's recap at this time (what each thread did, what's waiting, limits, tokens); also on demand:
     # "Hey Claude, daily recap", the tray, or `agent-voice recap`.
     "recap": {"enabled": True, "at": "18:00"},
+    "brief": {"enabled": True, "from": "05:00", "until": "12:00"},  # the morning brief, the first time you're there
     # Focus: in a call, presenting or with an app full screen, replies are held (approvals still come
     # through) and a catch-up follows. calls: "hold", or "chimes" to keep hearing chimes in calls.
     "focus": {"enabled": True, "full_screen": True, "calls": "hold"},

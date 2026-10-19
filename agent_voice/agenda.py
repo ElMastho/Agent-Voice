@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
+import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +19,27 @@ log = logging.getLogger("agent_voice.agenda")
 
 DAYS = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
 MAX_BYTES = 5_000_000
+# Video meetings' join links: only these services. Anyone can write an invitation's text, so a link to anywhere else
+# is never offered (nor opened).
+JOIN_HOSTS = ("teams.microsoft.com", "teams.live.com", "zoom.us", "zoom.com", "meet.google.com", "webex.com",
+              "whereby.com", "meet.jit.si", "gotomeeting.com", "meet.goto.com", "chime.aws", "bluejeans.com")
+_URL = re.compile(r"https://[^\s<>\"'\\]+", re.I)
+# Where calendars put the meeting's link, best first (Teams' and Meet's own fields, then the invitation's text).
+JOIN_FIELDS = ("X-MICROSOFT-SKYPETEAMSMEETINGURL", "X-GOOGLE-CONFERENCE", "URL", "LOCATION", "DESCRIPTION")
+
+
+def join_link(*texts: str) -> str:
+    """The first video-meeting link in these texts (Teams, Zoom, Meet, Webex...), or ""."""
+    for text in texts:
+        for m in _URL.finditer(text or ""):
+            url = m.group(0).rstrip(").,;:!?]}")
+            try:
+                host = (urllib.parse.urlsplit(url).hostname or "").lower()
+            except ValueError:
+                continue
+            if any(host == h or host.endswith("." + h) for h in JOIN_HOSTS):
+                return url[:2000]
+    return ""
 
 
 def fetch(source: str, timeout: float = 15.0) -> str:
@@ -67,7 +89,7 @@ def _duration(value: str) -> timedelta:
 
 
 def parse(text: str) -> list[dict]:
-    """The calendar's events: {uid, title, location, start, end, all_day, rrule, exdates, recurrence_id}."""
+    """The calendar's events: {uid, title, location, join, start, end, all_day, rrule, exdates, recurrence_id}."""
     events, current = [], None
     for line in _lines(text):
         name, _, value = line.partition(":")
@@ -75,17 +97,22 @@ def parse(text: str) -> list[dict]:
         key = key.upper()
         if key == "BEGIN" and value.upper() == "VEVENT":
             current = {"uid": "", "title": "", "location": "", "start": None, "end": None, "all_day": False,
-                       "rrule": {}, "exdates": set(), "recurrence_id": None, "cancelled": False, "duration": None}
+                       "rrule": {}, "exdates": set(), "recurrence_id": None, "cancelled": False, "duration": None,
+                       "join": "", "_texts": {}}
         elif key == "END" and value.upper() == "VEVENT" and current is not None:
             if current["start"] is not None and not current["cancelled"]:
                 if current["end"] is None:
                     current["end"] = current["start"] + (current["duration"] or (
                         timedelta(days=1) if current["all_day"] else timedelta(hours=1)))
+                texts = current.pop("_texts")
+                current["join"] = join_link(*(texts.get(f, "") for f in JOIN_FIELDS))
                 events.append(current)
             current = None
         elif current is None:
             continue
-        elif key == "UID":
+        if key in JOIN_FIELDS:  # kept only until the event ends: just its link is
+            current["_texts"][key] = _unescape(value)[:20000]
+        if key == "UID":
             current["uid"] = value
         elif key == "SUMMARY":
             current["title"] = _unescape(value)
@@ -177,7 +204,7 @@ def on_day(events: list[dict], day: date) -> list[dict]:
                 or e["start"].date() == day:
             starts.append(e["start"])
         for start in starts:
-            out.append({"title": e["title"] or "(no title)", "location": e["location"],
+            out.append({"title": e["title"] or "(no title)", "location": e["location"], "join": e.get("join", ""),
                         "start": start.timestamp(), "end": (start + length).timestamp(), "all_day": e["all_day"]})
     return sorted(out, key=lambda x: (not x["all_day"], x["start"]))
 
@@ -203,11 +230,23 @@ def _outlook_items(found, limit: int = 30) -> list[dict]:
     out = []
     item = found.GetFirst()
     while item is not None and len(out) < limit:
-        out.append({"title": str(item.Subject or "(no title)"), "location": str(item.Location or ""),
+        location = str(item.Location or "")
+        out.append({"title": str(item.Subject or "(no title)"), "location": location, "join": _outlook_join(item, location),
                     "start": _ole_time(item.Start).timestamp(), "end": _ole_time(item.End).timestamp(),
                     "all_day": bool(item.AllDayEvent)})
         item = found.GetNext()
     return out
+
+
+def _outlook_join(item, location: str) -> str:
+    """A meeting's link: in its location, else in the invitation's text (Teams puts it there)."""
+    found = join_link(location)
+    if found or bool(item.AllDayEvent):
+        return found
+    try:
+        return join_link(str(item.Body or "")[:20000])
+    except Exception:  # an item Outlook won't open, or its body withheld
+        return ""
 
 
 def outlook_day(day: date) -> list[dict]:

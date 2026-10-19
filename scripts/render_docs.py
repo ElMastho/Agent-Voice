@@ -484,14 +484,17 @@ def render_widgets() -> None:
         return now - now % 300 + minutes * 60  # on the 5 minutes, like meetings
 
     agenda = {"events": [{"title": "Design review", "location": "Room 3", "start": at(-15), "end": at(15),
-                          "all_day": False},
+                          "all_day": False, "join": "https://teams.microsoft.com/l/meetup-join/x"},
                          {"title": "1:1 with Paul", "location": "", "start": at(45), "end": at(75), "all_day": False},
                          {"title": "Release call", "location": "Teams", "start": at(150), "end": at(180),
-                          "all_day": False}], "sources": 1, "error": ""}
+                          "all_day": False, "join": "https://teams.microsoft.com/l/meetup-join/y"}],
+              "sources": 1, "error": ""}
+    # Claude at this pace: its 5-hour window full before it resets.
+    limits = {**LIMITS, "claude": {**LIMITS["claude"], "five_hour": {"pct": 63, "resets": at(200), "full_at": at(110)}}}
     media = {"app": "Spotify", "title": "Get Lucky", "artist": "Daft Punk", "playing": True}
     schedules = [{**SCHEDULES[0], "at": at(90)}, {**SCHEDULES[1], "at": at(60 * 20)}]
     st = status("idle", last_heard=HISTORY[0]["text"], last_heard_lang="en", agents=AGENTS,
-                threads=THREADS, needs=NEEDS, limits=LIMITS, summary=True, day=DAY, schedules=schedules,
+                threads=THREADS, needs=NEEDS, limits=limits, summary=True, day=DAY, schedules=schedules,
                 companion=box, media=media, agenda=agenda)
     w, shot, k = notch_shot(st, expanded=True)
     w.side_open.update(utils=True, companion=True)

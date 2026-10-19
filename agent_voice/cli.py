@@ -138,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("agents", nargs="*", default=["all"])
 
     sub.add_parser("recap", help="today's recap: what each thread did, what's waiting, limits, tokens")
+    sub.add_parser("brief", help="the morning brief: today's meetings, what's due, your to-dos, what's waiting")
     p = sub.add_parser("history", help="search every conversation (what you asked, what they answered)")
     p.add_argument("words", nargs="*", help="what to look for (nothing: the latest)")
     p.add_argument("--limit", type=int, default=15)
@@ -297,8 +298,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "history":
         return _history(args)
-    if args.cmd == "recap":
-        reply = client.request("/recap", {"speak": False})
+    if args.cmd in ("recap", "brief"):
+        reply = client.request(f"/{args.cmd}", {"speak": False})
         print(reply["text"] if reply else "agent-voice isn't running (agent-voice start)")
         return 0 if reply else 1
     if args.cmd == "usage":

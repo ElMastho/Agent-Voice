@@ -26,6 +26,8 @@ datas += [(str(ROOT / "agent_voice" / "browser"), "agent_voice/browser")]
 hiddenimports += collect_submodules("comtypes")
 # Imported where they're used (the phone's QR code, the audio mixer): listed so the build never misses them.
 hiddenimports += collect_submodules("qrcode") + collect_submodules("pycaw") + ["psutil"]
+# Windows' media sessions (what's playing), imported inside media.py.
+hiddenimports += collect_submodules("winrt")
 
 a = Analysis(
     [str(ROOT / "packaging" / "entry.py")],

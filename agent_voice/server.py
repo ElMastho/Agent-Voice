@@ -124,9 +124,9 @@ def _play_apart(audio, rate: int) -> None:
 
 
 SPEEDS = (1.0, 1.25, 1.5, 1.75, 2.0)
-RELEASES_API = "https://api.github.com/repos/ElMastho/agent-voice/releases/latest"
-RELEASES_PAGE = "https://github.com/ElMastho/agent-voice/releases/latest"
-UPDATE_EVERY = 24 * 3600  # re-check for a release once a day (daemons stay up for weeks)
+RELEASES_API = f"https://api.github.com/repos/{updater.REPO}/releases/latest"
+RELEASES_PAGE = f"https://github.com/{updater.REPO}/releases/latest"
+UPDATE_EVERY = 3600  # re-check for a release every hour (daemons stay up for weeks; one small request)
 
 # Chime mode: (frequency Hz, start s) notes, a soft mallet sound. "done" settles on a fifth (C5, G5); "attention"
 # asks, a little higher and twice (G5 then C6, repeated).
@@ -438,6 +438,8 @@ class Daemon:
         self._piper_voices = dict(config["voices"])
         self._engine_state = ""  # "downloading 40%" while the natural voice is fetched
         self._apply_engine()
+        # Your language (Settings): an unsure detection falls back to it, for the voice and for what you say.
+        self._apply_language(self.state.get("language") or config.get("default_lang", "en"))
         self.speaker = Speaker(config)
         # HTTP handlers, the job worker, the mic and wake threads all touch the thread queue.
         self._lock = threading.RLock()
@@ -662,6 +664,28 @@ class Daemon:
             chosen = {**kokoro.DEFAULT_VOICES, **(self.config.get("kokoro", {}).get("voices") or {})}
             voices.update({lang: KOKORO + name for lang, name in chosen.items() if lang in voices})
         self.config["voices"] = voices
+
+    @property
+    def language(self) -> str:
+        return self.config.get("default_lang", "en")
+
+    def _apply_language(self, code: str) -> None:
+        from agent_voice import lang as langmod
+
+        code = code if code in ("en", "fr") else "en"
+        self.config["default_lang"] = code  # the voice's fallback (tts reads it for every reply)
+        self.config.setdefault("stt", {})["prefer"] = code  # what an unsure transcription takes
+        langmod.prefer(code)  # text detection's fallback
+
+    def set_language(self, code: str) -> None:
+        """English or French: the language you speak and hear most (and the notch's own words)."""
+        self._apply_language(code)
+        self.state["language"] = self.language
+        save_state(self.state)
+        log.info("language=%s", self.language)
+        if not self.quiet:
+            self.speaker.stop()
+            self.speaker.speak("Je parle français." if self.language == "fr" else "English it is.", self.language)
 
     def set_engine(self, name: str) -> None:
         """Light (Piper) or natural (Kokoro): the natural voice is downloaded the first time (~120 MB)."""
@@ -2627,11 +2651,19 @@ class Daemon:
                 log.exception("ducking restore failed")
 
     def _duck_tick(self, now: float) -> None:
-        """Every 100 ms: speaking -> others lowered; you speak -> silenced (a video paused); done -> as they were."""
+        """Every 100 ms: speaking -> others lowered; you speak -> silenced (a video paused); done -> as they were.
+
+        The mic open for your reply isn't you speaking: until you do, the others come back (in headphones all the
+        way; through speakers to the voice's level, or the mic would take the video for you)."""
         cfg = self.config.get("ducking", {})
         if not cfg.get("enabled", True) or self._ducker is None:
             return
-        want = "listen" if (self._listening or self._ptt_active) else "voice" if self.speaker.busy else ""
+        if self._ptt_active or self._mic_phase == "recording":
+            want = "listen"
+        elif self.speaker.busy or self._mic_phase == "waiting" and self._output.kind != "headphones":
+            want = "voice"
+        else:
+            want = ""
         if want:
             self._duck_idle = 0.0
             if want != self._duck_state:
@@ -2643,8 +2675,8 @@ class Daemon:
             self._duck_idle = self._duck_idle or now
             # While the thread that spoke is still at work, its next progress note is seconds away: the others
             # stay lowered (up to 15 s), instead of coming back up and going down again with each note.
-            hold = 15.0 if self._voice_session and self._voice_session in self.activity else 1.2
-            if now - self._duck_idle >= hold and not self._listen_armed:
+            hold = 15.0 if self._voice_session and self._voice_session in self.activity else 0.4
+            if now - self._duck_idle >= hold:
                 self._duck_state, self._duck_idle = "", 0.0
                 self._duck_jobs.put(("restore",))
 
@@ -3069,7 +3101,7 @@ class Daemon:
 
     # -- updates ----------------------------------------------------------------
     def _check_update(self) -> None:
-        """Tell the widget when GitHub has a newer release: a few seconds after start, then once a day."""
+        """Tell the widget when GitHub has a newer release: a few seconds after start, then every hour."""
         if not self.config.get("update_check", True):
             return
         time.sleep(5)
@@ -3078,7 +3110,9 @@ class Daemon:
             self._fetch_release()
             time.sleep(UPDATE_EVERY)
 
-    def _fetch_release(self) -> None:
+    def _fetch_release(self) -> bool | None:
+        """Ask GitHub for the latest release: True when it's newer than this one (`self.update` says how to get
+        it), False when this is the latest, None when GitHub couldn't be reached."""
         import urllib.request
 
         try:
@@ -3087,18 +3121,38 @@ class Daemon:
             with urllib.request.urlopen(req, timeout=8) as resp:
                 latest = json.loads(resp.read().decode("utf-8"))
         except Exception:  # offline, rate-limited, private repo: no news is fine
-            return
+            return None
         tag = str(latest.get("tag_name") or "")
         if not updater.is_newer(tag, __version__):
-            return
+            return False
         if self.update and self.update.get("state"):  # already downloading or installing one
-            return
+            return True
         asset = updater.pick_asset(latest)
-        how = ("auto" if asset else "page") if updater.self_updatable() else ("page" if getattr(sys, "frozen", False) else "git")
+        how = (("auto" if asset else "page") if updater.self_updatable() else "page" if getattr(sys, "frozen", False)
+               else "git" if updater.checkout() else "page")
         self._release = {"asset": asset, "tag": tag}
         self.update = {"version": tag.lstrip("v"), "url": str(latest.get("html_url") or RELEASES_PAGE),
                        "how": how, "state": ""}
         log.info("update available: %s (%s)", tag, how)
+        return True
+
+    def check_updates(self, install: bool = True) -> None:
+        """The tray's "Check for updates": ask GitHub now; a newer version is installed right away (`install`),
+        and agent-voice restarts with it."""
+        self._show_banner("Checking for updates...", "", "", kind="note", tag="update")
+        found = self._fetch_release()
+        if found is None:
+            self._show_banner("Couldn't reach GitHub to check for updates: try again in a moment.", "", "",
+                              kind="note", tag="update")
+        elif not found:
+            self.update = None
+            self._show_banner(f"agent-voice is up to date (version {__version__}).", "", "", kind="note",
+                              tag="update")
+        elif install:
+            self.install_update()
+        else:
+            self._show_banner(f"Version {self.update['version']} is available: click Update in the notch.", "", "",
+                              kind="note", tag="update")
 
     def _update_result(self) -> None:
         """Right after an update: say how it went, and clear what it left behind."""
@@ -3122,9 +3176,7 @@ class Daemon:
             return
         version = up["version"]
         if up.get("how") == "git":
-            self._show_banner(f"Version {version} is out. In your agent-voice folder: git pull, then "
-                              "pip install -e . and agent-voice shutdown, then agent-voice start.",
-                              "", "", kind="note", tag="update")
+            self._git_update(up)
             return
         if up.get("how") != "auto":
             self._show_banner(f"Version {version} is out: download it from the release page.",
@@ -3158,6 +3210,30 @@ class Daemon:
             up["state"] = ""
             self._show_banner(f"Couldn't start the update ({e}). Nothing was changed.", "", "",
                               kind="note", tag="update")
+
+    def _git_update(self, up: dict) -> None:
+        """A source install: git pull (fast-forward only), reinstall if needed, restart. Never over local changes."""
+        import subprocess
+
+        from agent_voice.client import self_command
+
+        if up.get("state"):
+            return
+        version, repo = up["version"], updater.checkout()
+        up["state"] = "downloading"
+        self._show_banner(f"Updating to version {version}...", "", "", kind="note", tag="update")
+        why = updater.git_update(repo) if repo else "this isn't a git checkout"
+        if why:
+            up["state"] = ""
+            self._show_banner(f"Couldn't update to version {version}: {why}. Nothing was changed. By hand: git pull, "
+                              "pip install -e . then agent-voice restart.", "", "", kind="note", tag="update")
+            return
+        up["state"] = "installing"  # the widget quits when it sees this; the restart brings both back
+        self._show_banner(f"Updated to version {version}: agent-voice restarts.", "", "", kind="note", tag="update")
+        flags = ({"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                  | subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True})
+        subprocess.Popen(self_command("restart"), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, close_fds=True, **flags)
 
     @property
     def approvals(self) -> bool:
@@ -3355,6 +3431,7 @@ class Daemon:
             "hands_free": self.hands_free,
             "chime": self.chime,
             "summary": self.summary,
+            "language": self.language,
             "speed_x": self.speed_x,
             "speaking": self.speaker.busy,
             "listening": self._listening,
@@ -3727,6 +3804,12 @@ def _handler(daemon: Daemon):
                 daemon.limit_hit(str(data.get("session") or ""), str(data.get("source") or ""),
                                  str(data.get("text") or "")[:400])
                 return self._json(200, {"ok": True})
+            if self.path == "/language":  # your language: English or French
+                code = str(data.get("language") or "")
+                if code not in ("en", "fr"):
+                    return self._json(400, {"error": "language must be en or fr"})
+                daemon.set_language(code)
+                return self._json(200, {"language": daemon.language})
             if self.path == "/engine":  # the voice: light (Piper) or natural (Kokoro)
                 name = str(data.get("engine") or "")
                 if name not in ("piper", "kokoro"):
@@ -3820,6 +3903,10 @@ def _handler(daemon: Daemon):
                 return self._json(200, {"ok": True})
             if self.path == "/update":
                 threading.Thread(target=daemon.install_update, name="update-install", daemon=True).start()
+                return self._json(200, {"ok": True})
+            if self.path == "/update_check":  # "Check for updates": now, and install it if there's one
+                threading.Thread(target=daemon.check_updates, args=(bool(data.get("install", True)),),
+                                 name="update-check", daemon=True).start()
                 return self._json(200, {"ok": True})
             if self.path == "/shutdown":
                 self._json(200, {"ok": True})

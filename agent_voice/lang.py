@@ -61,7 +61,16 @@ def _heuristic(text: str) -> str | None:
     return "fr" if fr > en else "en"
 
 
-def detect(text: str, fallback: str = "en") -> str:
+_PREFERRED = "en"  # your language (Settings): what an unsure detection falls back to
+
+
+def prefer(code: str) -> None:
+    global _PREFERRED
+    _PREFERRED = code if code in ("fr", "en") else "en"
+
+
+def detect(text: str, fallback: str | None = None) -> str:
+    fallback = fallback or _PREFERRED
     words = len(text.split())
     short = words < 4
     if short and _heuristic(text):
@@ -70,14 +79,16 @@ def detect(text: str, fallback: str = "en") -> str:
     if det is None:
         return _heuristic(text) or fallback
     fr, en = det(text)
-    # Short phrases need a clearer margin before we trust the statistics.
-    if abs(fr - en) < (0.4 if short else 0.2):
+    winner = "fr" if fr > en else "en"
+    # Short phrases need a clearer margin before we trust the statistics, and more again to beat your language.
+    if abs(fr - en) < (0.4 if short else 0.2) + (0.2 if winner != _PREFERRED else 0.0):
         return _heuristic(text) or fallback
-    return "fr" if fr > en else "en"
+    return winner
 
 
-def segment(paragraphs: list[str], default: str = "en") -> list[tuple[str, str]]:
+def segment(paragraphs: list[str], default: str | None = None) -> list[tuple[str, str]]:
     """Return [(lang, unit)] for paragraphs or sentences; short ambiguous ones inherit the previous language."""
+    default = default or _PREFERRED
     # Detect the reply's dominant language first so it can be the fallback.
     dominant = detect(" ".join(paragraphs)[:2000], default) if paragraphs else default
     out: list[tuple[str, str]] = []

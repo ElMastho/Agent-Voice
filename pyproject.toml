@@ -27,6 +27,10 @@ dependencies = [
     "qrcode",
     "pywinpty; sys_platform == 'win32'",
     "pycaw; sys_platform == 'win32'",
+    "winrt-Windows.Media.Control; sys_platform == 'win32'",
+    "winrt-Windows.Foundation; sys_platform == 'win32'",
+    "winrt-Windows.Foundation.Collections; sys_platform == 'win32'",
+    "winrt-Windows.Storage.Streams; sys_platform == 'win32'",
     "kokoro-onnx",
     "pynput; sys_platform != 'win32'",
 ]

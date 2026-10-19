@@ -1,12 +1,14 @@
 """What's playing (Spotify, YouTube in a browser...) and its controls, for the companion.
 
-Windows: the players' window titles (Spotify's is "Artist - Song" while it plays; a browser's is its tab's,
-"Song - YouTube - Google Chrome"), whether the app is making sound (its audio session), and the keyboard's media
-keys to control it. Linux: playerctl. Nothing is downloaded, nothing leaves the machine.
+Windows: the media sessions apps report to Windows (the volume flyout's player: title, artist, playing or not),
+through winrt; without them, the players' window titles (Spotify's is "Artist - Song" while it plays; a browser's is
+its tab's, "Song - YouTube - Google Chrome") and whether the app is making sound (its audio session). The keyboard's
+media keys control it. Linux: playerctl. Nothing is downloaded, nothing leaves the machine.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import subprocess
@@ -17,8 +19,12 @@ log = logging.getLogger("agent_voice.media")
 BROWSERS = {"chrome.exe": "Chrome", "msedge.exe": "Edge", "brave.exe": "Brave", "firefox.exe": "Firefox",
             "opera.exe": "Opera", "vivaldi.exe": "Vivaldi", "arc.exe": "Arc"}
 # Sites whose tab title says what plays: (the title's suffix, the name shown).
-SITES = ((" - YouTube Music", "YouTube Music"), (" - YouTube", "YouTube"), (" | Deezer", "Deezer"),
+SITES = ((" | YouTube Music", "YouTube Music"), (" - YouTube Music", "YouTube Music"), (" - YouTube", "YouTube"), (" | Deezer", "Deezer"),
          (" | SoundCloud", "SoundCloud"), (" | Spotify", "Spotify"), (" - Twitch", "Twitch"))
+# A media session's app id -> its name (the YouTube Music web app's id is the same on every PC).
+SESSION_APPS = (("spotify", "Spotify"), ("cinhimbnkkghhklpknlkffjgod", "YouTube Music"), ("msedge", "Edge"),
+                ("chrome", "Chrome"), ("brave", "Brave"), ("308046b0af4a39cb", "Firefox"), ("firefox", "Firefox"),
+                ("opera", "Opera"), ("vivaldi", "Vivaldi"))
 KEYS = {"toggle": 0xB3, "next": 0xB0, "previous": 0xB1}  # VK_MEDIA_PLAY_PAUSE, _NEXT_TRACK, _PREV_TRACK
 _IDLE_SPOTIFY = re.compile(r"^Spotify(?: Free| Premium)?$")
 _NAMES: dict[int, str] = {}  # pid -> process name (polled every few seconds: not asked again each time)
@@ -40,8 +46,65 @@ def parse_title(process: str, title: str) -> dict | None:
         page = re.sub(r"\s+and \d+ more pages?$", "", page)  # Edge: "... and 4 more pages"
         for suffix, site in SITES:
             if page.endswith(suffix):
-                return {"app": site, "title": page[: -len(suffix)].strip(), "artist": ""}
+                # An installed web app's window says its name first ("YouTube Music - Home | YouTube Music"); the
+                # site's own name alone is a page, not a song.
+                song = page[: -len(suffix)].strip().removeprefix(f"{site} - ").strip()
+                return {"app": site, "title": "" if song in ("", site) else song, "artist": ""}
     return None
+
+
+def app_name(app_id: str) -> str:
+    """A media session's app (its AppUserModelID) -> the name shown: 'Spotify', 'YouTube Music', 'Chrome'..."""
+    low = app_id.lower()
+    for key, name in SESSION_APPS:
+        if key in low:
+            return name
+    return app_id.split("!")[0].rsplit("\\", 1)[-1].removesuffix(".exe")
+
+
+def _session_playing() -> dict | None:
+    """What Windows' media sessions say (the volume flyout's player): the song's real title and artist, from any
+    app that reports it (Spotify, browsers' tabs, installed web apps like YouTube Music, whose window never shows
+    the song). The one playing wins, then the current one. None without winrt or without a session."""
+    try:
+        from winrt.windows.media.control import (
+            GlobalSystemMediaTransportControlsSessionManager as Manager,
+            GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
+        )
+    except ImportError:
+        return None
+
+    async def read() -> dict | None:
+        manager = await Manager.request_async()
+        current = manager.get_current_session()
+        current_id = current.source_app_user_model_id if current else ""
+        best = None
+        for session in manager.get_sessions():
+            playing = session.get_playback_info().playback_status == Status.PLAYING
+            rank = (playing, session.source_app_user_model_id == current_id)
+            if best is None or rank > best[0]:
+                best = (rank, session, playing)
+        if best is None:
+            return None
+        _rank, session, playing = best
+        props = await session.try_get_media_properties_async()
+        return {"app": app_name(session.source_app_user_model_id), "title": props.title or "",
+                "artist": props.artist or "", "playing": playing}
+
+    return asyncio.run(read())
+
+
+def _windows_now() -> dict | None:
+    """The media session when it has a song (named after the site for a browser tab: "YouTube", not "Chrome"),
+    else the players' window titles."""
+    item = _session_playing()
+    if item and item["title"]:
+        if item["app"] in BROWSERS.values():
+            tab = _windows_playing()
+            if tab and tab["app"] not in BROWSERS.values() and tab["app"] != "Spotify":
+                item["app"] = tab["app"]
+        return item
+    return _windows_playing()
 
 
 def _windows_playing() -> dict | None:
@@ -136,7 +199,7 @@ def now_playing() -> dict | None:
     """{app, title, artist, playing}, or None when no player is open."""
     try:
         if sys.platform == "win32":
-            return _windows_playing()
+            return _windows_now()
         if sys.platform.startswith("linux"):
             return _linux_playing()
     except Exception:

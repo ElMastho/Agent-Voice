@@ -27,7 +27,7 @@ from agent_voice.config import HOME, LOG_DIR
 
 log = logging.getLogger("agent-voice.update")
 
-REPO = "ElMastho/agent-voice"
+REPO = "ElMastho/Agent-Voice"  # GitHub names are case-insensitive; its links use this spelling since the rename
 ASSET = "agent-voice-windows-x64.zip"
 DOWNLOAD_PREFIX = f"https://github.com/{REPO}/releases/download/"
 EXES = ("agent-voice.exe", "agent-voice-w.exe")
@@ -52,7 +52,8 @@ def pick_asset(release: dict) -> dict | None:
         url = str(a.get("browser_download_url") or "")
         size = a.get("size")
         if (a.get("name") == ASSET and a.get("state", "uploaded") == "uploaded"
-                and url == f"{DOWNLOAD_PREFIX}{tag}/{ASSET}" and isinstance(size, int) and 0 < size < MAX_SIZE):
+                and url.lower() == f"{DOWNLOAD_PREFIX}{tag}/{ASSET}".lower() and isinstance(size, int)
+                and 0 < size < MAX_SIZE):
             return a
     return None
 
@@ -60,6 +61,40 @@ def pick_asset(release: dict) -> dict | None:
 def self_updatable() -> bool:
     """Only the packaged Windows build replaces itself; a source checkout updates with git."""
     return sys.platform == "win32" and bool(getattr(sys, "frozen", False))
+
+
+def checkout() -> Path | None:
+    """The git checkout agent-voice runs from (a source install), or None."""
+    root = Path(__file__).resolve().parent.parent
+    return root if (root / ".git").exists() and (root / "pyproject.toml").exists() else None
+
+
+def _git(repo: Path, *args: str, timeout: float = 120) -> subprocess.CompletedProcess:
+    flags = {"creationflags": 0x08000000} if sys.platform == "win32" else {}  # CREATE_NO_WINDOW
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=timeout, **flags)
+
+
+def git_update(repo: Path) -> str:
+    """A source install: pull the new version (fast-forward only), reinstall if its dependencies changed.
+    Returns "" when done, else why not (nothing changed then: local changes are never touched)."""
+    try:
+        if _git(repo, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+            return "you have local changes in the agent-voice folder"
+        before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        pulled = _git(repo, "pull", "--ff-only")
+        if pulled.returncode != 0:
+            last = (pulled.stderr or pulled.stdout).strip().splitlines()
+            return f"git pull failed ({last[-1] if last else 'unknown error'})"
+        changed = _git(repo, "diff", "--name-only", before, "HEAD").stdout.split()
+        if "pyproject.toml" in changed:
+            flags = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
+            done = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-e", str(repo)], capture_output=True,
+                                  text=True, timeout=900, **flags)
+            if done.returncode != 0:
+                return "the new version's dependencies didn't install (pip install -e . by hand)"
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"git isn't available ({e})"
+    return ""
 
 
 def install_dir() -> Path:

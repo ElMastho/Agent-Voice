@@ -15,9 +15,10 @@ from typing import Callable
 from agent_voice import schedule
 
 MAX_TIMERS, MAX_TODOS, MAX_REMINDERS, MAX_NOTES = 5, 60, 30, 200
-# The two side panels' cards: Utils on the right (the tools), the Companion on the left (the friendly part).
-WIDGETS = ("pomodoro", "timer", "stopwatch", "todo", "reminders", "notes", "clipboard")
-COMPANION_WIDGETS = ("media", "calendar", "usage")
+# The two side panels' cards: Utils on the right (the tools you start), the Companion on the left (your day: the
+# agenda holds meetings, reminders and scheduled prompts in one list).
+WIDGETS = ("pomodoro", "timer", "stopwatch", "todo", "notes", "clipboard")
+COMPANION_WIDGETS = ("activity", "media", "agenda", "usage")
 # "To-do for you: run the migration on staging": a line an agent ends its reply with (Claude Code is asked to).
 TODO_LINE = re.compile(r"^[\s>*_`#-]*to-?do for you\s*:[\s*_`]*(.+?)[\s*_`]*$", re.I | re.M)
 # "call Paul #work": a hashtag files a to-do under a category ("#42" stays text: an issue number, not a category).

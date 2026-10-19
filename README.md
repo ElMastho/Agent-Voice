@@ -45,21 +45,21 @@ Everything runs **locally on the CPU**: no cloud, no API key, no audio leaving y
 | ⏳ **Resumes after a limit** | A thread runs out of quota while you're away: once the limit resets, the notch sends it *"Continue."* so it picks up where it stopped. On by default. |
 | 🎯 **Focus** | In a call, presenting, or with an app full screen, replies are held (approvals still come through) and a catch-up follows. |
 | 🌇 **Daily recap** | At 18:00 (or *"Hey Claude, daily recap"*): what each thread did today, what's still waiting, your limits and tokens. |
-| 🗣️ **A natural voice** (opt-in) | *Voice: Natural* in the panel switches to [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M): expressive, close to a cloud voice, still offline. *Light* (Piper) stays the default, easier on the battery. |
-| 🧰 **Utils** (right) | The arrow on the open panel's right edge: a **Pomodoro** that holds agents' replies while you focus, **timers**, a **stopwatch**, your **to-do list** (agents add what only you can do), **reminders**, **notes** and your **clipboard**. *"Hey Claude, start a pomodoro"*, *"timer 10 minutes"*, *"remind me at 4 pm to call Paul"*, *"note: ..."*. |
-| 🎵 **Companion** (left) | The arrow on its left edge: **what's playing** (Spotify, YouTube) with its controls, **today's meetings** (from your calendar's iCal link, or Outlook) and your agents' **usage**. A meeting about to start shows on the notch. |
+| 🗣️ **A natural voice** (opt-in) | *Voice: Natural* in Settings switches to [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M): expressive, close to a cloud voice, still offline. *Light* (Piper) stays the default, easier on the battery. |
+| 🧰 **Utils** (right) | The arrow on the open panel's right edge: a **Pomodoro** that holds agents' replies while you focus, **timers**, a **stopwatch**, your **to-do list** (agents add what only you can do), **notes** and your **clipboard**. *"Hey Claude, start a pomodoro"*, *"timer 10 minutes"*, *"remind me at 4 pm to call Paul"*, *"note: ..."*. |
+| 🎵 **Companion** (left) | The arrow on its left edge: today's **activity**, **what's playing** (Spotify, YouTube Music, YouTube) with its controls, your **agenda** (today's meetings from your calendar's iCal link or Outlook, your reminders and the prompts you scheduled, in one list) and your agents' **usage**. A meeting about to start shows on the notch. |
 | 🔎 **History** | Every prompt and every reply, from every agent, searchable in one box: "which one fixed the login bug last week?" Kept on this PC (90 days). |
 | ⏳ **Take it back** | What you dictate waits 5 seconds under the notch before it's sent: say *"wait"* to fix it, *"cancel that"* to drop it, or keep talking to add to it. |
 | 👀 **"Look at this"** | *"Hey Claude, look at this and tell me why it's red"*: a picture of the window you're looking at goes to your thread, with your question. |
 | 🎧 **Headphones only** (opt-in) | The voice in your headphones; through the laptop's speakers (an open office), chimes and the banner instead. It switches by itself as you plug them in. |
 | 📎 **Hand things over** | *"Hey Claude, send this to Codex and ask it to explain it"*: your selection, or the screenshot on the clipboard, goes to that thread. |
 | 🔉 **Your video turns down** | While the voice speaks, other apps (YouTube, Spotify...) fade to 30% and come back after; while you reply, they go silent and a playing video pauses, then plays on. |
-| 📱 **On your phone** (opt-in) | Turn on *Phone*, scan the QR code with the [ntfy](https://ntfy.sh) app: replies, approvals, limits and the recap reach your phone while you're away. |
+| 📱 **On your phone** (opt-in) | Turn on *Phone* in Settings, scan the QR code with the [ntfy](https://ntfy.sh) app: replies, approvals, limits and the recap reach your phone while you're away. |
 | ⏰ **Scheduled prompts** | *"Hey Claude, at 2 pm tell Codex to run the tests"*, a time in the reply box, or `agent-voice schedule`: sent to a thread, or as a new thread, at that time (daily or weekdays if you like). |
 | ⚡ **Saved prompts** | *"Hey Claude, run the tests"*, *"tell Codex to commit this"*: a name you say, a full prompt sent (`shortcuts`). |
 | ➕ **Start a new thread** | `Ctrl+Alt+N`, *+ New* in the panel, or *"Hey Claude, new thread: add a health check"*: a new Claude Code session in the desktop app, or Claude Code / Codex / Gemini CLI in a new terminal tab. |
 | 📣 **Talk to any thread by name** | *"Tell Codex to run the tests"* is typed into Codex's window and sent, wherever you are. |
-| 📊 **Today, at a glance** | Open, the notch takes a third of the screen: today's turns, threads and tokens, the turns by hour, Claude Code's and Codex's 5-hour and weekly **limits** (in the Companion; a heads-up at 90%), *Done · 3 files changed · tests passed*, each conversation's context. Rest on a thread to read its last reply in full. |
+| 📊 **Today, at a glance** | Open, the notch shows what needs you and your threads: *Done · 3 files changed · tests passed*, each conversation's context. Rest on a thread to read its last reply in full. In the Companion: today's turns, threads and tokens by hour, and Claude Code's and Codex's 5-hour and weekly **limits** (a heads-up at 90%). |
 | 📎 **Drop files on the notch** | Screenshots, logs, files: dropped on the notch, they land in the conversation's prompt. |
 | 🗣️ **Speaks every reply** | Final answers and the progress notes between tool calls, never twice. Markdown, code and paths are cleaned out so it sounds natural. |
 | 📖 **Read along** | The text being spoken hangs under the notch, from the sentence you're hearing, and leaves 5 seconds after the voice stops. |
@@ -155,13 +155,13 @@ The edge light only shows while the voice or the mic is live: it doubles as a "m
 - **What the turn changed**: when a conversation finishes, *Done · 3 files changed · tests passed* (from the files it edited and its last test run); click it to open the conversation.
 - **Context**: *Context 86%* when the conversation at work is running out of context; each thread shows its own.
 - **While you were away**: after 5 minutes without touching the keyboard or mouse, or at the end of a call, a violet banner (spoken in Voice mode) tells you what finished and who needs you.
-- **Focus**: in a call, while presenting, or with an app full screen (Windows' own "do not disturb" signals), replies are held: no voice, no banner, no chime. Approvals and questions still come through. When it ends, the catch-up tells you what finished. The notch shows *Focus* (or *In a call*); picking Voice in the panel overrides it until it ends. `focus.calls: "chimes"` keeps the old chimes during calls.
-- **The open notch** takes a third of the screen (480 px when closed). On the right: **Today** (turns, threads and tokens since midnight, and the turns by hour), **Limits**, what you said and your agents; on the left: what needs you, the controls and your threads.
+- **Focus**: in a call, while presenting, or with an app full screen (Windows' own "do not disturb" signals), replies are held: no voice, no banner, no chime. Approvals and questions still come through. When it ends, the catch-up tells you what finished. The notch shows *Focus* (or *In a call*); picking Voice in Settings overrides it until it ends. `focus.calls: "chimes"` keeps the old chimes during calls.
+- **The open notch** takes a third of the screen, up to 600 px (480 px when closed): what needs you, your threads, and a line for your agents. ⚙ turns it into **Settings**. Your day (agenda, usage, activity) is in the Companion on its left, your tools in Utils on its right.
 - **Reply previews**: rest the mouse on a thread for half a second and its last reply opens beside the panel, in full and formatted (code, lists, tables), with what it changed and its tokens today. It scrolls with the wheel and never takes the focus.
-- **Headphones only** (Windows, opt-in): turn on *Headphones only* in the panel (or the tray) and the voice plays only when the sound goes to headphones or a headset. Through speakers or a monitor, you get chimes and the reply as a banner, and the notch says *Speakers*; plug your headphones in and the voice is back. Picking *Voice* while on speakers keeps the voice until the device changes.
+- **Headphones only** (Windows, opt-in): choose *Headphones only* in Settings (or the tray) and the voice plays only when the sound goes to headphones or a headset. Through speakers or a monitor, you get chimes and the reply as a banner, and the notch says *Speakers*; plug your headphones in and the voice is back. Picking *Voice* while on speakers keeps the voice until the device changes.
 - **Other apps' sound** (Windows): while the voice speaks, every other app's volume fades to 30% of where it was (`ducking.voice`), and back once it's done; while you reply (the mic is open), they go silent (`ducking.listen`) and a video or song that's playing is paused with the media key, then played again, so you can answer without shouting over YouTube. Only what agent-voice paused is resumed, and a volume you change yourself meanwhile is left alone. `ducking.enabled: false` turns it off.
-- **Phone notifications** (off until you turn them on): the *Phone* tile turns them on and shows a QR code: in the [ntfy](https://ntfy.sh) app (iPhone, Android, or the web) tap **+** and scan it or paste the link (click it to copy). Fold the card to one line once you're set. You get what needs you, finished replies (their one-line summary), limits and resumes, scheduled prompts and the daily recap, by default only while you're away from the PC (2 minutes idle, in focus, or away). A burst of events comes as one notification. *Test* sends one; *New link* makes a new private channel (the old QR code stops getting anything). See [Privacy](#-privacy-security-battery) for what this sends and where.
-- **Scheduled prompts**: say *"Hey Claude, at 2 pm tell Codex to run the tests"*, *"in 20 minutes, new thread: add a health check"*, *"demain à 9h lance les tests"*; or type a time in the reply box's *When* field (*14:00*, *in 30 min*, *tomorrow 9am*); or `agent-voice schedule "prompt" --at 14:00 [--thread Codex | --new --agent codex] [--repeat daily|weekdays]`. They wait in the panel's **Upcoming** list (× cancels one), survive restarts, and are sent in the thread's own window at that time (saved prompts expand). Missed by more than 6 hours because the PC was off: you're told, nothing is sent late.
+- **Phone notifications** (off until you turn them on): *Phone* in Settings turns them on and shows a QR code: in the [ntfy](https://ntfy.sh) app (iPhone, Android, or the web) tap **+** and scan it or paste the link (click it to copy). Fold the card to one line once you're set. You get what needs you, finished replies (their one-line summary), limits and resumes, scheduled prompts and the daily recap, by default only while you're away from the PC (2 minutes idle, in focus, or away). A burst of events comes as one notification. *Test* sends one; *New link* makes a new private channel (the old QR code stops getting anything). See [Privacy](#-privacy-security-battery) for what this sends and where.
+- **Scheduled prompts**: say *"Hey Claude, at 2 pm tell Codex to run the tests"*, *"in 20 minutes, new thread: add a health check"*, *"demain à 9h lance les tests"*; or type a time in the reply box's *When* field (*14:00*, *in 30 min*, *tomorrow 9am*); or `agent-voice schedule "prompt" --at 14:00 [--thread Codex | --new --agent codex] [--repeat daily|weekdays]`. They wait in the Companion's **Agenda** (× cancels one), survive restarts, and are sent in the thread's own window at that time (saved prompts expand). Missed by more than 6 hours because the PC was off: you're told, nothing is sent late.
 - **Daily recap**: at 18:00 (`recap.at`), once, a violet *Today* banner: turns and tokens, what each thread did (from its last summary), what's still waiting on you, and your limits; spoken in Voice mode. Any time: *"Hey Claude, daily recap"*, *"what did I do today?"*, the tray's *Today's recap*, or `agent-voice recap`.
 - **Drop files**: drag screenshots, logs or files onto the notch (or onto a thread in the panel): their paths are typed into that conversation's prompt, not sent, so you can add your question.
 
@@ -190,16 +190,17 @@ Once your reply is transcribed, it drops down under the notch framed in green, t
 ### Utils and the Companion: either side of the panel
 
 <p align="center">
-  <img src="docs/images/widgets.jpg" alt="The Companion on the left of the open notch (what's playing, today's meetings, usage) and Utils on the right (Pomodoro, timer, to-do, notes, clipboard); the Pomodoro, a timer and a meeting on the notch's second line; a timer that ended" width="760">
+  <img src="docs/images/widgets.jpg" alt="The Companion on the left of the open notch (agenda, usage, activity, what's playing) and Utils on the right (Pomodoro, timer, to-do, notes, clipboard); the Pomodoro, a timer and a meeting on the notch's second line; a timer that ended" width="760">
 </p>
 
 Two small arrows on the open panel's edges open a panel on each side. **⋯** picks which cards each shows.
 
-**The Companion**, on the left, the friendly side:
+**The Companion**, on the left, your day:
 
-- **Now playing**: Spotify, or YouTube (and other sites) in a browser: the song, the artist, ⏮ ⏯ ⏭. Read from the players' window titles; the buttons are the keyboard's media keys. Or say *"pause the music"*, *"next song"*.
-- **Today**: your meetings, *now* highlighted. Paste your calendar's **iCal link** (Outlook: *Settings › Calendar › Shared calendars › Publish a calendar*, the ICS link; Google: *Settings › your calendar › Secret address in iCal format*), or a `.ics` file; Outlook (classic) is read while it's open. A meeting in the next 15 minutes shows on the notch (*Design review · in 10 min*). `calendar.quiet_in_meetings` holds replies during meetings, as in a call.
-- **Usage**: Claude Code's and Codex's 5-hour and weekly limits, and when they reset.
+- **Activity**: today's turns, threads and tokens, and the turns by hour.
+- **Now playing**: Spotify, YouTube Music, or YouTube (and other sites) in a browser: the song, the artist, ⏮ ⏯ ⏭. Read from what the players report to Windows (the volume flyout's player), else their window titles; the buttons are the keyboard's media keys. Or say *"pause the music"*, *"next song"*.
+- **Agenda**: what's coming, in time order: your meetings (*now* highlighted), your reminders (*+ Reminder*: *16:00 call Paul*, *in 20 minutes stretch*, *tomorrow at 9 send the invoice*) and the prompts scheduled for your threads; × takes a reminder or a prompt off. Paste your calendar's **iCal link** (Outlook: *Settings › Calendar › Shared calendars › Publish a calendar*, the ICS link; Google: *Settings › your calendar › Secret address in iCal format*), or a `.ics` file; Outlook (classic) is read while it's open. A meeting in the next 15 minutes shows on the notch (*Design review · in 10 min*). `calendar.quiet_in_meetings` holds replies during meetings, as in a call.
+- **Usage**: Claude Code's and Codex's 5-hour and weekly limits, and when they reset (more below).
 
 **Utils**, on the right, the tools:
 
@@ -207,7 +208,6 @@ Two small arrows on the open panel's edges open a panel on each side. **⋯** pi
 - **Timer**: one click on *1m*, *5m*, *10m*... (or **…** for *"12 min tea"*), several at once, paused and resumed.
 - **Stopwatch**: start, pause, reset.
 - **To-do**: tick, add, remove, *Clear done*; yours and your agents' apart, grouped by category (*call Paul #work*, or right-click an item). ⤢ on any Utils card opens it large, over the panel. *Clear* on *From your agents* empties their part. Your agents use it too: when a reply ends with *"To-do for you: run the migration on staging"* (Claude Code is asked to, rarely: only for a step the work is waiting on, two per thread and eight in all at most), it lands on your list, tagged with the agent; click it to open that conversation. Claude Code (through its own MCP server, added by `agent-voice install claude`) and every MCP app can also read the list, add to it and tick items off.
-- **Reminders**: *16:00 call Paul*, *in 20 minutes stretch*, *tomorrow at 9 send the invoice*.
 - **Notes**: one line, typed or said (*"note: the bug only happens with two monitors"*), kept and searchable in History.
 - **Clipboard**: the last things you copied (in memory only, never written; password managers' copies are left out): click one to copy it again, ➤ to put it in the current thread's message box.
 
@@ -227,22 +227,24 @@ In **Chimes** (a soft sound), nothing talks, not even a setting change. Each fin
 
 ### Every action, one click away
 
-<img align="right" src="docs/images/panel.jpg" alt="The expanded notch with all actions, threads, history and agents" width="340">
+<p align="center">
+  <img src="docs/images/panel.jpg" alt="The open notch: what needs you, the threads, three actions and the agents line; beside it, the Settings sheet" width="760">
+</p>
 
-Open the chevron for the full panel:
+Open the chevron. Each thing has one place: what needs you and your threads here, how it behaves in Settings, your day in the Companion, your tools in Utils.
 
-- **Actions** with their shortcuts: reply now, hold to talk, stop, auto-send, read selection, *Hey Claude*, approvals, summaries, phone, headphones, and the last reply's **Replay**, **Copy** and **Open chat**. Buttons that only matter for the voice hide themselves in Chimes and Do not disturb.
-- **Speed** (1× to 2×) and **Mode**: *Voice / Chimes / Do not disturb*.
-- **Threads**: your recent conversations, what each is doing (*working*, *speaking*, *asks you*, *needs approval*, *waiting for you*, *next up*), what its last turn changed, its context, and the start of its last reply. Its buttons: 🎙️ **talk to it** (what you say is sent to that conversation), ⌨️ **type to it**, replay and copy. Click the row to open it.
-- **Limits**: how much of each agent's **5-hour** and **weekly** limits is used, and when each resets, with a note once a window passes 90%.
+- **Needs you** (when something waits on you): approve, deny or open, for every agent.
+- **Threads**: your recent conversations, what each is doing (*working*, *speaking*, *asks you*, *needs approval*, *waiting for you*, *next up*), what its last turn changed, its context, and the start of its last reply. Its buttons: 🎙️ **talk to it** (what you say is sent to that conversation), ⌨️ **type to it**, replay and copy. Click the row to open it. *History* searches every conversation; *+ New* starts one.
+- **Hold to talk**, **Stop** and **Read selection** (the actions that aren't about one thread), with their shortcuts in their tooltips. *Read selection* hides itself in Chimes and Do not disturb.
+- **Agents**: how many are connected; click it for the list, in Settings.
+- **⚙ Settings** (in the notch's row): **Language** (English or Français: the one you speak and hear most; when detection is unsure, the voice reads in it and what you say is taken in it), **Speech** (*Voice*: Light or Natural, *Speed* 1× to 2×, *Replies*: a summary or in full), **When it speaks** (*Mode*: Voice / Chimes / Do not disturb, *Speakers*: too, or headphones only), **Listening** (*Hey Claude*, *Auto-send*, *Approvals*: click only, or by voice too), **Phone** (on, with its QR code), **Look** (dark or light) and **Agents**: which are connected (green dot): Claude Code, Codex, Gemini CLI, Cursor, Cline, Antigravity, the Claude desktop app, Windsurf, VS Code and the browser. Click one that isn't to connect it, or **?** for the setup guide. *Done* goes back to your threads.
+
+The Companion's **Usage** card shows how much of each agent's **5-hour** and **weekly** limits is used, and when each resets, with a note once a window passes 90%.
   - **Claude** (Claude Code in a terminal or in the desktop app): every 10 minutes while you use Claude, agent-voice runs Claude Code's own `claude -p /usage`. That's a local command (no model request, your credentials stay inside Claude Code) and gives the same numbers as Claude's Usage page. In between, the bars move with your requests, estimated from your local transcripts (marked *≈*). A terminal session's status line (`agent-voice usage on`) reports them too.
   - **Codex**: read from its own session logs, nothing to set up.
   - **Anything else**: any agent or script can drop its numbers in `~/.agent-voice/usage/<agent>.json` (`{"five_hour": {"pct": 42, "resets": <epoch>}, "seven_day": {...}}`); they show up within a minute.
   - Gemini CLI and Antigravity don't expose theirs, so they aren't shown.
-  - **↻** next to *Limits* refreshes them all now.
-- **You said**: the last 5 things it heard from you; click to copy.
-- **Needs you** (when something waits on you): approve, deny or open, for every agent.
-- **Agents**: which agents are connected (green dot): Claude Code, Codex, Gemini CLI, Cursor, Cline, Antigravity, the Claude desktop app, Windsurf, VS Code and the browser. Click one that isn't to connect it, or **?** for the setup guide.
+  - **↻** on the card refreshes them all now.
 
 The notch **never takes keyboard focus**, so your dictated reply still lands in the right window. It stays above your other windows.
 
@@ -272,7 +274,7 @@ Right-click the notch → *Float the widget again*: the same black island, round
 - **Saved prompts** (`shortcuts`): say a name and its full prompt is sent: *"Hey Claude, run the tests"* (the current thread), *"tell Codex to commit this"*, or just *"review this"* in the reply window, or typed in the reply box. Defaults: *run the tests*, *commit this*, *review this*, *explain that*, *lance les tests*, *fais un commit*; add your own in the config.
 - **Questions**: when the agent asks you to choose (Claude Code's questions, Cline's follow-ups), the options appear in the notch and are read out. Click one or say it: *"the second one"*, *"option 3"*, or its name; anything else is sent as your own answer.
 - **Several conversations**: when a second one finishes while another is talking (or waiting for you), it waits its turn and is announced by name. Each speaks a little lower or higher than the others (`thread_voices`), so you can tell them apart without looking.
-- **Hey Claude** (off by default, toggle in the panel): while idle, *"Hey Claude, run the tests"* is sent to your last conversation as a new prompt; *"Hey Claude"* alone opens the mic. A 3.3M-parameter keyword spotter ([sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)) listens only while someone speaks, so it costs next to nothing; short phrases it misses (an accent it doesn't know: "Klod") get a quick check by Whisper tiny, and Whisper confirms every phrase before anything is sent.
+- **Hey Claude** (off by default, switch it on in Settings): while idle, *"Hey Claude, run the tests"* is sent to your last conversation as a new prompt; *"Hey Claude"* alone opens the mic. A 3.3M-parameter keyword spotter ([sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)) listens only while someone speaks, so it costs next to nothing; short phrases it misses (an accent it doesn't know: "Klod") get a quick check by Whisper tiny, and Whisper confirms every phrase before anything is sent.
 - **Read anything aloud**: select text in any app and press `Ctrl+Alt+R`.
 - **Updates**: when a newer release is on GitHub, the notch shows an *Update* chip and the tray menu offers it; on the Windows download, one click installs it and restarts ([Updating](#updating)).
 
@@ -390,12 +392,12 @@ sequenceDiagram
 | Key | Default | Meaning |
 |---|---|---|
 | `voices.en` / `voices.fr` | `en_US-hfc_male-medium` / `fr_FR-siwis-medium` | Any [Piper voice](https://huggingface.co/rhasspy/piper-voices); `name:speaker` for multi-speaker models. Downloaded on first use |
-| `engine` | `"piper"` | The voice: `"piper"` (light) or `"kokoro"` (natural; the panel's *Voice* row overrides it) |
+| `engine` | `"piper"` | The voice: `"piper"` (light) or `"kokoro"` (natural; Settings' *Voice* row overrides it) |
 | `kokoro.voices` | `en: af_heart`, `fr: ff_siwis` | Kokoro's voices per language (`af_*`/`am_*` American, `bf_*`/`bm_*` British, `ff_siwis` French) |
-| `speed` | `0.67` | Piper length scale: `1.0` normal, lower is faster (the panel's speed overrides it) |
+| `speed` | `0.67` | Piper length scale: `1.0` normal, lower is faster (the speed in Settings overrides it) |
 | `max_chars` | `1500` | Long replies are cut at a sentence boundary |
 | `speak_progress` | `true` | Also speak Claude's messages between tool calls |
-| `summary` | `enabled: true`, `max_chars: 280` | One-sentence summaries of final answers (runtime toggle in the panel) |
+| `summary` | `enabled: true`, `max_chars: 280` | One-sentence summaries of final answers (runtime switch in Settings: *Replies*) |
 | `read_along` | `true` | Show the text being spoken under the notch |
 | `thread_voices` | `true` | Each conversation speaks slightly lower or higher than the others |
 | `auto_chime_in_calls` | `true` | Chimes instead of the voice while another app uses the microphone |
@@ -500,6 +502,7 @@ Architecture notes, invariants and gotchas for contributors (human or AI) are in
 | [qrcode](https://github.com/lincolnloop/python-qrcode) | The QR code to subscribe your phone | BSD-3-Clause |
 | [pycaw](https://github.com/AndreMiras/pycaw) | Other apps' volume while the voice speaks (Windows audio mixer) | MIT |
 | [psutil](https://github.com/giampaolo/psutil) | Which app an audio session belongs to (through pycaw) | BSD-3-Clause |
+| [pywinrt](https://github.com/pywinrt/pywinrt) | What's playing: the song, artist and state apps report to Windows' media sessions | MIT |
 | [ntfy](https://ntfy.sh) | Phone notifications (a service and app you choose to use; not bundled) | Apache-2.0 / GPL-2.0 |
 | [pywinpty](https://github.com/andfoy/pywinpty) | Pseudo-terminal on Windows (ConPTY) | MIT |
 | [pynput](https://github.com/moses-palmer/pynput) | Global hotkeys on macOS and Linux, keystrokes on Linux | LGPL-3.0 |

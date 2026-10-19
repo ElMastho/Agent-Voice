@@ -1867,6 +1867,29 @@ def test_now_playing_from_window_titles():
         "app": "YouTube", "title": "Lo-fi beats", "artist": ""}
     assert parse_title("msedge.exe", "Inbox - Outlook - Microsoft Edge") is None
     assert parse_title("notepad.exe", "a - YouTube") is None
+    # The YouTube Music web app: its name first, the page after (a no-break space in it); its name isn't a song.
+    assert parse_title("chrome.exe", "YouTube Music - YouTube\xa0Music")["title"] == ""
+    assert parse_title("chrome.exe", "YouTube Music - Home | YouTube\xa0Music") == {
+        "app": "YouTube Music", "title": "Home", "artist": ""}
+
+
+def test_now_playing_prefers_windows_media_sessions(monkeypatch):
+    from agent_voice import media
+
+    assert media.app_name("Chrome._crx_cinhimbnkkghhklpknlkffjgod") == "YouTube Music"
+    assert media.app_name("Spotify.exe") == "Spotify" and media.app_name("MSEdge") == "Edge"
+    assert media.app_name("308046B0AF4A39CB") == "Firefox" and media.app_name("C:\\Apps\\vlc.exe") == "vlc"
+    song = {"app": "YouTube Music", "title": "Midnight Light Flow", "artist": "NOYA", "playing": True}
+    monkeypatch.setattr(media, "_session_playing", lambda: dict(song))
+    monkeypatch.setattr(media, "_windows_playing", lambda: {"app": "YouTube Music", "title": "", "artist": "",
+                                                            "playing": False})
+    assert media._windows_now() == song  # the session knows the song; the window title doesn't
+    monkeypatch.setattr(media, "_session_playing", lambda: {**song, "app": "Chrome"})
+    monkeypatch.setattr(media, "_windows_playing", lambda: {"app": "YouTube", "title": "x", "artist": "",
+                                                            "playing": True})
+    assert media._windows_now()["app"] == "YouTube"  # a browser tab: named after its site
+    monkeypatch.setattr(media, "_session_playing", lambda: None)  # no winrt, or nothing reports
+    assert media._windows_now()["app"] == "YouTube"  # the window titles, as before
 
 
 def test_agenda_reads_ical_repeats_and_exceptions():
@@ -2004,9 +2027,22 @@ def test_agents_add_few_todos_and_the_music_stays_down_while_they_work(daemon):
     daemon._duck_tick(100.0)
     daemon._duck_tick(105.0)
     assert daemon._duck_state == "voice" and daemon._duck_jobs.empty()
-    daemon.activity.clear()  # the turn is over: back up after a moment
-    daemon._duck_tick(106.5)
+    daemon.activity.clear()  # the turn is over: back up almost at once
+    daemon._duck_tick(105.5)
     assert daemon._duck_state == "" and daemon._duck_jobs.get() == ("restore",)
+    # The mic open for your reply: in headphones the video is back at once; through speakers it stays at the
+    # voice's level (the mic would take it for you); only once you speak is it silenced (and paused).
+    daemon._duck_state, daemon._mic_phase, daemon._output.kind = "voice", "waiting", "headphones"
+    daemon._duck_tick(200.0)
+    daemon._duck_tick(200.5)
+    assert daemon._duck_state == "" and daemon._duck_jobs.get() == ("restore",)
+    daemon._output.kind = "speakers"
+    daemon._duck_tick(201.0)
+    assert daemon._duck_state == "voice" and daemon._duck_jobs.get() == ("duck", 0.3, False)
+    daemon._mic_phase = "recording"
+    daemon._duck_tick(202.0)
+    assert daemon._duck_state == "listen" and daemon._duck_jobs.get() == ("duck", 0.0, True)
+    daemon._mic_phase = ""
 
 
 def server_time():
@@ -2052,3 +2088,35 @@ def test_music_is_found_playing_through_a_quiet_moment(monkeypatch):
     quiet_then_loud = [("spotify:1", "Spotify.exe", None, Meter([0.0, 0.0, 0.3])), ("x:2", "x.exe", None, Meter([]))]
     assert ducking._sounding(quiet_then_loud) == ["Spotify.exe"]
     assert ducking._sounding([("x:2", "x.exe", None, Meter([]))]) == []
+
+
+def test_your_language_wins_when_detection_is_unsure(daemon, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_voice import lang, stt
+
+    daemon.set_language("fr")
+    assert daemon.status()["language"] == "fr" and daemon.state["language"] == "fr"
+    assert daemon.config["default_lang"] == "fr" and daemon.config["stt"]["prefer"] == "fr"
+    assert lang.detect("Docker") == "fr"  # nothing to tell it by: yours
+    assert lang.detect("Could you restart the server please?", "fr") == "en"  # clear: as it is
+
+    calls = []
+
+    class Model:
+        def transcribe(self, audio, beam_size=1, vad_filter=True, language=None):
+            calls.append(language)
+            probs = [("en", self.en), ("fr", 1 - self.en)]
+            return iter([SimpleNamespace(text=" Oui.")]), SimpleNamespace(
+                language=language or "en", language_probability=self.en, all_language_probs=probs)
+
+    t = stt.Transcriber({"stt": {"languages": ["fr", "en"], "prefer": "fr"}})
+    t._model = Model()
+    audio = stt.np.zeros(stt.RATE, dtype="float32")
+    t._model.en = 0.6  # unsure: French
+    assert t.transcribe(audio) == ("Oui.", "fr") and calls == [None, "fr"]
+    calls.clear()
+    t._model.en = 0.95  # clearly English: English
+    assert t.transcribe(audio)[1] == "en" and calls == [None]
+    daemon.set_language("en")
+    assert lang.detect("Docker") == "en"

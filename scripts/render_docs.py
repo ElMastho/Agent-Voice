@@ -224,17 +224,24 @@ def render_states() -> None:
 
 
 def render_panel() -> None:
-    st = status("idle", last_heard=HISTORY[0]["text"], last_heard_lang="en", history=HISTORY, agents=AGENTS,
+    """The open panel (what needs you, your threads, the actions) and, beside it, its Settings sheet."""
+    st = status("idle", last_heard=HISTORY[0]["text"], last_heard_lang="en", agents=AGENTS,
                 threads=THREADS, needs=NEEDS + [LIMIT_NEED], limits=LIMITS, wake=True, approvals=True,
-                summary=True, last_reply={"session": "a"}, day=DAY, phone=PHONE, schedules=SCHEDULES,
+                summary=True, last_reply={"session": "a"}, day=DAY, phone=PHONE,
                 activity={"session": "a", "title": "Notch redesign", "color": "#F59E0B", "label": "Run pytest",
                           "steps": 9, "elapsed": 74, "others": 1})
     w, shot, k = notch_shot(st, expanded=True, hover=True)
-    w.hover, w.hover_t["replay"] = "replay", 1.0
+    w.hover, w.hover_t["thrtalk:0"] = "thrtalk:0", 1.0
     w.update()
     shot = frame(w)
-    pad = int(50 * k)
-    img = drop(backdrop(shot.width + 2 * pad, shot.height + pad, seed=3), shot, pad, 0)
+    w.hover, w.hover_t = None, {}
+    w.toggle_settings(True)
+    settle(w, 1.6)
+    sheet = frame(w)
+    pad, gap = int(50 * k), int(30 * k)
+    h_ = max(shot.height, sheet.height) + pad
+    img = drop(backdrop(shot.width + sheet.width + gap + 2 * pad, h_, seed=3), shot, pad, 0)
+    img = drop(img, sheet, pad + shot.width + gap, 0)
     img.convert("RGB").save(OUT / "panel.jpg", quality=92, optimize=True)
 
 
@@ -455,8 +462,8 @@ def render_history() -> None:
 
 
 def render_widgets() -> None:
-    """Utils on the right (Pomodoro, timers, to-do, notes...) and the Companion on the left (what's playing, today's
-    meetings) beside the open panel; a Pomodoro, a timer and a meeting on the notch's second line."""
+    """Utils on the right (Pomodoro, timers, to-do, notes...) and the Companion on the left (the agenda, usage,
+    activity, what's playing) beside the open panel; a Pomodoro, a timer and a meeting on the notch's second line."""
     CLOCK.now, before = 1_792_000_000.0, CLOCK.now  # a real date: reminders today and on Monday
     now = W.time.time()
     box = {"timers": [{"id": 1, "label": "Tea", "total": 300, "end": now + 134, "left": 0.0}],
@@ -466,7 +473,7 @@ def render_widgets() -> None:
                       "session": "c"},
                      {"id": 5, "text": "Call the bank", "done": False, "source": "you", "at": 0},
                      {"id": 6, "text": "Release 0.6.0", "done": True, "source": "you", "at": 0}],
-           "reminders": [{"id": 7, "text": "Send the invoice", "at": now + 3 * 86400}],
+           "reminders": [{"id": 7, "text": "Send the invoice", "at": now - now % 300 + 3 * 86400}],
            "notes": [{"id": 9, "text": "The flicker only happens with two monitors", "at": 0},
                      {"id": 10, "text": "Paul prefers Tuesdays for the review", "at": 0}],
            "pomodoro": {"phase": "focus", "end": now + 892, "left": 0.0, "length": 1500, "round": 1, "today": 3,
@@ -480,11 +487,13 @@ def render_widgets() -> None:
                          {"title": "Release call", "location": "Teams", "start": at(150), "end": at(180),
                           "all_day": False}], "sources": 1, "error": ""}
     media = {"app": "Spotify", "title": "Get Lucky", "artist": "Daft Punk", "playing": True}
-    st = status("idle", last_heard=HISTORY[0]["text"], last_heard_lang="en", history=HISTORY, agents=AGENTS,
-                threads=THREADS, needs=NEEDS, limits=LIMITS, summary=True, day=DAY, schedules=SCHEDULES,
+    schedules = [{**SCHEDULES[0], "at": at(90)}, {**SCHEDULES[1], "at": at(60 * 20)}]
+    st = status("idle", last_heard=HISTORY[0]["text"], last_heard_lang="en", agents=AGENTS,
+                threads=THREADS, needs=NEEDS, limits=LIMITS, summary=True, day=DAY, schedules=schedules,
                 companion=box, media=media, agenda=agenda)
     w, shot, k = notch_shot(st, expanded=True)
     w.side_open.update(utils=True, companion=True)
+    w._side_max_h = lambda: 2000  # the whole cards, whatever this screen's height (they scroll on a short one)
     w.side_widgets["utils"] = ["pomodoro", "timer", "todo", "notes", "clipboard"]
     w.clips = ["git push origin main", "https://github.com/ElMastho/Agent-Voice/pull/42"]
     w.hover, w.hover_t["tab:utils"] = "tab:utils", 1.0

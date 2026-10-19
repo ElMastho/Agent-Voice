@@ -121,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--cancel", type=int, default=0, metavar="ID")
 
     sub.add_parser("restart", help="stop and start agent-voice again (the notch too)")
+    sub.add_parser("update", help="check for a new version now, install it and restart (the notch shows how it goes)")
     sub.add_parser("open", help="show the notch's panel, starting agent-voice if it isn't running (the Start menu)")
     p = sub.add_parser("shortcut", help="agent-voice in the Windows Start menu")
     p.add_argument("mode", nargs="?", default="on", choices=["on", "off"])
@@ -228,6 +229,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if result else 1
     if args.cmd == "schedule":
         return _schedule(args, client)
+    if args.cmd == "update":
+        if client.request("/update_check", {"install": True}) is None:
+            print("agent-voice isn't running: agent-voice start, then agent-voice update")
+            return 1
+        print("Checking for updates: the notch says what it found, and agent-voice restarts if it installs one.")
+        return 0
     if args.cmd == "restart":
         ok = client.restart()
         print("agent-voice restarted" if ok else "agent-voice did not start; see ~/.agent-voice/logs/server.log")

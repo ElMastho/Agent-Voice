@@ -44,6 +44,10 @@ class Recorder:
         return np.concatenate(self._frames)[:, 0]
 
 
+# Whisper's confidence in another language below this: what you said is taken in your language (Settings).
+PREFER_BELOW = 0.75
+
+
 class Transcriber:
     def __init__(self, config: dict):
         self.cfg = config["stt"]
@@ -71,12 +75,19 @@ class Transcriber:
             segments, _ = model.transcribe(audio, beam_size=1, vad_filter=True, language=language)
             return " ".join(s.text.strip() for s in segments).strip(), language
         allowed = self.cfg.get("languages") or None
+        # Detection happens here; the transcription itself only when the segments are read (so changing our mind
+        # about the language costs nothing).
         segments, info = model.transcribe(audio, beam_size=1, vad_filter=True)
         lang = info.language
+        probs = dict(info.all_language_probs or [])
         if allowed and lang not in allowed:
             # Whisper sometimes guesses a neighbouring language; force the likeliest allowed one.
-            probs = dict(info.all_language_probs or [])
             lang = max(allowed, key=lambda code: probs.get(code, 0.0))
+        prefer = self.cfg.get("prefer")
+        if (prefer and lang != prefer and (not allowed or prefer in allowed)
+                and probs.get(lang, info.language_probability) < PREFER_BELOW):
+            lang = prefer  # unsure (a short reply, an accent): your language
+        if lang != info.language:
             segments, info = model.transcribe(audio, beam_size=1, vad_filter=True, language=lang)
         text = " ".join(s.text.strip() for s in segments).strip()
         return text, lang

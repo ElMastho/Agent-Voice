@@ -85,12 +85,12 @@ Click **History** in the panel's Threads header (or the tray's *Search history�
 In headphones, the mic listens while the voice speaks: start talking and it stops at once, with whatever was queued after it. Say *"stop"* or *"no, wait"* (*"attends"*, *"arrête"*, *"tais-toi"*) and the mic opens for what you want to say instead; say a whole sentence (*"use the staging database instead"*) and it's your reply, as if you had waited. It takes about a third of a second of speech to cut in, so a cough or a click doesn't. Through the laptop's speakers it's off, since the mic would hear the voice itself; `barge_in.speakers: true` turns it on anyway (with a headset, or a quiet voice), `barge_in.enabled: false` turns it off.
 
 ### Hands-free: *auto-send*
-**`Ctrl+Alt+H`** toggles it; the voice confirms "Auto-send on/off". When on, everything you dictate (auto-listen *and* push-to-talk) is followed by **Enter**. The notch shows an *Auto* chip, and the *Auto-send* tile is green.
+**`Ctrl+Alt+H`** toggles it; the voice confirms "Auto-send on/off". When on, everything you dictate (auto-listen *and* push-to-talk) is followed by **Enter**. The notch shows an *Auto* chip, and Settings' *Auto-send* switch is on.
 
 > Leave it off when you want to proofread before sending.
 
 ### Push-to-talk in any app
-Hold **`Ctrl+Alt+Space`**, talk, release. The text is pasted into whatever window has focus (an editor, a chat, a terminal…). You can also press and hold the **Hold to talk** tile in the notch's panel.
+Hold **`Ctrl+Alt+Space`**, talk, release. The text is pasted into whatever window has focus (an editor, a chat, a terminal…). You can also press and hold **Hold to talk** in the notch's panel.
 
 ### Voice commands
 In the reply window, say on its own *"repeat that"*, *"slower"*, *"faster"* or *"never mind"* (*"répète"*, *"plus lentement"*, *"plus vite"*, *"annule"*): agent-voice acts on it and nothing is sent to the agent.
@@ -98,12 +98,12 @@ In the reply window, say on its own *"repeat that"*, *"slower"*, *"faster"* or *
 ### Stop, and the three modes
 - **`Ctrl+Alt+S`**: stop the current speech (and cancel listening).
 - In Claude Code, sending a new prompt yourself also stops the voice instantly.
-- **Mode** (in the panel): **Voice**, **Chimes** (`Ctrl+Alt+C`: a soft sound when the agent is done or needs you) or **Do not disturb** (`Ctrl+Alt+M`). In Chimes nothing talks, the mic doesn't open after answers, and each finished reply drops down under the notch as a **banner** for about 10 seconds, longer for long replies (hover to keep it, swipe it up to dismiss it, click it to open the conversation).
+- **Mode** (in Settings): **Voice**, **Chimes** (`Ctrl+Alt+C`: a soft sound when the agent is done or needs you) or **Do not disturb** (`Ctrl+Alt+M`). In Chimes nothing talks, the mic doesn't open after answers, and each finished reply drops down under the notch as a **banner** for about 10 seconds, longer for long replies (hover to keep it, swipe it up to dismiss it, click it to open the conversation).
 - **Do not disturb** (`Ctrl+Alt+M`) is for a meeting: no voice, no sound, no banner, and the notch stays tucked at the top even while agents work; hover it to look. What happens meanwhile is kept (approvals and questions wait in *Needs you*; phone notifications, if on, still reach you). One button on the notch, where the mic usually is, turns it off and puts you back in Voice or Chimes, as you were, with a *While you were away* catch-up.
 - **Calls**: while another app holds the microphone (Teams, Zoom, Meet in a browser...), agent-voice switches to chimes on its own and the notch says *In a call*; it goes back to the voice when the call ends. Pick *Voice* during the call to keep the voice.
 
 ### Approvals and questions
-- When Claude Code asks permission to run a command or edit a file, it's read out and shown in the notch with *Allow once* / *Deny*. Say *"yes"* / *"no"* (*"oui"* / *"non"*) or click. No answer within a minute: Claude shows its own dialog as usual. Turn it off with the *Approvals* tile.
+- When Claude Code asks permission to run a command or edit a file, it's read out and shown in the notch with *Allow once* / *Deny*. Say *"yes"* / *"no"* (*"oui"* / *"non"*) or click. No answer within a minute: Claude shows its own dialog as usual. Turn it off with *Approvals: Click only* in Settings.
 - When an agent asks you to choose (Claude Code's questions, Cline's follow-ups), the options are read out and listed: click one or say *"the second one"*, *"option 3"* or the option's name.
 
 ### Everything that needs you, in one place
@@ -119,10 +119,10 @@ When a thread hits its 5-hour or weekly limit, it joins *Needs you* with the tim
 How it knows: Claude Code's `StopFailure` hook (a turn that ends on `rate_limit`; added by `agent-voice install claude`), the limit message itself in any agent's reply (*"5-hour limit reached ∙ resets 3pm"*, *"Try again at 3:45 PM"*), or a window at 100% in **Limits** (Codex). When nothing says when it resets, it tries every 30 minutes until the thread answers. The schedule survives a restart.
 
 ### Focus: calls, presentations, full screen
-In a call (another app on the mic), while presenting, or with an app full screen (a video, a game, a slideshow: the same signals Windows uses for its own notifications), agent-voice **holds replies**: no voice, no banner, no chime. Approvals, questions and agents waiting for input still come through. When it ends, the *While you were away* banner tells you what finished. The notch shows *Focus* (or *In a call*), and the panel's **Today** header says why. Choose Voice in the panel to hear replies anyway until it ends. `focus.full_screen: false` ignores full screen; `focus.calls: "chimes"` keeps chimes during calls instead of holding.
+In a call (another app on the mic), while presenting, or with an app full screen (a video, a game, a slideshow: the same signals Windows uses for its own notifications), agent-voice **holds replies**: no voice, no banner, no chime. Approvals, questions and agents waiting for input still come through. When it ends, the *While you were away* banner tells you what finished. The notch shows *Focus* (or *In a call*), and the Companion's **Activity** card says why. Choose Voice in Settings to hear replies anyway until it ends. `focus.full_screen: false` ignores full screen; `focus.calls: "chimes"` keeps chimes during calls instead of holding.
 
 ### Today, at a glance
-Open the panel: on a wide enough screen the notch takes a third of it, with a second column. **Today** counts the turns, the threads and the tokens since midnight (Claude Code's, from its transcripts: input, output and newly cached; not the context it re-reads each turn), with the turns by hour. Below: **Limits**, what you said, and your agents.
+Open the panel: the notch takes a third of the screen (up to 600 px) and shows what needs you, your threads, three actions and how many agents are connected. Everything about your day is in the **Companion**, on its left: the **Activity** card counts the turns, the threads and the tokens since midnight (Claude Code's, from its transcripts: input, output and newly cached; not the context it re-reads each turn), with the turns by hour; **Usage** has the limits; the **Agenda** what's coming. How it behaves is in **⚙ Settings**.
 
 **Rest the mouse on a thread** for half a second: its last reply opens beside the panel in full, formatted (code blocks, lists, tables), with what the turn changed, its tokens today and its context. Scroll it with the wheel; it goes when the mouse leaves.
 
@@ -133,7 +133,7 @@ At 18:00 (`recap.at`), once a day and only if something happened, a violet *Toda
 On Windows, while the voice speaks, every other app (a YouTube video, Spotify, a game) fades to 30% of its own volume and comes back when the voice is done. While you reply, they go quiet entirely and a video or song that's playing is **paused** (the media key, which browsers and players obey), then played again when you're done. Only what agent-voice paused is resumed; if you change an app's volume in the meantime, it's yours and stays as you set it. If agent-voice ever stops mid-way, the next start puts the volumes back. Settings: `ducking.voice` (0 to 1), `ducking.listen`, `ducking.pause_media`, or `ducking.enabled: false`.
 
 ### Your phone (ntfy)
-Off until you turn it on. Click the **Phone** tile (or `agent-voice phone on`): a card with a QR code appears in the panel. Install the free [ntfy](https://ntfy.sh) app (iPhone or Android; the web works too), then in the app tap **+** (*Subscribe to topic*) and scan the QR code or paste the link (click the link under it in the card to copy it). Scanning with the phone's camera instead opens the channel in the browser, which doesn't subscribe the app. Press **Test** to check. **⌃** folds the card to one line once you're set (**⌄** shows the QR code again); the *Phone* button turns notifications off.
+Off until you turn it on. In **⚙ Settings**, turn **Phone** on (or `agent-voice phone on`): a card with a QR code appears under it. Install the free [ntfy](https://ntfy.sh) app (iPhone or Android; the web works too), then in the app tap **+** (*Subscribe to topic*) and scan the QR code or paste the link (click the link under it in the card to copy it). Scanning with the phone's camera instead opens the channel in the browser, which doesn't subscribe the app. Press **Test** to check. **⌃** folds the card to one line once you're set (**⌄** shows the QR code again); *Phone: Off* turns notifications off.
 
 What reaches your phone, by default only while you're away from the PC (2 minutes without input, in focus, or away; `ntfy.when: "always"` for always): what needs you (approvals at high priority, questions, agents waiting), finished replies with their one-line summary, limits hit and resumed, scheduled prompts sent, and the daily recap. Events close together come as one notification. Choose with `ntfy.events`, and how much text with `ntfy.content`: `"titles"` (just *"Codex finished."*), `"summary"` (default), or `"full"`.
 
@@ -146,20 +146,22 @@ Send a prompt later, to a thread or as a new thread:
 - **From the reply box**: type the prompt, put a time in **When** (*14:00*, *2pm*, *in 30 min*, *tomorrow 9am*, *demain 9h*), press Enter. In the new-thread box, the new thread starts then.
 - **From a terminal**: `agent-voice schedule "Run the tests" --at 14:00 --thread Codex`, `--new --agent claude-app --cwd C:\work`, `--repeat daily` or `weekdays`; `--list`, `--cancel ID`.
 
-They wait in the panel's **Upcoming** list (× cancels one) and survive restarts. At that time the prompt is typed into the thread's own window and sent (saved prompts expand), and your phone hears about it if that's on. If the PC was off and it's more than 6 hours late, you're told and nothing is sent.
+They wait in the Companion's **Agenda** (× cancels one) and survive restarts. At that time the prompt is typed into the thread's own window and sent (saved prompts expand), and your phone hears about it if that's on. If the PC was off and it's more than 6 hours late, you're told and nothing is sent.
 
 ### Tucked away, still in sight
 When the notch is tucked up to its last few pixels, that line glows while something runs: an agent at work (in its conversation's colour), the voice or the mic, a song, the Pomodoro or a timer. A brighter stretch glides along it, calmly; with nothing running it's dark, and in Do not disturb it stays quiet.
 
-### The Companion (left): music, today's meetings, usage
+### The Companion (left): your day
 Open the panel: the small arrow on its **left** edge opens the Companion (the tray's *Companion* too).
 
-- **Now playing**: what Spotify plays, or YouTube (YouTube Music, Deezer, SoundCloud, Twitch) in Chrome, Edge, Brave, Firefox...: the title and artist, ⏮ ⏯ ⏭ (the keyboard's media keys). By voice: *"pause the music"*, *"play the music"*, *"next song"*, *"previous song"*, *"chanson suivante"*. Linux: through `playerctl`.
-- **Today**: today's meetings, the one on *now* highlighted, and on the notch's second line from 15 minutes before (*Design review · in 10 min*). Where they come from: *Add a calendar link* and paste your calendar's iCal address (Outlook on the web: *Settings › Calendar › Shared calendars › Publish a calendar*, copy the ICS link; Google Calendar: *Settings › your calendar › Integrate calendar › Secret address in iCal format*), or the path of a `.ics` file. It's fetched then, and every 15 minutes; *Unlink* forgets them. Outlook (classic) is read directly while it's open (never started for this). With `"calendar": {"quiet_in_meetings": true}`, replies wait during a meeting, as in a call, and you're told after.
+- **Activity**: today's turns, threads and tokens, and the turns by hour (this hour lit).
+- **Now playing**: what Spotify, the YouTube Music app, or YouTube (YouTube Music, Deezer, SoundCloud, Twitch) in Chrome, Edge, Brave, Firefox... plays, as they report it to Windows (the player in the volume flyout): the title and artist, ⏮ ⏯ ⏭ (the keyboard's media keys). By voice: *"pause the music"*, *"play the music"*, *"next song"*, *"previous song"*, *"chanson suivante"*. Linux: through `playerctl`.
+- **Agenda**: what's coming, in time order, in one list: your meetings, your reminders and the prompts scheduled for your threads (each with its icon; ↻ marks a repeating one). × takes a reminder or a scheduled prompt off. *+ Reminder* takes a time and what: *16:00 call Paul*, *in 20 minutes stretch*, *tomorrow at 9 send the invoice*, *demain à 9h ...*.
+- **Meetings**: the one on *now* highlighted, and on the notch's second line from 15 minutes before (*Design review · in 10 min*). Where they come from: *+ Calendar link* and paste your calendar's iCal address (Outlook on the web: *Settings › Calendar › Shared calendars › Publish a calendar*, copy the ICS link; Google Calendar: *Settings › your calendar › Integrate calendar › Secret address in iCal format*), or the path of a `.ics` file. It's fetched then, and every 15 minutes; *Unlink* forgets them. Outlook (classic) is read directly while it's open (never started for this). With `"calendar": {"quiet_in_meetings": true}`, replies wait during a meeting, as in a call, and you're told after.
 - **Usage**: Claude Code's and Codex's 5-hour and weekly limits, with when they reset.
 
-### Utils (right): Pomodoro, timers, to-do, reminders, notes, clipboard
-The small arrow on the open panel's **right** edge opens Utils (the tray's *Utils* too). In both, **⋯** chooses the cards; a panel comes back open next time if you leave it open, is never taller than the panel beside it (the wheel scrolls), folds away before the panel closes and slides out once it has opened.
+### Utils (right): Pomodoro, timers, to-do, notes, clipboard
+The small arrow on the open panel's **right** edge opens Utils (the tray's *Utils* too). In both, **⋯** chooses the cards; a panel comes back open next time if you leave it open, is as tall as the panel beside it or a little more (the wheel scrolls), folds away before the panel closes and slides out once it has opened.
 
 - **Pomodoro**: ▶ starts 25 minutes of focus (and **while you focus, agents' replies wait**: approvals and questions still come through, and the break starts with a catch-up; `pomodoro.hold: false` turns that off); then a 5-minute break starts by itself, then focus again, and a 15-minute break after every 4th focus. Pause, skip (a skipped focus isn't counted) and stop; the card shows which focus of the cycle it is and how many you did today. A chime and a word mark each change (*"Time for a break: 5 min."*, *"Back to focus."*); in Do not disturb only the banner. Lengths: `"pomodoro": {"focus": 25, "short": 5, "long": 15, "every": 4}` in the config.
 - **Timer**: *1m* to *1 h* in one click, **…** for your own (*"12 min tea"*, *1h30*, *90 s*); pause, resume, cancel; several at once.
@@ -169,7 +171,6 @@ The small arrow on the open panel's **right** edge opens Utils (the tray's *Util
 - **Adding to-dos**: *Add* opens a line under the panel that stays open: type, Enter, the next one, Esc when you're done. *Clear* on *From your agents* removes all of theirs (yours stay).
 - **Notes**: *Add a note*, or say *"note: ..."* / *"prends note : ..."*: one line, kept (the latest 200), searchable in History; × removes one.
 - **Clipboard**: the last 10 things you copied, kept in memory only (never written to disk; what password managers copy is marked private and left out). Click one to copy it again; ➤ puts it in the current conversation's message box, for you to finish and send.
-- **Reminders**: *Add a reminder* takes a time and what: *16:00 call Paul*, *in 20 minutes stretch*, *tomorrow at 9 send the invoice*, *demain à 9h ...*.
 
 **By voice**, with the companion's 🎤 or after *"Hey Claude"*: *"start a pomodoro"*, *"pause the pomodoro"*, *"skip the break"*, *"stop the pomodoro"*, *"timer 10 minutes for the tea"*, *"a 5 minute timer"*, *"cancel the timer"*, *"start / stop the stopwatch"*, *"add call the bank to my list"*, *"remind me at 4 pm to call Paul"*, *"in 20 minutes remind me to stretch"*; in French *"lance un pomodoro"*, *"minuteur de 3 minutes"*, *"lance le chrono"*, *"ajoute appeler Paul à ma liste"*, *"rappelle-moi dans 10 minutes de sortir le linge"*. Into the companion's 🎤, anything that isn't one of these is added to the to-do list.
 
@@ -210,7 +211,7 @@ After 5 minutes without touching the keyboard or mouse (`catch_up.away_minutes`)
 ### What a turn changed, and how much context is left
 When a Claude Code conversation finishes, the notch says *Done · 3 files changed · tests passed* (the files it edited, and its last test run: pytest, npm test, cargo test, go test...). Click it to open the conversation. Each thread in the panel shows its last result and how much of its context is used; the notch warns with *Context 86%* past 80%.
 
-The panel's **Limits** section shows each agent's **5-hour** and **weekly** limits (Pro, Max and ChatGPT plans) as bars, with when they reset; a note drops down once when one passes 90%. They're kept across restarts.
+The Companion's **Usage** card shows each agent's **5-hour** and **weekly** limits (Pro, Max and ChatGPT plans) as bars, with when they reset; a note drops down once when one passes 90%. They're kept across restarts.
 
 - **Claude** (in a terminal and in the desktop app alike): every 10 minutes while you're using Claude, and once at start, agent-voice runs **`claude -p /usage`**, Claude Code's own usage command. It's local: no model request, nothing typed anywhere; Claude Code fetches your usage with your login, as its Usage page does, and saves it, and agent-voice reads that. The numbers are the ones on Claude's Usage page (which also counts claude.ai). Between two readings, the bars follow your requests from the token counts in your local transcripts (`~/.claude/projects`), weighted by model; those are marked *≈*. A terminal session's status line (`agent-voice usage on`, or *Turn on* in the row) reports exact numbers too. `limits.claude_refresh_minutes` sets how often (`0`: never).
 - **Codex** writes them in its session logs (`~/.codex/sessions`): they show after its first turn, nothing to set up.
@@ -226,7 +227,7 @@ Drag a screenshot, a log or any file onto the notch (it drops down as you get ne
 Each conversation gets a colour, its own voice pitch (the first keeps the natural voice, the next ones are a little lower or higher) and remembers the window it was prompted from, so replies never land in the wrong terminal. When one finishes while another is talking or waiting for your reply, it waits its turn and is announced by name. The panel's **Threads** list shows what each one is doing and the start of its last reply, with replay and copy buttons; click a thread to open it. With two or more live, the notch shows **a dot per conversation** on its right: filled while it works or talks, ringed in amber when it waits on you, dimmed once done; click a dot to open it.
 
 ### "Hey Claude"
-Turn on the *Hey Claude* tile (or `agent-voice wake on`). While idle, *"Hey Claude, run the tests"* is sent to your last conversation as a new prompt; *"Hey Claude"* alone opens the mic. It's off by default; on battery it costs next to nothing (a volume gate, then a tiny keyword model only while someone speaks).
+Turn on *Hey Claude* in ⚙ Settings (or `agent-voice wake on`). While idle, *"Hey Claude, run the tests"* is sent to your last conversation as a new prompt; *"Hey Claude"* alone opens the mic. It's off by default; on battery it costs next to nothing (a volume gate, then a tiny keyword model only while someone speaks).
 
 ### Summaries instead of long answers
 By default, final answers are spoken as **one short sentence**, so a long recap doesn't keep talking for minutes:
@@ -235,7 +236,7 @@ By default, final answers are spoken as **one short sentence**, so a long recap 
 - **Other agents**, or a reply without that line: the opening sentences of the answer are spoken (up to `summary.max_chars`). To get real summaries from Codex, Gemini CLI or Cursor too, add the same instruction to their project rules (`AGENTS.md`, `GEMINI.md`, `.cursor/rules`): *"End your final reply with a line `Voice summary: <one short sentence>`."*
 - Progress messages during the work are not affected.
 
-Toggle it with the *Summaries* tile, the tray (*Summarize answers*) or `agent-voice summary on|off`. The voice confirms "Summaries on" or "Full answers". It also decides what the Chimes banner shows.
+Switch it with *Replies* in Settings, the tray (*Summarize answers*) or `agent-voice summary on|off`. The voice confirms "Summaries on" or "Full answers". It also decides what the Chimes banner shows.
 
 ### Read anything aloud
 Select text in any application and press **`Ctrl+Alt+R`**: it is read in the right language. With nothing selected, the clipboard is read.
@@ -249,7 +250,8 @@ Select text in any application and press **`Ctrl+Alt+R`**: it is read in the rig
 | Get it out of the way while an agent works | The **—** button: tucked away until there's news (a voice, a question, something that needs you, a new reply) |
 | Answer a conversation later, by voice or typing | Its thread row in the panel: 🎙️ talks to it (sent when you pause), ⌨️ opens a box to type to it |
 | Answer a notification by typing | **Reply** on the banner: type, Enter sends it to that conversation (Shift+Enter for a new line, Esc to close); **Talk** opens the mic for it |
-| See every action | Click the chevron ⌄: what needs you, actions, speed, mode, threads, what you said, agents |
+| See what needs you and every thread | Click the chevron ⌄: what needs you, your threads, Hold to talk / Stop / Read selection, and your agents |
+| Change how it behaves | ⚙ on the open notch: your language, the voice, its speed, summaries, the mode, headphones, Hey Claude, auto-send, approvals, phone, the theme, your agents |
 | See who's working | A dot per live conversation on the right; hover for its name, click to open it |
 | Answer an approval | *Allow* / *Deny* at the top of the panel, or say *"approve Codex"* |
 | Send files to a conversation | Drop them on the notch, or on a thread in the panel |
@@ -282,7 +284,7 @@ The notch **never takes keyboard focus**: clicking it keeps your agent window ac
 agent-voice say --voice en_US-ryan-high "Hello, I am Ryan."
 ```
 
-**The natural voice:** in the panel, *Voice: Light / Natural*. *Natural* is [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), a newer local model with a far more expressive delivery, close to a cloud voice. It runs offline like Piper but uses about three times the CPU per sentence (still faster than it speaks), so *Light* stays the default. The first switch downloads it (about 120 MB, verified by checksum; the panel shows the progress), then it's instant. Its voices: `af_heart` (American English, the default), `bf_emma` (British), `am_adam`, `bm_george`... and `ff_siwis` for French. Pick them in the config: `{ "kokoro": { "voices": { "en": "bf_emma" } } }`. `agent-voice say` uses whichever engine is on.
+**The natural voice:** in ⚙ Settings, *Voice: Light / Natural*. *Natural* is [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), a newer local model with a far more expressive delivery, close to a cloud voice. It runs offline like Piper but uses about three times the CPU per sentence (still faster than it speaks), so *Light* stays the default. The first switch downloads it (about 120 MB, verified by checksum; Settings shows the progress), then it's instant. Its voices: `af_heart` (American English, the default), `bf_emma` (British), `am_adam`, `bm_george`... and `ff_siwis` for French. Pick them in the config: `{ "kokoro": { "voices": { "en": "bf_emma" } } }`. `agent-voice say` uses whichever engine is on.
 
 **Speed:** `"speed": 0.67` (about 1.5× faster than normal). `1.0` is the natural pace; lower is faster.
 
@@ -313,7 +315,7 @@ Hooks and the MCP server start the service automatically if it isn't running.
 For an MCP app not listed: command `agent-voice` (or the full path to `agent-voice.exe`), arguments `mcp --client <its name>`.
 
 ### ChatGPT, Claude, Gemini... in the browser
-1. `agent-voice install browser` (or click *Browser* in the panel's Agents row): it registers the bridge and opens the extension's folder.
+1. `agent-voice install browser` (or click *Browser* in Settings' Agents): it registers the bridge and opens the extension's folder.
 2. In Chrome, Edge or Brave, open `chrome://extensions` (`edge://extensions`), turn on **Developer mode**, click **Load unpacked** and pick that folder.
 3. Ask something on ChatGPT, Claude, Gemini, AI Studio, Perplexity, Copilot, Mistral or DeepSeek: the notch shows the tab working, then the reply is read out (its summary, or in full). Your spoken reply is typed back into the page.
 
@@ -332,7 +334,7 @@ File: `~/.agent-voice/config.json`. Only put the keys you want to change; they'r
 | Key | Default | Notes |
 |---|---|---|
 | `voices` | `{"en": "en_US-hfc_male-medium", "fr": "fr_FR-siwis-medium"}` | See section 5 |
-| `default_lang` | `"en"` | Used when detection is unsure |
+| `default_lang` | `"en"` | Used when detection is unsure (Settings' *Language* overrides it, for the voice and for what you say) |
 | `speed` | `0.67` | Lower is faster |
 | `volume` | `1.0` | |
 | `max_chars` | `1500` | Longer replies are cut at a sentence |

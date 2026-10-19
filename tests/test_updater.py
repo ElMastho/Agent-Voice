@@ -21,7 +21,7 @@ def test_version_comparison():
 
 def _release(tag="v0.6.0", **asset):
     a = {"name": updater.ASSET, "state": "uploaded", "size": 1234,
-         "browser_download_url": f"https://github.com/ElMastho/agent-voice/releases/download/{tag}/{updater.ASSET}"}
+         "browser_download_url": f"https://github.com/ElMastho/Agent-Voice/releases/download/{tag}/{updater.ASSET}"}
     a.update(asset)
     return {"tag_name": tag, "assets": [{"name": "source.tar.gz", "size": 10, "browser_download_url": "x"}, a]}
 
@@ -33,7 +33,7 @@ def test_asset_choice():
     assert updater.pick_asset(_release(size=0)) is None
     assert updater.pick_asset(_release(browser_download_url="https://evil.example/agent-voice-windows-x64.zip")) is None
     # The url must be this release's, not another tag's.
-    other = f"https://github.com/ElMastho/agent-voice/releases/download/v0.1.0/{updater.ASSET}"
+    other = f"https://github.com/ElMastho/Agent-Voice/releases/download/v0.1.0/{updater.ASSET}"
     assert updater.pick_asset(_release(browser_download_url=other)) is None
     assert updater.pick_asset({"tag_name": "v0.6.0"}) is None
 
@@ -174,3 +174,55 @@ def test_failed_download_changes_nothing(monkeypatch):
     monkeypatch.setattr(updater, "launch_apply", lambda *a: launched.append(a))
     d.install_update()
     assert not launched and d.update["state"] == "" and "Nothing was changed" in d.banner["text"]
+
+
+def test_check_for_updates_now(monkeypatch, tmp_path):
+    from agent_voice import config, server
+
+    monkeypatch.setattr(server, "load_state", lambda: {})
+    monkeypatch.setattr(server, "save_state", lambda state: None)
+    monkeypatch.setattr(server.history, "PATH", tmp_path / "history.db")
+    d = server.Daemon(config.load_config(), start_threads=False)
+    installs = []
+    monkeypatch.setattr(d, "install_update", lambda: installs.append(d.update["version"]))
+    monkeypatch.setattr(d, "_fetch_release", lambda: None)
+    d.check_updates()
+    assert "Couldn't reach GitHub" in d.banner["text"] and installs == []
+    monkeypatch.setattr(d, "_fetch_release", lambda: False)
+    d.check_updates()
+    assert "up to date" in d.banner["text"] and d.update is None
+
+    def newer():
+        d.update = {"version": "9.9.9", "url": "", "how": "auto", "state": ""}
+        return True
+
+    monkeypatch.setattr(d, "_fetch_release", newer)
+    d.check_updates()
+    assert installs == ["9.9.9"]  # found: installed at once
+
+
+def test_a_renamed_repo_still_matches_its_download_link():
+    from agent_voice import updater
+
+    old_spelling = {"tag_name": "v1.0.0", "assets": [
+        {"name": updater.ASSET, "size": 10, "state": "uploaded",
+         "browser_download_url": f"https://github.com/elmastho/agent-voice/releases/download/v1.0.0/{updater.ASSET}"}]}
+    assert updater.pick_asset(old_spelling) is not None  # GitHub's names are case-insensitive
+
+
+def test_git_update_never_touches_local_changes(monkeypatch, tmp_path):
+    from agent_voice import updater
+
+    calls = []
+
+    def fake_git(repo, *args, timeout=120):
+        calls.append(args[0])
+
+        class Done:
+            returncode, stderr = 0, ""
+            stdout = " M agent_voice/widget.py\n" if args[0] == "status" else ""
+
+        return Done()
+
+    monkeypatch.setattr(updater, "_git", fake_git)
+    assert "local changes" in updater.git_update(tmp_path) and calls == ["status"]  # no pull at all

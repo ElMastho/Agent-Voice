@@ -48,6 +48,7 @@ CLOCK = Clock()
 W.time = CLOCK  # the widget animates from time.time(); drive it frame by frame
 W.SCREEN_W = 1920  # a laptop screen: the open notch takes a third of it
 W.POS_FILE = Path(tempfile.mkdtemp()) / "widget.json"  # never your own position, folded cards or hidden notch
+W.Glass.grab = lambda self, area: False  # the light theme's glass never shows your real screen in a picture
 
 
 def backdrop(w: int, h: int, seed: int = 7) -> Image.Image:

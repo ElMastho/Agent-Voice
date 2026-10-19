@@ -7,6 +7,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtCore = pytest.importorskip("PySide6.QtCore")
 from PySide6.QtCore import QPoint, Qt  # noqa: E402
+from PySide6.QtGui import QColor  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -141,6 +142,30 @@ def test_tuck_hides_until_something_new(app):
     w._on_status({**w.st, "phase": "speaking"})  # news: it comes back down
     w._place_notch()
     assert w._tucked is None and w._reveal_until > 0
+    w._on_status({**w.st, "phase": "idle"})  # the news has passed: back up to the line
+    w._place_notch()
+    assert w._tucked is not None and not w._retuck
+
+
+def test_closing_the_banner_tucks_the_notch_again(app, monkeypatch):
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: None)
+    w = _widget({"phase": "idle", "threads": []})
+    w.expanded = False
+    w.tuck()
+    w._on_status({**w.st, "banner": {**ITEM, "id": 5, "age": 0}})  # a notification brings it down
+    w._place_notch()
+    assert w._tucked is None and w._retuck
+    QTest.mouseClick(w.banner, Qt.LeftButton, Qt.NoModifier, w.banner._close_rect().center().toPoint())
+    assert w._tucked is not None and w._reveal_until == 0.0  # straight back up to the line
+
+
+def test_banner_close_button(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append(path))
+    b = widget.Banner()
+    b.present(ITEM, 420)
+    QTest.mouseClick(b, Qt.LeftButton, Qt.NoModifier, b._close_rect().center().toPoint())
+    assert b.until == 0.0 and posted == []  # gone, nothing opened
 
 
 def test_banner_reply_and_talk_buttons(app, monkeypatch):
@@ -487,6 +512,21 @@ def test_notch_shows_a_running_timer_on_a_second_line(app, monkeypatch):
     assert w._strip_items()[0][2] == "4:00"  # paused: what was left
 
 
+def test_notch_second_line_wraps_instead_of_losing_the_song_buttons(app, monkeypatch):
+    now = widget.time.time()
+    busy = {**COMPANION, "timers": [], "pomodoro": {"phase": "focus", "end": now + 1440, "left": 0.0, "length": 1500}}
+    agenda = {"events": [{"title": "Weekly sync with the platform team", "start": now + 300, "end": now + 2100,
+                          "all_day": False}]}
+    media = {"playing": True, "title": "A rather long song title", "artist": "Somebody"}
+    w = _widget({"phase": "idle", "threads": [], "companion": busy, "agenda": agenda, "media": media})
+    w.expanded = False
+    spans, buttons = w._strip_layout()
+    assert len(spans) == 3 and len({y for _x, y, _w in spans}) == 2  # two rows
+    assert w._strip_h() == 2 * widget.STRIP_H and w._target_size()[1] == widget.NOTCH_H + 2 * widget.STRIP_H
+    assert buttons["snext"].right() <= w.nw - widget.NOTCH_EAR  # still on the island, clickable
+    assert w._rects()["strip"].height() == 2 * widget.STRIP_H
+
+
 def test_timer_banner_snoozes_or_ends(app, monkeypatch):
     posted = []
     monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
@@ -636,7 +676,34 @@ def test_companion_on_the_left_plays_music_and_shows_the_day(app, monkeypatch):
     assert opened == ["calendar"]
     w.expanded = False
     assert any(item[1] == "Stand-up" and item[2] == "in 5 min" for item in w._strip_items())  # on the second line
+    assert any(item[2] == "Get Lucky · Daft Punk" for item in w._strip_items())  # the song too, while it plays
+    w.st["media"] = {**w.st["media"], "playing": False}
+    assert not any(item[0] == widget.ICONS["music"] for item in w._strip_items())  # paused: not on the notch
     w.hide()
+
+
+def test_a_song_lights_the_notch_and_skips_from_it(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    st = {"phase": "idle", "threads": [], "companion": COMPANION,
+          "media": {"app": "Spotify", "title": "Get Lucky", "artist": "Daft Punk", "playing": True}}
+    w = _widget(st)
+    w._reveal, w.expanded = 1.0, False
+    w.show()
+    assert w._music_glow() and w._glow_moving() and w._edge_live() == 0.7  # nothing else on: the song's light
+    rects = w._rects()
+    assert {"sprev", "snext"} <= set(rects)
+    for key, action in (("sprev", "previous"), ("snext", "next")):
+        w._activate(key)
+        assert posted[-1] == ("/media", {"action": action})
+    w.grab()  # paints the second line with its buttons
+    w.st["activity"] = {"text": "Editing", "color": "#8B7CFF"}
+    assert not w._music_glow()  # an agent at work: its own light
+    w.st.pop("activity")
+    w.st["media"] = {**w.st["media"], "playing": False}
+    assert not w._music_glow() and not w._glow_moving() and "snext" not in w._rects()  # paused: still again
+    w.hide()
+    w.poller.stop()
 
 
 def test_utils_clipboard_notes_and_agent_todos(app, monkeypatch):
@@ -663,3 +730,75 @@ def test_utils_clipboard_notes_and_agent_todos(app, monkeypatch):
     assert posted == [("/open_thread", {"session": "a"}), ("/note", {"action": "remove", "id": 5}),
                       ("/attach", {"paths": [], "text": "SELECT * FROM users;", "session": "a"})]
     w.hide()
+
+
+def test_light_theme_is_saved_and_swaps_the_palette(app, monkeypatch):
+    assert widget._saved_theme() == "dark"  # the default
+    assert widget._qss("color:rgba(255,255,255,90);") == "color:rgba(255,255,255,90);"
+    w = _widget({"phase": "idle", "threads": []})
+    monkeypatch.setattr(w, "_relaunch", lambda: None)
+    try:
+        w.toggle_theme()
+        assert widget.LIGHT and widget._saved_theme() == "light"  # a fresh widget starts light
+        assert widget._ink().name() == "#111827" and widget._body().name() == "#f8f9fb"
+        assert widget._qss("#box{background:#000;color:rgba(255, 255, 255,90);}") == (
+            "#box{background:#F8F9FB;color:rgba(17,24,39,90);}")
+        assert widget._tone("#FBBF24").value() < QColor("#FBBF24").value()  # accents darker, to read on white
+        assert not w.glass.follow(w.geometry(), True)  # offscreen: never a grab of the screen
+        w.grab()  # glass with nothing behind it: frosted
+    finally:
+        widget.set_theme("dark")
+    w.hide()
+
+
+TODOS = [{"id": 2, "text": "Review the PR", "done": False, "source": "claude", "at": 0, "category": "agent-voice"},
+         {"id": 3, "text": "Call Paul", "done": False, "source": "you", "at": 0, "category": "Work"},
+         {"id": 4, "text": "Buy milk", "done": False, "source": "you", "at": 0}]
+
+
+def test_todo_card_separates_yours_and_your_agents_by_category(app, monkeypatch):
+    posted, opened = [], []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    w = _widget({"phase": "idle", "threads": [], "companion": {**COMPANION, "todos": TODOS}})
+    w._reveal, w.side_open["utils"] = 1.0, True
+    w.show()
+    side = w.utils
+    side.step(w.visual_rect(), True)
+    side._build(None)  # laid out: every card's rows, scrolled into view or not
+    rows = {int(k.split(":")[1]): r.y() for k, r in side.hits.items() if k.startswith("trow:")}
+    assert rows[4] < rows[3] < rows[2]  # yours (no category, then Work), then your agents'
+    monkeypatch.setattr(side.input, "open", lambda mode, at: opened.append((mode, side.input.item_id)))
+    side._ask_category(3)
+    side.input.mode, side.input.item_id = "category", 3
+    side.input.edit.setText("home")
+    side.input.submit()
+    assert opened == [("category", 3)] and posted[-1] == ("/todo", {"action": "category", "id": 3, "category": "home"})
+    w.hide()
+
+
+def test_a_util_goes_full_screen_and_back(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    many = TODOS + [{"id": 100 + i, "text": f"Item {i}", "done": False, "source": "you", "at": 0} for i in range(12)]
+    w = _widget({"phase": "idle", "threads": [], "companion": {**COMPANION, "todos": many}})
+    w._reveal, w.side_open["utils"] = 1.0, True
+    w.show()
+    w.utils.step(w.visual_rect(), True)
+    w.utils._build(None)
+    assert {f"full:{card}" for card in widget.SIDE_CARDS["utils"]} <= set(w.utils.hits)
+    w.utils.activate("full:todo")
+    full = w.full
+    try:
+        assert full.isVisible() and full.card == "todo" and full.s >= 1.25 and w._folding  # the panel folds away
+        full.repaint()
+        assert {"trow:111", "trow:2", "full:todo", "fclose"} <= set(full.hits)  # every item, not the panel's 8
+        mine, agents = full.hits["trow:3"], full.hits["trow:2"]
+        assert agents.x() > mine.right() and abs(agents.y() - full.hits["trow:4"].y()) < 30  # two columns
+        point = full.hits["todo:2"].center()
+        QTest.mouseClick(full, Qt.LeftButton, Qt.NoModifier, (point * full.s).toPoint())  # clicks are scaled too
+        assert posted[-1] == ("/todo", {"action": "toggle", "id": 2})
+        QTest.mouseClick(full, Qt.LeftButton, Qt.NoModifier, QPoint(5, full.height() - 5))  # beside the card
+        assert not full.isVisible() and not w._folding and w.expanded  # the panel stays open
+    finally:
+        full.close_card()
+        w.hide()

@@ -460,6 +460,7 @@ class Daemon:
         # Session and agent behind the current speech, so the widget can say which thread talks.
         self._voice_session, self._voice_source = "", ""
         self._file_titles: dict[str, str] = {}
+        self._transcript_titles = claudeapp.TranscriptTitles()
         # Speech from other threads that arrived while one was talking (or waiting for your reply).
         self._queue: list[tuple] = []
         # Recent conversations, for the widget's thread list: session -> {source, last}.
@@ -500,6 +501,7 @@ class Daemon:
         # Another app holds the mic (a call): chimes instead of the voice until it ends.
         self.in_call = ""
         self._call_override = False
+        self._call_paused = False  # we paused the music when the call started: play it again when it ends
         self._ptt_release = threading.Event()
         # Every permission request still waiting (several agents can ask at once); `permission` is the one shown.
         self._perms: dict[int, dict] = {}
@@ -2476,9 +2478,29 @@ class Daemon:
                 self.in_call, self._call_override = label, False
                 if not self.state.get("chime"):
                     self.stop()  # stop talking over your call
+                self._pause_for_call()
             elif not label and self.in_call:
                 log.info("call ended")
                 self.in_call, self._call_override = "", False
+                self._resume_after_call()
+
+    def _pause_for_call(self) -> None:
+        """A song playing when a call starts: paused (the media key is a toggle, so only when it plays)."""
+        if not self.config.get("pause_media_in_calls", True):
+            return
+        now = media.now_playing()
+        if now and now.get("playing") and self.media_control("toggle"):
+            self._call_paused = True
+            log.info("music paused for the call (%s)", now.get("app", ""))
+
+    def _resume_after_call(self) -> None:
+        if not self._call_paused:
+            return
+        self._call_paused = False
+        now = media.now_playing()
+        if now and not now.get("playing"):  # not if you've played it again yourself meanwhile
+            self.media_control("toggle")
+            log.info("music resumed after the call")
 
     def _check_output(self) -> None:
         before = self._output.kind
@@ -2848,12 +2870,15 @@ class Daemon:
         return "muted" if self.muted else "idle"
 
     def _title(self, session: str, source: str = "") -> str:
-        """A conversation's name: its desktop-app title when known, else the agent's name."""
+        """A conversation's name: its desktop-app title when known, else the one Claude Code gave the session (its
+        tab's), else the agent's name."""
         title = self._titles.get(session, "")
         if session and not title:
             if session not in self._file_titles:  # app session files: read once per session, not per poll
                 self._file_titles[session] = claudeapp.session_title(session)
             title = self._file_titles[session]
+        if session and not title and source in ("claude", ""):
+            title = self._transcript_titles.title(session)
         return title or AGENT_TITLES.get(source, source.capitalize())
 
     def _thread_status(self) -> dict | None:
@@ -3545,7 +3570,7 @@ def _handler(daemon: Daemon):
                     done = data.get("done")
                     out = box.todo(action, item_id, str(data.get("text") or ""),
                                    None if done is None else bool(done), str(data.get("source") or "you"),
-                                   str(data.get("session") or ""))
+                                   str(data.get("session") or ""), str(data.get("category") or ""))
                 else:
                     at = data.get("at")
                     text = str(data.get("text") or "")

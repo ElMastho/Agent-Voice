@@ -92,6 +92,8 @@ DEFAULTS: dict = {
     "update_check": True,
     # While another app has the mic (Teams, Zoom, Meet...), chimes instead of the voice.
     "auto_chime_in_calls": True,
+    # A song or video playing when a call starts is paused, and played again when the call ends.
+    "pause_media_in_calls": True,
     # While a reply is read out, show its text under the notch (gone 5 s after the voice stops).
     "read_along": True,
     # Back after a while (no input for `away_minutes`, or a call ending): what finished and who needs you.

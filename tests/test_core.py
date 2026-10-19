@@ -241,6 +241,30 @@ def test_desktop_session_title_and_sidebar_entry(tmp_path):
     assert not claudeapp.is_current("Fix the build (fork) - Claude Code", "Fix the build")
 
 
+def test_claude_code_session_title_from_its_transcript(tmp_path):
+    import json
+
+    from agent_voice import claudeapp
+
+    d = tmp_path / "c--work-app"
+    d.mkdir()
+    log = d / "s1.jsonl"
+    quoted = {"type": "user", "message": {"content": '{"type":"ai-title","aiTitle":"Quoted"}'}}  # a tool result
+    log.write_text(json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n" + json.dumps(quoted) + "\n",
+                   encoding="utf-8")
+    titles = claudeapp.TranscriptTitles(tmp_path)
+    assert titles.title("s1") == ""  # no title yet
+    with log.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "ai-title", "aiTitle": "Music on the notch", "sessionId": "s1"}) + "\n")
+        f.write('{"type":"ai-title","aiTitle":"Half wr')  # still being written: not read yet
+    assert titles.title("s1") == "Music on the notch"
+    with log.open("a", encoding="utf-8") as f:
+        f.write('itten"}\n' + json.dumps({"type": "custom-title", "customTitle": "Renamed"}) + "\n")
+        f.write(json.dumps({"type": "ai-title", "aiTitle": "Later"}) + "\n")
+    assert titles.title("s1") == "Renamed"  # /rename wins over Claude's own
+    assert titles.title("missing") == "" and titles.title("../s1") == ""
+
+
 def test_permission_answers_and_wake_phrases():
     from agent_voice.server import match_yes_no, strip_wake
 
@@ -452,11 +476,44 @@ def test_call_watch_switches_to_chimes_and_back(daemon, monkeypatch):
     monkeypatch.setattr(server.calls, "apps_using_mic", fake_apps)
     monkeypatch.setattr(daemon, "_check_output", lambda: None)  # not about headphones (and no real pactl)
     monkeypatch.setattr(server.winfocus, "busy_state", lambda: "")  # not about your screen (an app full screen)
+    monkeypatch.setattr(server.media, "now_playing", lambda: None)  # no player open (never the real media keys)
     monkeypatch.setattr(server.time, "sleep", lambda s: seen.append((daemon.in_call, daemon.chime)))
     with pytest.raises(SystemExit):
         daemon._call_watch()
     # (in_call, chime) seen before each check: idle, in the Zoom call (chimes), still in it, back to voice
     assert seen == [("", False), ("Zoom", True), ("Zoom", True), ("", False)]
+
+
+def test_a_call_pauses_the_music_and_plays_it_again_after(daemon, monkeypatch):
+    from agent_voice import server
+
+    song = {"app": "Spotify", "title": "Get Lucky", "artist": "Daft Punk", "playing": True}
+    pressed = []
+
+    def toggle(action):
+        pressed.append(action)
+        song["playing"] = not song["playing"]
+        return True
+
+    monkeypatch.setattr(server.media, "now_playing", lambda: dict(song))
+    monkeypatch.setattr(server.media, "control", toggle)
+    monkeypatch.setattr(daemon, "media_control", toggle)  # not the 0.6 s refresh timer
+    daemon._pause_for_call()
+    assert pressed == ["toggle"] and not song["playing"]
+    daemon._resume_after_call()
+    assert pressed == ["toggle", "toggle"] and song["playing"]
+
+    pressed.clear()
+    song["playing"] = False
+    daemon._pause_for_call()  # nothing playing: the toggle would start it, so no key
+    daemon._resume_after_call()
+    assert pressed == []
+
+    song["playing"] = True
+    daemon._pause_for_call()
+    song["playing"] = True  # you played it again yourself during the call
+    daemon._resume_after_call()
+    assert pressed == ["toggle"] and song["playing"]
 
 
 def test_several_approvals_wait_and_are_answered_by_name(daemon):
@@ -1668,6 +1725,33 @@ def test_companion_keeps_timers_todos_and_reminders():
             bad()
 
 
+def test_todo_categories_and_sections():
+    from agent_voice.companion import Companion, split_category, todo_categories, todo_sections
+
+    assert split_category("Call Paul #work") == ("Call Paul", "work")
+    assert split_category("Ship it #release.") == ("Ship it.", "release")
+    assert split_category("Fix issue #42") == ("Fix issue #42", "")  # a number, not a category
+    assert split_category("#home") == ("#home", "")  # nothing left to do: kept as written
+    box = Companion(None, lambda data: None)
+    box.data["todos"].append({"id": 99, "text": "Saved before categories", "done": False, "source": "you"})
+    assert box.todo("add", text="Water the plants")["category"] == ""  # old items have no "category" key
+    box.data["todos"].clear()
+    paul = box.todo("add", text="Call Paul #Work")
+    bank = box.todo("add", text="Call the bank #work")
+    assert (paul["category"], bank["category"]) == ("Work", "Work")  # one category, as first written
+    milk = box.todo("add", text="Buy milk")
+    pr = box.todo("add", text="Review the PR", source="claude", category="agent-voice")
+    box.todo("toggle", paul["id"])
+    assert box.todo("category", milk["id"], category="#home")["category"] == "home"
+    assert todo_categories(box.status()["todos"]) == ["agent-voice", "home", "Work"]
+    sections = todo_sections(box.status()["todos"])
+    assert [(title, [(name, [t["text"] for t in items]) for name, items in groups]) for title, groups in sections] == [
+        ("Yours", [("home", ["Buy milk"]), ("Work", ["Call the bank", "Call Paul"])]),  # what's left first
+        ("From your agents", [("agent-voice", ["Review the PR"])])]
+    box.todo("category", pr["id"], category="")
+    assert todo_sections(box.status()["todos"])[1][1] == [("", [box._find("todos", pr["id"])])]
+
+
 def test_companion_said_and_due(daemon, monkeypatch):
     monkeypatch.setattr(server_module(), "_beep", lambda freq: None)
     assert daemon.companion_said("Timer 10 minutes for the pasta", "en")
@@ -1729,6 +1813,12 @@ def test_companion_endpoints_and_mcp_todo(daemon, monkeypatch):
         assert "[x] Review the migration" in agent.call("todo_list", {})[0]
         assert agent.call("todo_update", {"id": item_id, "remove": True}) == ("Removed.", False)
         assert daemon.status()["companion"]["todos"] == []
+        text, _error = agent.call("todo_add", {"text": "Tag the release", "category": "agent-voice"})
+        item_id = int(text.split()[-1].rstrip("."))
+        assert "Tag the release #agent-voice (added by claude)" in agent.call("todo_list", {})[0]
+        assert agent.call("todo_update", {"id": item_id, "category": ""}) == ("Updated.", False)  # not ticked off
+        todo = daemon.status()["companion"]["todos"][0]
+        assert todo["category"] == "" and not todo["done"]
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -1810,6 +1900,42 @@ def test_agenda_reads_ical_repeats_and_exceptions():
     assert day(21) == [("Stand-up (moved)", "10:00", False)]
     assert day(24) == []  # Saturday
     assert agenda.on_day(events, date(2026, 10, 19))[2]["location"] == "Café, rue X"
+
+
+def test_agenda_reads_outlook_items_without_indexing():
+    from datetime import date, datetime
+    from types import SimpleNamespace
+
+    from agent_voice import agenda
+
+    class Found:  # Outlook's Restrict result: 1-based, so comtypes' iteration (item 0) fails
+        def __init__(self, items):
+            self.items, self.at = items, -1
+
+        def __getitem__(self, index):
+            raise OSError("Array index out of bounds.")
+
+        def GetFirst(self):
+            self.at = -1
+            return self.GetNext()
+
+        def GetNext(self):
+            self.at += 1
+            return self.items[self.at] if self.at < len(self.items) else None
+
+    items = [SimpleNamespace(Subject="Stand-up", Location=None, AllDayEvent=False,
+                             Start=46314.375, End=46314.390625),  # late-bound: OLE days
+             SimpleNamespace(Subject="", Location="Room 2", AllDayEvent=True,
+                             Start=datetime(2026, 10, 19), End=datetime(2026, 10, 20))]
+    got = agenda._outlook_items(Found(items))
+    assert [(e["title"], datetime.fromtimestamp(e["start"]).strftime("%d/%m %H:%M"),
+             datetime.fromtimestamp(e["end"]).strftime("%H:%M"), e["location"], e["all_day"]) for e in got] == [
+        ("Stand-up", "19/10 09:00", "09:22", "", False), ("(no title)", "19/10 00:00", "00:00", "Room 2", True)]
+    assert len(agenda._outlook_items(Found(items * 20), limit=30)) == 30
+
+    query = agenda._outlook_filter(date(2026, 10, 5))  # never '10/05/2026', which a French Outlook reads as 10 May
+    assert query.startswith('@SQL="urn:schemas:calendar:dtstart" < \'2026-10-0')
+    assert "/" not in query
 
 
 def test_agent_todos_focus_sessions_and_notes(daemon, monkeypatch):

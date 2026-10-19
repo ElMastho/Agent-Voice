@@ -575,6 +575,7 @@ class Banner(QWidget):
         self._hover = False
         self._hot: str | None = None  # the button under the mouse
         self.on_reply = None  # opens the reply box (set by the widget)
+        self.on_close = None  # closed by hand (✕ or swipe): a notch that was tucked goes straight back up
         self._topmost_at = 0.0
         self.glass = Glass()
         self._shown_left = -1
@@ -615,6 +616,10 @@ class Banner(QWidget):
 
     def _buttons_shown(self) -> bool:
         return self._can_reply() or (self.item or {}).get("kind") in ("pending", "timer", "reminder")
+
+    def _close_rect(self) -> QRectF:
+        """The ✕ in the top right corner: easier than a swipe."""
+        return QRectF(self.width() - 34, 8, 24, 24)
 
     def _buttons(self) -> dict[str, QRectF]:
         """Reply by typing, or by voice, to the conversation this banner is from; or, for a message about to be
@@ -745,15 +750,23 @@ class Banner(QWidget):
             title = f"Sending to {title}" if title else "Sending"
         elif yours:
             title = f"You  →  {title}" if title else "You said"
-        head = QFontMetrics(self.f_head).elidedText(title or "Reply", Qt.ElideRight, self.width() - 90)
-        p.drawText(QRectF(30, 10, self.width() - 90, 20), Qt.AlignLeft | Qt.AlignVCenter, head)
+        head = QFontMetrics(self.f_head).elidedText(title or "Reply", Qt.ElideRight, self.width() - 110)
+        p.drawText(QRectF(30, 10, self.width() - 110, 20), Qt.AlignLeft | Qt.AlignVCenter, head)
         p.setPen(_ink(90))
         tag = "speaking" if self.holding else self.item.get("tag") or ("" if kind in BANNER_KINDS else "done")
         if kind == "pending":
             tag = f"in {self._left()} s · say “wait” or “cancel”"
         elif kind in ("timer", "reminder"):
             tag = _when_text(float(self.item.get("at") or time.time()))
-        p.drawText(QRectF(0, 10, self.width() - 18, 20), Qt.AlignRight | Qt.AlignVCenter, tag)
+        p.drawText(QRectF(0, 10, self.width() - 40, 20), Qt.AlignRight | Qt.AlignVCenter, tag)
+        close = self._close_rect()
+        if self._hot == "close":
+            p.setPen(Qt.NoPen)
+            p.setBrush(_ink(40))
+            p.drawEllipse(close)
+        p.setFont(self.f_icon)
+        p.setPen(_ink(220 if self._hot == "close" else 120))
+        p.drawText(close, Qt.AlignCenter, ICONS["close"])
         p.setFont(self.f_text)
         p.setPen(_ink(228))
         fm = QFontMetrics(self.f_text)
@@ -789,6 +802,8 @@ class Banner(QWidget):
         self.update()
 
     def _button_at(self, pos: QPointF) -> str | None:
+        if self._close_rect().contains(pos):
+            return "close"
         return next((key for key, rect in self._buttons().items() if rect.contains(pos)), None)
 
     def mousePressEvent(self, e):
@@ -809,9 +824,13 @@ class Banner(QWidget):
             return
         moved = e.globalPosition() - self._press
         self._press = None
-        if self.drag < -18 or abs(moved.x()) > 60:
-            self.dismiss()  # swiped away
-        elif abs(moved.x()) + abs(moved.y()) < 5 and self.item:
+        swiped = self.drag < -18 or abs(moved.x()) > 60
+        clicked = abs(moved.x()) + abs(moved.y()) < 5 and self.item
+        if swiped or (clicked and self._button_at(e.position()) == "close"):
+            self.dismiss()
+            if self.on_close:
+                self.on_close()
+        elif clicked:
             button = self._button_at(e.position())
             if self.item.get("kind") in ("timer", "reminder"):
                 snooze = self.item.get("snooze") or {}
@@ -2356,8 +2375,10 @@ class VoiceWidget(QWidget):
         self._preview_watch = QTimer(self)  # hides it once the mouse is on neither the row nor the preview
         self._preview_watch.timeout.connect(self._check_preview)
         self.banner.on_reply = self.open_reply
+        self.banner.on_close = self._banner_closed
         self._tucked: tuple | None = None  # tucked away by hand: what was showing then (news brings it back)
         self._tuck_hover = False  # the mouse that clicked "tuck" is still over it: don't hold it down
+        self._retuck = False  # news brought a tucked notch down: it goes back up once that news is over
         self._banner_seen: int | None = None
         self._boot: int | None = None  # the service's start: when it changes, it was restarted (and so are we)
         self._opens: int | None = None
@@ -2578,7 +2599,11 @@ class VoiceWidget(QWidget):
         dnd = self._output() == "silent"  # Do not disturb: it stays up until you hover it
         if self._tucked is not None and self._news() != self._tucked:
             self._tucked = None  # something new happened: show it
+            self._retuck = True  # ...then back up to the line once it has passed
         hovering = self._hovering and not self._tuck_hover
+        if (self._retuck and not (hovering or self.expanded or self.pressed or self._drop or self._question()
+                                  or self.banner.item or self._news()[0])):
+            self._tucked, self._retuck = self._news(), False
         if self._tucked is not None:  # tucked by hand: only the mouse (or a drag) brings it down for a look
             if hovering or self.pressed or self._drop:
                 self._reveal_until = now + NOTCH_HIDE_DELAY
@@ -4531,11 +4556,17 @@ class VoiceWidget(QWidget):
     def tuck(self) -> None:
         """Out of the way now (it was covering something): up to its 3-pixel line until there's news."""
         self._tucked = self._news()
-        self._tuck_hover = True
+        self._tuck_hover, self._retuck = True, False
         self.expanded = False
         self._panel_closed()
         self._reveal_until = 0.0
         QToolTip.hideText()
+
+    def _banner_closed(self) -> None:
+        """The notification brought a tucked notch down: closing it sends the notch straight back to its line."""
+        if self._retuck:
+            self._tucked, self._retuck = self._news(), False
+            self._reveal_until = 0.0
 
     def toggle_visible(self) -> None:
         if self.isVisible():

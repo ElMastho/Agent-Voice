@@ -142,6 +142,30 @@ def test_tuck_hides_until_something_new(app):
     w._on_status({**w.st, "phase": "speaking"})  # news: it comes back down
     w._place_notch()
     assert w._tucked is None and w._reveal_until > 0
+    w._on_status({**w.st, "phase": "idle"})  # the news has passed: back up to the line
+    w._place_notch()
+    assert w._tucked is not None and not w._retuck
+
+
+def test_closing_the_banner_tucks_the_notch_again(app, monkeypatch):
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: None)
+    w = _widget({"phase": "idle", "threads": []})
+    w.expanded = False
+    w.tuck()
+    w._on_status({**w.st, "banner": {**ITEM, "id": 5, "age": 0}})  # a notification brings it down
+    w._place_notch()
+    assert w._tucked is None and w._retuck
+    QTest.mouseClick(w.banner, Qt.LeftButton, Qt.NoModifier, w.banner._close_rect().center().toPoint())
+    assert w._tucked is not None and w._reveal_until == 0.0  # straight back up to the line
+
+
+def test_banner_close_button(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append(path))
+    b = widget.Banner()
+    b.present(ITEM, 420)
+    QTest.mouseClick(b, Qt.LeftButton, Qt.NoModifier, b._close_rect().center().toPoint())
+    assert b.until == 0.0 and posted == []  # gone, nothing opened
 
 
 def test_banner_reply_and_talk_buttons(app, monkeypatch):

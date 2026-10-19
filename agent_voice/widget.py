@@ -71,6 +71,7 @@ COMPACT = 56  # compact mode: just the orb
 # Notch mode: docked to the top centre of the screen like a camera notch, tucked away when idle.
 NOTCH_W, NOTCH_H = 480, 44  # wide and short: one row of status, caption and chips
 STRIP_H = 22  # the notch's second line while a timer or the stopwatch runs
+MUSIC = "#10E0A0"  # the song: its note on the second line, the edge light while it plays
 TAB_W, TAB_H = 16, 52  # the side panels' arrows, on the open panel's edges
 # The side panels and the cards each can show: Utils on the right (the tools), the Companion on the left.
 SIDE_CARDS = {"utils": companion.WIDGETS, "companion": companion.COMPANION_WIDGETS}
@@ -2916,7 +2917,8 @@ class VoiceWidget(QWidget):
             if tab is not None:
                 out[f"tab:{name}"] = tab
         if self._strip_h() and not self.expanded:
-            out["strip"] = QRectF(NOTCH_EAR, NOTCH_H, self.nw - 2 * NOTCH_EAR, STRIP_H)
+            out.update(self._strip_layout()[1])
+            out["strip"] = QRectF(NOTCH_EAR, NOTCH_H, self.nw - 2 * NOTCH_EAR, self._strip_h())
         if self._result():
             out["result"] = QRectF(NOTCH_EAR + 38, 23, self.nw / 2 - 40, 15)
         label = self._update_label()
@@ -3227,11 +3229,20 @@ class VoiceWidget(QWidget):
             return live
         if self._activity():
             return 0.85
+        if self._music_glow():
+            return 0.7
         return 0.5 if self.phase == "idle" else 0.0
 
+    def _music_glow(self) -> bool:
+        """A song plays and no agent is working: the edge light sways in the music's green."""
+        playing = self.st.get("media") or {}
+        return (self.phase == "idle" and not self._activity() and not self._question()
+                and bool(playing.get("playing") and playing.get("title")))
+
     def _glow_moving(self) -> bool:
-        """The working light glides around the edge: worth a gentle 15 fps, but only while it can be seen."""
-        return bool(self._activity()) and self._reveal > 0.3 and self.isVisible()
+        """The working (or music) light glides around the edge: worth a gentle 15 fps, but only while it can be
+        seen."""
+        return bool(self._activity() or self._music_glow()) and self._reveal > 0.3 and self.isVisible()
 
     def _paint_edge_light(self, p: QPainter, w: float, h: float) -> None:
         """A thin band of light around the island: running while live, gliding while working, still when ready."""
@@ -3240,19 +3251,26 @@ class VoiceWidget(QWidget):
             return
         t = time.time() - self.t0
         act = self._activity() if self.phase == "idle" else None
+        music = not act and self._music_glow()
         # Ready: a cool silver rim, like light on a polished edge; otherwise the state's (or thread's) colour.
         silver = "#94A3B8" if LIGHT else "#CBD5E1"
-        color = QColor(act["color"]) if act else QColor(silver) if self.phase == "idle" else QColor(self.accent)
+        color = (QColor(act["color"]) if act else QColor(MUSIC) if music else QColor(silver) if self.phase == "idle"
+                 else QColor(self.accent))
+        if LIGHT and (act or music or self.phase != "idle"):
+            color = color.darker(135)  # on frosted white a bright colour washes out: a deeper shade of it
         if self.phase != "idle":
             angle = -t * (40 + 70 * self.energy)  # live: the light runs around with the voice
         elif act:
             angle = -t * 30  # working: a slow glide
+        elif music:
+            angle = -t * 18  # a song: slower still, two soft highlights swaying round
         else:
             angle = 270.0  # ready: still, brightest along the bottom edge
         grad = QConicalGradient(QPointF(w / 2, h * 0.4), angle)
         # One colour; the motion comes from a brighter stretch travelling around. Working: a single comet
         # (a bright head, a long fading tail) rather than two highlights, calmer than a live voice.
         stops = (((0.0, 255), (0.08, 230), (0.35, 70), (0.7, 25), (0.92, 40), (1.0, 255)) if act
+                 else ((0.0, 200), (0.25, 60), (0.5, 200), (0.75, 60), (1.0, 200)) if music
                  else ((0.0, 255), (0.25, 120), (0.5, 70), (0.75, 120), (1.0, 255)))
         for pos, alpha in stops:
             c = QColor(color)
@@ -3272,11 +3290,11 @@ class VoiceWidget(QWidget):
         p.setBrush(Qt.NoBrush)
         p.setClipPath(self._body_path(w, h))
         bloom = QColor(color)
-        bloom.setAlpha(int((30 + 40 * self.energy) * live))
-        p.setPen(_round_pen(bloom, 5.0))  # a soft inner bloom, clipped to the island
+        bloom.setAlpha(min(255, int((30 + 40 * self.energy) * live * (2.2 if LIGHT else 1.0))))
+        p.setPen(_round_pen(bloom, 7.0 if LIGHT else 5.0))  # a soft inner bloom, clipped to the island
         p.drawPath(edge)
         p.setClipping(False)
-        p.setPen(_round_pen(grad, 1.5))
+        p.setPen(_round_pen(grad, 2.2 if LIGHT else 1.5))
         p.drawPath(edge)
 
     def _paint_island(self, p: QPainter, path: QPainterPath, w: float, h: float) -> None:
@@ -4141,6 +4159,8 @@ class VoiceWidget(QWidget):
         return tip
 
     def _tooltip_text(self, key: str | None) -> str:
+        if key in ("sprev", "snext"):
+            return "Previous song" if key == "sprev" else "Next song"
         if key == "phone":
             return ("Phone notifications (ntfy): replies, what needs you, limits and the recap on your phone while "
                     "you're away. Sends them over the internet: off until you turn it on")
@@ -4300,6 +4320,8 @@ class VoiceWidget(QWidget):
             self.toggle_expanded()
         elif key.startswith("tab:"):
             self.toggle_side(key[4:])
+        elif key in ("sprev", "snext"):  # the song on the second line
+            _post("/media", {"action": "previous" if key == "sprev" else "next"})
         elif key == "strip":  # the running timer: open the panel and Utils
             self.side_open["utils"] = True
             if not self.expanded:
@@ -4743,7 +4765,10 @@ class VoiceWidget(QWidget):
         return items[:3]
 
     def _strip_h(self) -> int:
-        return STRIP_H if self._strip_items() and not self._question() else 0
+        if not self._strip_items() or self._question():
+            return 0
+        spans = self._strip_layout()[0]
+        return STRIP_H + int(spans[-1][1] - spans[0][1])  # one more row for each the items wrapped onto
 
     def _strip_key(self) -> tuple | None:
         """What the second line shows, to the second (None when it isn't seen)."""
@@ -4751,12 +4776,34 @@ class VoiceWidget(QWidget):
             return None
         return tuple(item[2] for item in self._strip_items())
 
+    def _strip_layout(self) -> tuple[list[tuple[float, float, float]], dict[str, QRectF]]:
+        """Where each item of the second line starts (x, y) and how wide its text is; after the song, its previous
+        and next buttons. An item that doesn't fit what's left of the row goes on a row of its own, so its buttons
+        never fall off the island's edge."""
+        left = NOTCH_EAR + 38.0
+        right = self.nw - left
+        x, y = left, NOTCH_H - 4.0
+        fm = QFontMetrics(self.f_notch_sub)
+        spans, buttons = [], {}
+        for icon, label, shown, _done, _color in self._strip_items():
+            extra = 36 if icon == ICONS["music"] else 0
+            width = min(fm.horizontalAdvance(f"{label}  {shown}" if label else shown), 170, right - left - 19 - extra)
+            if x > left and x + 19 + width + extra > right:
+                x, y = left, y + STRIP_H
+            spans.append((x, y, width))
+            x += 19 + width + 18
+            if icon == ICONS["music"]:
+                buttons["sprev"] = QRectF(x - 14, y, 18, 18)
+                buttons["snext"] = QRectF(x + 6, y, 18, 18)
+                x += 36
+        return spans, buttons
+
     def _paint_strip(self, p: QPainter) -> None:
         """Under the notch row: each running clock, and the first timer's progress along the bottom."""
         items = self._strip_items()
-        x, y = NOTCH_EAR + 38.0, NOTCH_H - 4
         fm = QFontMetrics(self.f_notch_sub)
-        for icon, label, shown, _done, _color in items:
+        spans, buttons = self._strip_layout()
+        for (icon, label, shown, _done, _color), (x, y, width) in zip(items, spans):
             p.setFont(self.f_icon_small)
             p.setPen(_tone(QColor(251, 191, 36, 230)) if icon == ICONS["clock"] else _tone(QColor(248, 113, 113, 230))
                      if icon == ICONS["bolt"] else _tone(QColor(16, 224, 160, 230)) if icon == ICONS["music"]
@@ -4766,13 +4813,15 @@ class VoiceWidget(QWidget):
             text = f"{label}  {shown}" if label else shown
             p.setFont(self.f_notch_sub)
             p.setPen(_ink(215))
-            width = min(fm.horizontalAdvance(text), 170)
             p.drawText(QRectF(x, y, width + 2, 18), Qt.AlignLeft | Qt.AlignVCenter,
                        fm.elidedText(text, Qt.ElideMiddle, int(width + 2)))
-            x += width + 18
+        p.setFont(self.f_icon_small)
+        for key, rect in buttons.items():
+            p.setPen(_ink(int(150 + 90 * self.hover_t.get(key, 0.0) + (15 if self.pressed == key else 0))))
+            p.drawText(rect, Qt.AlignCenter, ICONS["prev" if key == "sprev" else "next"])
         progress, color = next(((done, c) for *_rest, done, c in items if done is not None), (None, ""))
         if progress is not None:
-            bar = QRectF(NOTCH_EAR + 38, NOTCH_H + STRIP_H - 7, self.nw - 2 * NOTCH_EAR - 76, 2)
+            bar = QRectF(NOTCH_EAR + 38, NOTCH_H + self._strip_h() - 7, self.nw - 2 * NOTCH_EAR - 76, 2)
             p.setPen(Qt.NoPen)
             p.setBrush(_ink(30))
             p.drawRoundedRect(bar, 1, 1)

@@ -488,6 +488,21 @@ def test_notch_shows_a_running_timer_on_a_second_line(app, monkeypatch):
     assert w._strip_items()[0][2] == "4:00"  # paused: what was left
 
 
+def test_notch_second_line_wraps_instead_of_losing_the_song_buttons(app, monkeypatch):
+    now = widget.time.time()
+    busy = {**COMPANION, "timers": [], "pomodoro": {"phase": "focus", "end": now + 1440, "left": 0.0, "length": 1500}}
+    agenda = {"events": [{"title": "Weekly sync with the platform team", "start": now + 300, "end": now + 2100,
+                          "all_day": False}]}
+    media = {"playing": True, "title": "A rather long song title", "artist": "Somebody"}
+    w = _widget({"phase": "idle", "threads": [], "companion": busy, "agenda": agenda, "media": media})
+    w.expanded = False
+    spans, buttons = w._strip_layout()
+    assert len(spans) == 3 and len({y for _x, y, _w in spans}) == 2  # two rows
+    assert w._strip_h() == 2 * widget.STRIP_H and w._target_size()[1] == widget.NOTCH_H + 2 * widget.STRIP_H
+    assert buttons["snext"].right() <= w.nw - widget.NOTCH_EAR  # still on the island, clickable
+    assert w._rects()["strip"].height() == 2 * widget.STRIP_H
+
+
 def test_timer_banner_snoozes_or_ends(app, monkeypatch):
     posted = []
     monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
@@ -641,6 +656,30 @@ def test_companion_on_the_left_plays_music_and_shows_the_day(app, monkeypatch):
     w.st["media"] = {**w.st["media"], "playing": False}
     assert not any(item[0] == widget.ICONS["music"] for item in w._strip_items())  # paused: not on the notch
     w.hide()
+
+
+def test_a_song_lights_the_notch_and_skips_from_it(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    st = {"phase": "idle", "threads": [], "companion": COMPANION,
+          "media": {"app": "Spotify", "title": "Get Lucky", "artist": "Daft Punk", "playing": True}}
+    w = _widget(st)
+    w._reveal, w.expanded = 1.0, False
+    w.show()
+    assert w._music_glow() and w._glow_moving() and w._edge_live() == 0.7  # nothing else on: the song's light
+    rects = w._rects()
+    assert {"sprev", "snext"} <= set(rects)
+    for key, action in (("sprev", "previous"), ("snext", "next")):
+        w._activate(key)
+        assert posted[-1] == ("/media", {"action": action})
+    w.grab()  # paints the second line with its buttons
+    w.st["activity"] = {"text": "Editing", "color": "#8B7CFF"}
+    assert not w._music_glow()  # an agent at work: its own light
+    w.st.pop("activity")
+    w.st["media"] = {**w.st["media"], "playing": False}
+    assert not w._music_glow() and not w._glow_moving() and "snext" not in w._rects()  # paused: still again
+    w.hide()
+    w.poller.stop()
 
 
 def test_utils_clipboard_notes_and_agent_todos(app, monkeypatch):

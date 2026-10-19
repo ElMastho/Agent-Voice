@@ -476,11 +476,44 @@ def test_call_watch_switches_to_chimes_and_back(daemon, monkeypatch):
     monkeypatch.setattr(server.calls, "apps_using_mic", fake_apps)
     monkeypatch.setattr(daemon, "_check_output", lambda: None)  # not about headphones (and no real pactl)
     monkeypatch.setattr(server.winfocus, "busy_state", lambda: "")  # not about your screen (an app full screen)
+    monkeypatch.setattr(server.media, "now_playing", lambda: None)  # no player open (never the real media keys)
     monkeypatch.setattr(server.time, "sleep", lambda s: seen.append((daemon.in_call, daemon.chime)))
     with pytest.raises(SystemExit):
         daemon._call_watch()
     # (in_call, chime) seen before each check: idle, in the Zoom call (chimes), still in it, back to voice
     assert seen == [("", False), ("Zoom", True), ("Zoom", True), ("", False)]
+
+
+def test_a_call_pauses_the_music_and_plays_it_again_after(daemon, monkeypatch):
+    from agent_voice import server
+
+    song = {"app": "Spotify", "title": "Get Lucky", "artist": "Daft Punk", "playing": True}
+    pressed = []
+
+    def toggle(action):
+        pressed.append(action)
+        song["playing"] = not song["playing"]
+        return True
+
+    monkeypatch.setattr(server.media, "now_playing", lambda: dict(song))
+    monkeypatch.setattr(server.media, "control", toggle)
+    monkeypatch.setattr(daemon, "media_control", toggle)  # not the 0.6 s refresh timer
+    daemon._pause_for_call()
+    assert pressed == ["toggle"] and not song["playing"]
+    daemon._resume_after_call()
+    assert pressed == ["toggle", "toggle"] and song["playing"]
+
+    pressed.clear()
+    song["playing"] = False
+    daemon._pause_for_call()  # nothing playing: the toggle would start it, so no key
+    daemon._resume_after_call()
+    assert pressed == []
+
+    song["playing"] = True
+    daemon._pause_for_call()
+    song["playing"] = True  # you played it again yourself during the call
+    daemon._resume_after_call()
+    assert pressed == ["toggle"] and song["playing"]
 
 
 def test_several_approvals_wait_and_are_answered_by_name(daemon):

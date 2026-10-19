@@ -501,6 +501,7 @@ class Daemon:
         # Another app holds the mic (a call): chimes instead of the voice until it ends.
         self.in_call = ""
         self._call_override = False
+        self._call_paused = False  # we paused the music when the call started: play it again when it ends
         self._ptt_release = threading.Event()
         # Every permission request still waiting (several agents can ask at once); `permission` is the one shown.
         self._perms: dict[int, dict] = {}
@@ -2477,9 +2478,29 @@ class Daemon:
                 self.in_call, self._call_override = label, False
                 if not self.state.get("chime"):
                     self.stop()  # stop talking over your call
+                self._pause_for_call()
             elif not label and self.in_call:
                 log.info("call ended")
                 self.in_call, self._call_override = "", False
+                self._resume_after_call()
+
+    def _pause_for_call(self) -> None:
+        """A song playing when a call starts: paused (the media key is a toggle, so only when it plays)."""
+        if not self.config.get("pause_media_in_calls", True):
+            return
+        now = media.now_playing()
+        if now and now.get("playing") and self.media_control("toggle"):
+            self._call_paused = True
+            log.info("music paused for the call (%s)", now.get("app", ""))
+
+    def _resume_after_call(self) -> None:
+        if not self._call_paused:
+            return
+        self._call_paused = False
+        now = media.now_playing()
+        if now and not now.get("playing"):  # not if you've played it again yourself meanwhile
+            self.media_control("toggle")
+            log.info("music resumed after the call")
 
     def _check_output(self) -> None:
         before = self._output.kind

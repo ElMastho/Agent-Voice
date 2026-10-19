@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -149,9 +150,20 @@ def test_daemon_says_how_to_update(monkeypatch):
     d = server.Daemon.__new__(server.Daemon)
     d.banner, d._release, d.state = None, {}, {}
     d._title = lambda session, source: ""
+    # Never a real git pull nor a real restart from a test (a clean checkout would do both).
+    pulls, spawned = [], []
+    monkeypatch.setattr(updater, "checkout", lambda: Path("repo"))
+    monkeypatch.setattr(updater, "git_update", lambda repo: pulls.append(repo) or why[0])
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: spawned.append(a))
+    why = ["you have local changes in the agent-voice folder"]
     d.update = {"version": "0.6.0", "url": server.RELEASES_PAGE, "how": "git", "state": ""}
     d.install_update()
-    assert "git pull" in d.banner["text"] and d.banner["kind"] == "note"
+    assert "git pull" in d.banner["text"] and d.banner["kind"] == "note" and not spawned  # how to, by hand
+    why[0] = ""
+    d.update = {"version": "0.6.0", "url": server.RELEASES_PAGE, "how": "git", "state": ""}
+    d.install_update()
+    assert "Updated to version 0.6.0" in d.banner["text"] and d.update["state"] == "installing"
+    assert pulls == [Path("repo"), Path("repo")] and spawned and "restart" in spawned[0][0]
     d.update = None
     d.install_update()
     assert "up to date" in d.banner["text"]

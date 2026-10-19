@@ -33,6 +33,7 @@ agent_voice/
   stt.py        Recorder, energy-based voice-activity listener, faster-whisper Transcriber
   lang.py       FR/EN detection (lingua + word-hint heuristic), sentence segmentation
   textclean.py  markdown -> speakable text, sentence splitting, truncation
+  i18n.py       tr() / plural() / action(): the app's words in English or French; i18n_fr.py the French
   hooks.py      per-agent payload adapters, Claude transcript parsing, spoken-text dedupe
   install.py    writes/removes hooks in each agent's config; Windows autostart
   client.py     stdlib-only HTTP client used by hooks/CLI/widget; can start the daemon detached
@@ -134,7 +135,7 @@ The daemon and widget run as `pythonw` in the background. **Code changes need a 
 
 - Python 3.10+, type hints, `from __future__ import annotations`, f-strings, `pathlib`.
 - Comments explain *why*, not what. Keep functions small; match the surrounding code.
-- User-facing text is English; spoken confirmations are short.
+- User-facing text is written in English and goes through `i18n.tr()` (`plural()` for counts): add its French to `i18n_fr.FR` (a test fails on any string without it, or with other placeholders). What's shown follows *Interface* (`i18n.LANG`); what the voice says itself follows *Voice & dictation*: `tr(text, in_lang=daemon.language)`, or `Daemon._confirm` / `_say`. Module-level constants are translated where they're shown. Spoken confirmations are short.
 - Line length ~120.
 
 ## Commits

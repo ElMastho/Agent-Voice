@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from agent_voice.i18n import plural, tr
+
 _FENCE = re.compile(r"```.*?(```|$)", re.S)
 _HTML_TAG = re.compile(r"</?[a-zA-Z][^>]*>")
 _IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
@@ -89,9 +91,9 @@ def result_label(result: dict | None) -> str:
     if not result:
         return ""
     files = int(result.get("files") or 0)
-    parts = [f"{files} file{'s' if files != 1 else ''} changed"] if files else []
+    parts = [plural(files, "{n} file changed", "{n} files changed")] if files else []
     if result.get("tests"):
-        parts.append(f"tests {result['tests']}")
+        parts.append(tr("tests {result}", result=tr(str(result["tests"]))))
     return " · ".join(parts)
 
 

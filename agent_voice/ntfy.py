@@ -15,6 +15,8 @@ import threading
 import time
 import urllib.request
 
+from agent_voice.i18n import tr
+
 log = logging.getLogger(__name__)
 
 DEFAULT_SERVER = "https://ntfy.sh"
@@ -47,7 +49,7 @@ def message(kind: str, title: str, text: str, content: str = "summary") -> dict:
     priority, tags, said = KINDS.get(kind, (3, [], ""))
     text = " ".join((text or "").split())
     if content == "titles" or not text:
-        body = f"{title} {said}." if said else title
+        body = f"{title} {tr(said)}." if said else title
     elif content == "full":
         body = text[:2000]
     else:
@@ -62,7 +64,8 @@ def batch(events: list[dict]) -> dict:
     lines = [f"• {e['title']}: {e['message']}" if not e["message"].startswith(e["title"]) else f"• {e['message']}"
              for e in events[-8:]]
     more = len(events) - 8
-    return {"title": f"agent-voice: {len(events)} updates", "message": "\n".join(lines + ([f"+{more} more"] if more > 0 else [])),
+    return {"title": tr("agent-voice: {n} updates", n=len(events)),
+            "message": "\n".join(lines + ([tr("+{n} more", n=more)] if more > 0 else [])),
             "priority": max(e["priority"] for e in events), "tags": events[-1]["tags"]}
 
 

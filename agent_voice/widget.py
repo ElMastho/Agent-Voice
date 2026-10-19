@@ -39,7 +39,9 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineE
 from agent_voice import client
 from agent_voice import companion
 from agent_voice.companion import clock as companion_clock, duration_words
-from agent_voice.config import HOME, load_config
+from agent_voice.config import HOME, load_config, load_state
+from agent_voice.i18n import action, day_name, day_time, plural, tr
+from agent_voice.i18n import set_language as set_ui_language
 from agent_voice.launch import LABELS as TARGET_LABELS
 from agent_voice.textclean import result_label, tokens_label
 
@@ -54,10 +56,11 @@ THREAD_H = 36  # a thread row: its title and state, then the start of its last r
 # Tiles that only matter when replies are spoken: hidden in chime mode.
 VOICE_ONLY = {"read"}
 # The Settings sheet (⚙ on the open notch): how it behaves, by section. Each row is a segmented switch.
-SETTINGS = (("Language", ("language",)), ("Speech", ("engine", "speed", "summary")), ("When it speaks", ("mode", "headphones")),
+SETTINGS = (("Language", ("ui_language", "language")), ("Speech", ("engine", "speed", "summary")), ("When it speaks", ("mode", "headphones")),
             ("Listening", ("wake", "handsfree", "approve")), ("Phone", ("phone",)), ("Look", ("theme",)))
 SETTING_ROWS = {
-    "language": ("Language", (("en", "English"), ("fr", "Français"))),
+    "ui_language": ("Interface", (("en", "English"), ("fr", "Français"))),
+    "language": ("Voice & dictation", (("en", "English"), ("fr", "Français"))),
     "engine": ("Voice", ENGINES),
     "speed": ("Speed", tuple((str(x), f"{x:g}×") for x in SPEEDS)),
     "summary": ("Replies", (("on", "Summary"), ("off", "In full"))),
@@ -67,7 +70,7 @@ SETTING_ROWS = {
     "handsfree": ("Auto-send", (("off", "Off"), ("on", "On"))),
     "approve": ("Approvals", (("off", "Click only"), ("on", "Voice or click"))),
     "phone": ("Notifications", (("off", "Off"), ("on", "On"))),
-    "theme": ("Theme", (("dark", "Dark"), ("light", "Light"))),
+    "theme": ("Theme", (("dark", "Dark"), ("light", "theme|Light"))),
 }
 # On/off settings: the daemon's endpoint and the status key it reports.
 SETTING_TOGGLES = {"summary": ("/summary", "summary"), "headphones": ("/headphones", "headphones_only"),
@@ -211,6 +214,15 @@ QSS_LIGHT = (
 def set_theme(name: str) -> None:
     global LIGHT
     LIGHT = name == "light"
+
+
+def ui_language(cfg: dict | None = None) -> str:
+    """The interface's language: Settings' choice (state.json), else the config's `ui_language`, else English."""
+    try:
+        chosen = load_state().get("ui_language")
+    except Exception:
+        chosen = None
+    return chosen or (cfg or {}).get("ui_language") or "en"
 
 
 def _saved_theme() -> str:
@@ -378,7 +390,15 @@ def _when_text(at: float, far: str = "%a") -> str:
     from datetime import datetime
 
     soon = at - time.time() < 20 * 3600
-    return datetime.fromtimestamp(at).strftime("%H:%M" if soon else far)
+    when = datetime.fromtimestamp(at)
+    return when.strftime("%H:%M") if soon else when.strftime(far.replace("%a", day_name(when)))
+
+
+def _focus_words(focus: str) -> str:
+    """Why replies are held, in the interface's language: 'call (Teams)', 'presenting', 'meeting'..."""
+    if focus.startswith("call (") and focus.endswith(")"):
+        return tr("call ({app})", app=focus[6:-1])
+    return tr(focus)
 
 
 def _day_time(at: float) -> str:
@@ -386,7 +406,7 @@ def _day_time(at: float) -> str:
     from datetime import datetime
 
     when = datetime.fromtimestamp(at)
-    return when.strftime("%H:%M" if when.date() == datetime.fromtimestamp(time.time()).date() else "%a %H:%M")
+    return when.strftime("%H:%M") if when.date() == datetime.fromtimestamp(time.time()).date() else day_time(when)
 
 
 def _today(now: float) -> str:
@@ -779,17 +799,18 @@ class Banner(QWidget):
         p.drawEllipse(QPointF(21, 20), 3, 3)
         p.setFont(self.f_head)
         p.setPen(_ink(150))
-        title = fixed_title or self.item.get("title") or ""
+        title = tr(fixed_title) if fixed_title else self.item.get("title") or ""
         if kind == "pending":
-            title = f"Sending to {title}" if title else "Sending"
+            title = tr("Sending to {title}", title=title) if title else tr("Sending")
         elif yours:
-            title = f"You  →  {title}" if title else "You said"
-        head = QFontMetrics(self.f_head).elidedText(title or "Reply", Qt.ElideRight, self.width() - 110)
+            title = tr("You  →  {title}", title=title) if title else tr("You said")
+        head = QFontMetrics(self.f_head).elidedText(title or tr("Reply"), Qt.ElideRight, self.width() - 110)
         p.drawText(QRectF(30, 10, self.width() - 110, 20), Qt.AlignLeft | Qt.AlignVCenter, head)
         p.setPen(_ink(90))
-        tag = "speaking" if self.holding else self.item.get("tag") or ("" if kind in BANNER_KINDS else "done")
+        tag = tr("speaking") if self.holding else tr(self.item.get("tag") or "") or (
+            "" if kind in BANNER_KINDS else tr("done"))
         if kind == "pending":
-            tag = f"in {self._left()} s · say “wait” or “cancel”"
+            tag = tr("in {n} s · say “wait” or “cancel”", n=self._left())
         elif kind in ("timer", "reminder"):
             tag = _when_text(float(self.item.get("at") or time.time()))
         p.drawText(QRectF(0, 10, self.width() - 40, 20), Qt.AlignRight | Qt.AlignVCenter, tag)
@@ -816,8 +837,9 @@ class Banner(QWidget):
             p.setFont(self.f_icon)
             p.setPen(_ink(235))
             icon, label = BANNER_BUTTONS[key]
+            label = tr(label)
             if key == "snooze":
-                label = f"+{(self.item.get('snooze') or {}).get('seconds', 300) // 60} min"
+                label = tr("+{n} min", n=(self.item.get('snooze') or {}).get('seconds', 300) // 60)
             icon_rect = QRectF(rect.x() + 8, rect.y(), 16, rect.height())
             p.drawText(icon_rect, Qt.AlignCenter, ICONS[icon])
             p.setFont(self.f_head)
@@ -944,11 +966,11 @@ class Preview(QWidget):
         if detail.get("result"):
             parts.append(result_label(detail["result"]))
         if detail.get("tokens"):
-            parts.append(f"{tokens_label(int(detail['tokens']))} tokens today")
+            parts.append(tr("{tokens} tokens today", tokens=tokens_label(int(detail['tokens']))))
         if detail.get("context") is not None:
-            parts.append(f"context {detail['context']}%")
+            parts.append(tr("context {pct}%", pct=detail['context']))
         self.head.setText("  ·  ".join(p for p in parts if p))
-        self.body.setMarkdown(detail.get("text") or "_No reply yet._")
+        self.body.setMarkdown(detail.get("text") or tr("_No reply yet._"))
         self.body.document().setTextWidth(self.WIDTH - 40)
         h = int(min(self.MAX_H, self.body.document().size().height() + 56))
         screen = (QApplication.screenAt(beside.center()) or QApplication.primaryScreen()).availableGeometry()
@@ -1005,18 +1027,18 @@ class ReplyBox(QWidget):
             self.chips[key] = chip
             row.addWidget(chip)
         row.addStretch(1)
-        self.talk = QPushButton(f"{ICONS['mic']}  Talk")
+        self.talk = QPushButton(f"{ICONS['mic']}  {tr('Talk')}")
         self.talk.setObjectName("talk")
         self.talk.setCursor(Qt.PointingHandCursor)
         self.talk.clicked.connect(self._dictate)
         row.addWidget(self.talk)
         self.folder = QLineEdit()
-        self.folder.setPlaceholderText("Folder: pick one with the button, or type its path")
+        self.folder.setPlaceholderText(tr("Folder: pick one with the button, or type its path"))
         self.folder.installEventFilter(self)
         self._picking = False  # the folder dialog is open: losing the focus to it mustn't close the box
         self.recent: list[str] = []
         self._complete_folders()
-        self.pick = QPushButton(f"{ICONS['folder']}  Folders")
+        self.pick = QPushButton(f"{ICONS['folder']}  {tr('Folders')}")
         self.pick.setObjectName("pick")
         self.pick.setCursor(Qt.PointingHandCursor)
         self.pick.clicked.connect(self._folder_menu)
@@ -1028,12 +1050,12 @@ class ReplyBox(QWidget):
         frow.addWidget(self.pick)
         self.target = ""
         self.edit = QPlainTextEdit()
-        self.edit.setPlaceholderText("Your reply")
+        self.edit.setPlaceholderText(tr("Your reply"))
         self.edit.installEventFilter(self)
-        self.hint = QLabel("Enter to send · Shift+Enter for a new line · Esc to close")
+        self.hint = QLabel(tr("Enter to send · Shift+Enter for a new line · Esc to close"))
         # Later instead of now: "14:00", "in 30 min", "tomorrow 9am" (a scheduled prompt).
         self.when = QLineEdit()
-        self.when.setPlaceholderText("Send now, or at 14:00 / in 30 min")
+        self.when.setPlaceholderText(tr("Send now, or at 14:00 / in 30 min"))
         self.when.setFixedWidth(200)
         self.when.installEventFilter(self)
         bottom = QWidget()
@@ -1065,10 +1087,10 @@ class ReplyBox(QWidget):
         if item.get("session") != self.session:
             self.edit.clear()  # a draft belongs to its conversation
         self.session = item.get("session", "")
-        self.title.setText(f"Reply to {item.get('title') or 'the conversation'}")
+        self.title.setText(tr("Reply to {title}", title=item.get('title') or tr('the conversation')))
         self.options.hide()
         self.folder_row.hide()
-        self.edit.setPlaceholderText("Your reply")
+        self.edit.setPlaceholderText(tr("Your reply"))
         self._show(anchor, width, 132)
 
     def open_new(self, targets: list[str], default: dict, anchor: QRectF, width: int) -> None:
@@ -1078,12 +1100,12 @@ class ReplyBox(QWidget):
             self.folder.setText(default.get("cwd", ""))
         self.recent = [c for c in default.get("recent") or [] if c]
         self.session = NEW
-        self.title.setText("New thread")
+        self.title.setText(tr("New thread"))
         for key, chip in self.chips.items():
             chip.setVisible(key in targets)
         self._pick(default.get("target") if default.get("target") in targets else (targets or [""])[0])
         self.options.show()
-        self.edit.setPlaceholderText("What should it do?" if targets else "No agent found to start a thread with")
+        self.edit.setPlaceholderText(tr("What should it do?") if targets else tr("No agent found to start a thread with"))
         self._show(anchor, width, 196)
 
     def _pick(self, key: str) -> None:
@@ -1114,7 +1136,7 @@ class ReplyBox(QWidget):
             act.triggered.connect(lambda _=False, p=path: self._use_folder(p))
         if self.recent:
             menu.addSeparator()
-        menu.addAction("Browse…").triggered.connect(self._browse)
+        menu.addAction(tr("Browse…")).triggered.connect(self._browse)
         self._picking = True
         menu.exec(self.pick.mapToGlobal(self.pick.rect().bottomLeft()))
         self._picking = False
@@ -1127,7 +1149,7 @@ class ReplyBox(QWidget):
         self._picking = True
         try:
             start = self.folder.text().strip() or str(Path.home())
-            chosen = QFileDialog.getExistingDirectory(self, "Where should the new thread work?", start)
+            chosen = QFileDialog.getExistingDirectory(self, tr("Where should the new thread work?"), start)
         finally:
             self._picking = False
         if chosen:
@@ -1227,7 +1249,7 @@ def _when(at: float) -> str:
     then, now = datetime.fromtimestamp(at), datetime.fromtimestamp(time.time())
     if then.date() == now.date():
         return then.strftime("%H:%M")
-    return then.strftime("%a %H:%M" if (now - then).days < 6 else "%d %b").lstrip("0")
+    return day_time(then) if (now - then).days < 6 else then.strftime("%d/%m").lstrip("0")
 
 
 class HistoryBox(QWidget):
@@ -1253,9 +1275,9 @@ class HistoryBox(QWidget):
         layout = QVBoxLayout(box)
         layout.setContentsMargins(16, 10, 16, 12)
         layout.setSpacing(8)
-        self.title = QLabel("History · every conversation, on this PC")
+        self.title = QLabel(tr("History · every conversation, on this PC"))
         self.query = QLineEdit()
-        self.query.setPlaceholderText("Search what you asked and what they answered (login bug, migration, Codex...)")
+        self.query.setPlaceholderText(tr("Search what you asked and what they answered (login bug, migration, Codex...)"))
         self.query.textChanged.connect(lambda _text: self._timer.start())
         self.query.installEventFilter(self)
         self.results = QListWidget()
@@ -1268,9 +1290,9 @@ class HistoryBox(QWidget):
         self.body.setOpenLinks(False)
         self.body.document().setDefaultStyleSheet(_qss(
             "code, pre { font-family: Consolas, Menlo, monospace; background-color: #1E1E24; } a { color: #8B7CFF; }"))
-        self.copy = QPushButton(f"{ICONS['copy']}  Copy")
+        self.copy = QPushButton(f"{ICONS['copy']}  {tr('Copy')}")
         self.copy.clicked.connect(self._copy)
-        self.open_thread = QPushButton(f"{ICONS['open']}  Open the thread")
+        self.open_thread = QPushButton(f"{ICONS['open']}  {tr('Open the thread')}")
         self.open_thread.clicked.connect(self._open_thread)
         for button in (self.copy, self.open_thread):
             button.setObjectName("act")
@@ -1356,7 +1378,7 @@ class HistoryBox(QWidget):
         self.results.clear()
         self.rows = rows
         for row in rows:
-            who = "You" if row["kind"] == "you" else (row.get("title") or row.get("agent") or "Agent")
+            who = tr("You") if row["kind"] == "you" else (row.get("title") or row.get("agent") or tr("Agent"))
             where = f" → {row['title']}" if row["kind"] == "you" and row.get("title") else ""
             snippet = row.get("snippet", "").replace("[", "").replace("]", "")
             QListWidgetItem(f"{who}{where} · {_when(row['at'])}\n{snippet}", self.results)
@@ -1365,9 +1387,9 @@ class HistoryBox(QWidget):
             return
         self.entry = {}
         self.head.setText("")
-        self.body.setMarkdown("_agent-voice isn't running._" if offline else
-                              "_History is off (`history.enabled` in the config)._" if off else
-                              "_Nothing found._" if self._asked else "_Nothing yet: your conversations show up here._")
+        self.body.setMarkdown(tr("_agent-voice isn't running._") if offline else
+                              tr("_History is off (`history.enabled` in the config)._") if off else
+                              tr("_Nothing found._") if self._asked else tr("_Nothing yet: your conversations show up here._"))
 
     def _pick(self, row: int) -> None:
         rows = getattr(self, "rows", [])
@@ -1376,7 +1398,7 @@ class HistoryBox(QWidget):
 
     def _present(self, entry: dict) -> None:
         self.entry = entry
-        who = "You asked" if entry["kind"] == "you" else f"{entry.get('agent') or 'The agent'} answered"
+        who = tr("You asked") if entry["kind"] == "you" else tr("{agent} answered", agent=entry.get('agent') or tr('The agent'))
         self.head.setText(f"{who} · {entry.get('title') or ''} · {_when(entry['at'])}")
         self.body.setMarkdown(entry.get("text") or "")
         self.body.verticalScrollBar().setValue(0)
@@ -1385,8 +1407,8 @@ class HistoryBox(QWidget):
     def _copy(self) -> None:
         if self.entry:
             QApplication.clipboard().setText(self.entry.get("text", ""))
-            self.copy.setText(f"{ICONS['check']}  Copied")
-            QTimer.singleShot(1200, lambda: self.copy.setText(f"{ICONS['copy']}  Copy"))
+            self.copy.setText(f"{ICONS['check']}  {tr('Copied')}")
+            QTimer.singleShot(1200, lambda: self.copy.setText(f"{ICONS['copy']}  {tr('Copy')}"))
 
     def _open_thread(self) -> None:
         if self.entry.get("session"):
@@ -1454,7 +1476,7 @@ class QuickInput(QWidget):
         re-asserts "on top" and would cover it."""
         self.mode = mode
         self.added = 0
-        self.edit.setPlaceholderText(self.HINTS[mode])
+        self.edit.setPlaceholderText(tr(self.HINTS[mode]))
         self.resize(max(300, beside.width()), 52)
         screen = (QApplication.screenAt(beside.center()) or QApplication.primaryScreen()).availableGeometry()
         y = beside.bottom() + 8
@@ -1476,7 +1498,7 @@ class QuickInput(QWidget):
             _post("/todo", {"action": "add", "text": text})
             self.edit.clear()  # the next one: Enter adds each, Esc (or a click elsewhere) closes
             self.added += 1
-            self.edit.setPlaceholderText(f"Added {self.added} · the next one, or Esc")
+            self.edit.setPlaceholderText(tr("Added {n} · the next one, or Esc", n=self.added))
             return
         elif self.mode == "category":
             _post("/todo", {"action": "category", "id": self.item_id, "category": text})
@@ -1674,7 +1696,7 @@ class SidePanel(QWidget):
         hits: dict[str, QRectF] = {}
         data, now = self.data(), time.time()
         y = 10.0
-        self._text(p, QRectF(16, y, 150, 22), self.TITLES[self.name], self.f_head, 230)
+        self._text(p, QRectF(16, y, 150, 22), tr(self.TITLES[self.name]), self.f_head, 230)
         hits["menu"] = QRectF(self.W - 38, y - 1, 24, 24)
         self._round_button(p, hits["menu"], ICONS["more"], "menu")
         if self.name == "utils":  # say it: a timer, a to-do, a reminder, a note...
@@ -1690,7 +1712,7 @@ class SidePanel(QWidget):
             if self.name == "utils":
                 self._full_button(p, hits, QPointF(10, top), card, ICONS["full"])
         if not cards:
-            self._text(p, QRectF(16, y, self.W - 32, 20), "Choose what to show with ⋯", self.f_small, 120)
+            self._text(p, QRectF(16, y, self.W - 32, 20), tr("Choose what to show with ⋯"), self.f_small, 120)
             y += 26
         # Scrolled out of sight (under the header, or past the bottom): not clickable.
         self.hits = {k: r for k, r in hits.items() if k in ("mic", "menu") or (
@@ -1736,7 +1758,7 @@ class SidePanel(QWidget):
     def _full_button(self, p, hits, corner: QPointF, card: str, icon: str) -> None:
         """Just after a card's title (its right side has the card's own buttons): full screen, or back."""
         key = f"full:{card}"
-        x = corner.x() + 32 + QFontMetrics(self.f_head).horizontalAdvance(self.LABELS[card]) + 4
+        x = corner.x() + 32 + QFontMetrics(self.f_head).horizontalAdvance(tr(self.LABELS[card])) + 4
         hits[key] = QRectF(x, corner.y() + 6, 18, 18)
         self._text(p, hits[key], icon, self.f_icon, 220 if self.hot == key else 80, Qt.AlignCenter)
 
@@ -1755,7 +1777,7 @@ class SidePanel(QWidget):
     def _card_timer(self, p, hits, area: QRectF, data: dict, now: float) -> float:
         timers = (data.get("timers") or [])[:self.TIMER_ROWS]
         rect = QRectF(area.x(), area.y(), area.width(), 30 + len(timers) * 42 + 30)
-        self._card(p, rect, ICONS["clock"], "Timer")
+        self._card(p, rect, ICONS["clock"], tr("Timer"))
         y = rect.y() + 30
         for t in timers:
             left = max(0.0, t["end"] - now) if t["end"] else float(t["left"])
@@ -1783,7 +1805,7 @@ class SidePanel(QWidget):
         for i, minutes in enumerate((*self.PRESETS, 0)):
             key = f"preset:{minutes}" if minutes else "tcustom"
             hits[key] = QRectF(rect.x() + 12 + i * (w + gap), y + 2, w, 20)
-            label = "…" if not minutes else "1 h" if minutes == 60 else f"{minutes}m"
+            label = "…" if not minutes else tr("1 h") if minutes == 60 else f"{minutes}m"
             self._chip(p, hits[key], label, key)
         return rect.bottom()
 
@@ -1795,15 +1817,15 @@ class SidePanel(QWidget):
             pomo.get("focus_length") or 1500)
         today = int(pomo.get("today") or 0) if pomo.get("day") == _today(now) else 0
         rect = QRectF(area.x(), area.y(), area.width(), 72)
-        self._card(p, rect, ICONS["bolt"], "Pomodoro", f"{today} today" if today else "")
+        self._card(p, rect, ICONS["bolt"], tr("Pomodoro"), tr("{n} today", n=today) if today else "")
         y = rect.y() + 30
         color = self.BREAK if phase in ("short", "long") else self.TOMATO
         self._text(p, QRectF(rect.x() + 12, y, 96, 24), companion_clock(left), self.f_big,
                    240 if running else 150 if phase else 110, color=color if phase else "")
         every = int(pomo.get("every") or 4)
-        label = ({"focus": f"Focus · {int(pomo.get('round') or 0) % every + 1} of {every}", "short": "Short break",
-                  "long": "Long break"}.get(phase, "25 min focus, then a break") + ("" if running or not phase
-                                                                                     else " · paused"))
+        label = ({"focus": tr("Focus · {n} of {every}", n=int(pomo.get('round') or 0) % every + 1, every=every), "short": tr("Short break"),
+                  "long": tr("Long break")}.get(phase, "25 min focus, then a break") + ("" if running or not phase
+                                                                                     else tr(" · paused")))
         self._text(p, QRectF(rect.x() + 104, y, rect.width() - 104 - (96 if phase else 40), 24), label,
                    self.f_small, 150)
         buttons = [("ptoggle", ICONS["pause" if running else "play"], 34 if not phase else 90)]
@@ -1827,7 +1849,7 @@ class SidePanel(QWidget):
         running = bool(sw.get("start"))
         elapsed = float(sw.get("elapsed") or 0) + (now - sw["start"] if running else 0)
         rect = QRectF(area.x(), area.y(), area.width(), 64)
-        self._card(p, rect, ICONS["stopwatch"], "Stopwatch")
+        self._card(p, rect, ICONS["stopwatch"], tr("Stopwatch"))
         y = rect.y() + 30
         self._text(p, QRectF(rect.x() + 12, y, 120, 26), companion_clock(elapsed), self.f_big,
                    240 if running else 150 if elapsed else 90)
@@ -1848,14 +1870,14 @@ class SidePanel(QWidget):
         rect = QRectF(area.x(), area.y(), area.width(), bottom - area.y() + 26)
         left = sum(1 for t in todos if not t["done"])
         done = any(t["done"] for t in todos)
-        self._card(p, rect, ICONS["list"], "To-do", f"{left} left" if todos and not done else "")
+        self._card(p, rect, ICONS["list"], tr("To-do"), tr("{n} left", n=left) if todos and not done else "")
         if done:
             hits["tclear"] = QRectF(rect.right() - 82, rect.y() + 6, 72, 18)
-            self._chip(p, hits["tclear"], "Clear done", "tclear")
+            self._chip(p, hits["tclear"], tr("Clear done"), "tclear")
         bottom, shown = self._todo_columns(p, hits, area, sections, wide)
         more = len(todos) - shown
         self._add_row(p, hits, QRectF(rect.x() + 4, bottom, rect.width() - 8, 22), "todo_add",
-                      "Add" + (f"  ·  {more} more" if more > 0 else ""))
+                      tr("Add") + (tr("  ·  {n} more", n=more) if more > 0 else ""))
         return rect.bottom()
 
     def _todo_columns(self, p, hits, area: QRectF, sections: list, wide: bool) -> tuple[float, int]:
@@ -1881,11 +1903,11 @@ class SidePanel(QWidget):
         """"Yours" or "From your agents": a line of its own, then each category's items under its name."""
         y, shown = area.y(), 0
         left = sum(1 for _name, items in groups for t in items if not t["done"])
-        self._text(p, QRectF(area.x() + 10, y, area.width() - 20, 18), title + (f"  ·  {left}" if left else ""),
+        self._text(p, QRectF(area.x() + 10, y, area.width() - 20, 18), tr(title) + (f"  ·  {left}" if left else ""),
                    self.f_small, 150)
         if title == "From your agents":  # their follow-ups pile up: all gone in one click (yours stay)
             hits["tagents"] = QRectF(area.right() - 58, y, 52, 18)
-            self._chip(p, hits["tagents"], "Clear", "tagents")
+            self._chip(p, hits["tagents"], tr("Clear"), "tagents")
         y += 20
         for name, items in groups:
             if shown >= budget:
@@ -1911,7 +1933,7 @@ class SidePanel(QWidget):
             if t["done"]:
                 self._text(p, box, ICONS["check"], self.f_icon, 230, Qt.AlignCenter, "#00110A")
         source = t.get("source") or ""
-        tag = "" if source in ("", "you") else AGENT_NAMES.get(source, source.capitalize())
+        tag = "" if source in ("", "you") else tr(AGENT_NAMES.get(source, source.capitalize()))
         text_w = row.width() - 34 - 26 - (QFontMetrics(self.f_small).horizontalAdvance(tag) + 8 if tag else 0)
         self._text(p, QRectF(row.x() + 30, y, text_w, 22), t["text"], self.f_text, 110 if t["done"] else 220,
                    strike=t["done"])
@@ -1933,11 +1955,11 @@ class SidePanel(QWidget):
 
     def _card_notes(self, p, hits, area: QRectF, data: dict, now: float) -> float:
         notes = (data.get("notes") or [])[:self.NOTE_ROWS]
-        rect = self._rows_card(p, hits, area, ICONS["note"], "Notes", max(1, len(notes)),
-                               "say “note: …”" if not notes else "", add="note")
+        rect = self._rows_card(p, hits, area, ICONS["note"], tr("Notes"), max(1, len(notes)),
+                               tr("say “note: …”") if not notes else "", add="note")
         y = rect.y() + 30
         if not notes:
-            self._text(p, QRectF(rect.x() + 14, y, rect.width() - 28, 22), "One line, kept and searchable in History",
+            self._text(p, QRectF(rect.x() + 14, y, rect.width() - 28, 22), tr("One line, kept and searchable in History"),
                        self.f_small, 110)
             y += 24
         for n in notes:
@@ -1948,17 +1970,17 @@ class SidePanel(QWidget):
             if self.hot in (key, f"nrow:{n['id']}"):
                 self._text(p, hits[key], ICONS["close"], self.f_icon, 200 if self.hot == key else 110, Qt.AlignCenter)
             y += 24
-        self._add_row(p, hits, QRectF(rect.x() + 4, y, rect.width() - 8, 22), "note_add", "Add a note")
+        self._add_row(p, hits, QRectF(rect.x() + 4, y, rect.width() - 8, 22), "note_add", tr("Add a note"))
         return rect.bottom()
 
     def _card_clipboard(self, p, hits, area: QRectF, data: dict, now: float) -> float:
         clips = self.owner.clips[:self.CLIP_ROWS]
-        rect = self._rows_card(p, hits, area, ICONS["paste"], "Clipboard", max(1, len(clips)),
-                               "click to copy · ➤ to a thread" if clips else "")
+        rect = self._rows_card(p, hits, area, ICONS["paste"], tr("Clipboard"), max(1, len(clips)),
+                               tr("click to copy · ➤ to a thread") if clips else "")
         y = rect.y() + 30
         if not clips:
             self._text(p, QRectF(rect.x() + 14, y, rect.width() - 28, 22),
-                       "What you copy shows here (kept in memory only)", self.f_small, 110)
+                       tr("What you copy shows here (kept in memory only)"), self.f_small, 110)
         for i, text in enumerate(clips):
             hits[f"clip:{i}"] = QRectF(rect.x() + 4, y, rect.width() - 36, 22)
             self._text(p, QRectF(rect.x() + 14, y, rect.width() - 50, 22), " ".join(text.split()), self.f_text,
@@ -1976,19 +1998,19 @@ class SidePanel(QWidget):
         lines = sum(1 + max(1, len(windows)) for _agent, windows in rows)
         rect = QRectF(area.x(), area.y(), area.width(), 30 + lines * 20 + (6 if rows else 30))
         estimated = any(w.get("est") for _agent, windows in rows for w in windows.values())
-        self._card(p, rect, ICONS["usage"], "Usage", "")
+        self._card(p, rect, ICONS["usage"], tr("Usage"), "")
         if rows:
             spin = bool(self.owner.st.get("limits_refreshing"))
             hits["urefresh"] = QRectF(rect.right() - 30, rect.y() + 5, 20, 20)
             self._text(p, hits["urefresh"], ICONS["replay"], self.f_icon,
                        230 if spin or self.hot == "urefresh" else 120, Qt.AlignCenter)
             self._text(p, QRectF(rect.right() - 170, rect.y() + 6, 136, 18),
-                       "≈ from transcripts" if estimated else "used · resets", self.f_small, 110,
+                       tr("≈ from transcripts") if estimated else tr("used · resets"), self.f_small, 110,
                        Qt.AlignRight | Qt.AlignVCenter)
         y = rect.y() + 30
         if not rows:
             self._text(p, QRectF(rect.x() + 14, y, rect.width() - 28, 22),
-                       "Claude Code's and Codex's limits, once they report them", self.f_small, 110)
+                       tr("Claude Code's and Codex's limits, once they report them"), self.f_small, 110)
         for agent, windows in rows:
             self._text(p, QRectF(rect.x() + 14, y, rect.width() - 28, 18), LIMIT_NAMES.get(agent, agent.capitalize()),
                        self.f_text, 210)
@@ -1996,11 +2018,11 @@ class SidePanel(QWidget):
             if not windows:  # Claude Code without numbers yet
                 off = self.owner.st.get("usage_line") == "off"
                 self._text(p, QRectF(rect.x() + 14, y, rect.width() - (100 if off else 28), 18),
-                           "Show its 5-hour and weekly limits" if off else "After its next reply, or its /usage",
+                           tr("Show its 5-hour and weekly limits") if off else tr("After its next reply, or its /usage"),
                            self.f_small, 120)
                 if off:
                     hits["uon"] = QRectF(rect.right() - 80, y, 70, 18)
-                    self._chip(p, hits["uon"], "Turn on", "uon", 40)
+                    self._chip(p, hits["uon"], tr("Turn on"), "uon", 40)
                 y += 20
                 continue
             for window in ("five_hour", "seven_day"):
@@ -2008,7 +2030,7 @@ class SidePanel(QWidget):
                 if not w:
                     continue
                 pct = w.get("pct")
-                self._text(p, QRectF(rect.x() + 14, y, 34, 18), "5h" if window == "five_hour" else "week",
+                self._text(p, QRectF(rect.x() + 14, y, 34, 18), tr("5h") if window == "five_hour" else tr("week"),
                            self.f_small, 120)
                 if p is not None:
                     bar = QRectF(rect.x() + 52, y + 8, rect.width() - 150, 3)
@@ -2020,7 +2042,7 @@ class SidePanel(QWidget):
                         p.drawRoundedRect(QRectF(bar.x(), bar.y(), bar.width() * min(1.0, pct / 100), 3), 1.5, 1.5)
                 # Estimated from the transcripts: "≈"; not calibrated yet: the tokens used in the window instead.
                 amount = (f"{'≈' if w.get('est') else ''}{pct}%" if pct is not None
-                          else f"{tokens_label(int(w.get('tokens') or 0))} tok")
+                          else tr("{tokens} tok", tokens=tokens_label(int(w.get('tokens') or 0))))
                 resets = f" · {_when_text(w['resets'])}" if w.get("resets") else ""
                 self._text(p, QRectF(rect.right() - 94, y, 84, 18), amount + resets, self.f_small, 170,
                            Qt.AlignRight | Qt.AlignVCenter)
@@ -2030,14 +2052,14 @@ class SidePanel(QWidget):
     def _card_media(self, p, hits, area: QRectF, data: dict, now: float) -> float:
         playing = self.owner.st.get("media")
         rect = QRectF(area.x(), area.y(), area.width(), 84 if playing else 58)
-        self._card(p, rect, ICONS["music"], (playing or {}).get("app") or "Now playing",
-                   ("playing" if playing.get("playing") else "paused") if playing and playing.get("title") else "")
+        self._card(p, rect, ICONS["music"], (playing or {}).get("app") or tr("Now playing"),
+                   (tr("playing") if playing.get("playing") else tr("paused")) if playing and playing.get("title") else "")
         y = rect.y() + 30
         if not playing:
             self._text(p, QRectF(rect.x() + 14, y, rect.width() - 28, 22),
-                       "Spotify or YouTube shows here while it's open", self.f_small, 110)
+                       tr("Spotify or YouTube shows here while it's open"), self.f_small, 110)
             return rect.bottom()
-        title = playing.get("title") or "Paused"
+        title = playing.get("title") or tr("Paused")
         self._text(p, QRectF(rect.x() + 14, y, rect.width() - 110, 22), title, self.f_head, 235)
         self._text(p, QRectF(rect.x() + 14, y + 22, rect.width() - 110, 18), playing.get("artist") or "",
                    self.f_small, 140)
@@ -2060,15 +2082,15 @@ class SidePanel(QWidget):
         items += [(s["at"], "prompt", s) for s in self.owner._schedules()]
         items.sort(key=lambda item: item[0])
         shown = items[:self.AGENDA_ROWS]
-        rect = self._rows_card(p, hits, area, ICONS["calendar"], "Agenda", max(1, len(shown)),
+        rect = self._rows_card(p, hits, area, ICONS["calendar"], tr("Agenda"), max(1, len(shown)),
                                info.get("error") or "", add="agenda")
         if sources and not info.get("error"):
             hits["calunlink"] = QRectF(rect.right() - 70, rect.y() + 6, 60, 18)
-            self._chip(p, hits["calunlink"], "Unlink", "calunlink")
+            self._chip(p, hits["calunlink"], tr("Unlink"), "calunlink")
         y = rect.y() + 30
         if not shown:
             self._text(p, QRectF(rect.x() + 14, y, rect.width() - 28, 22),
-                       "Nothing else today" if sources else "Your meetings, reminders and scheduled prompts",
+                       tr("Nothing else today") if sources else tr("Your meetings, reminders and scheduled prompts"),
                        self.f_small, 110)
             y += 24
         for at, kind, item in shown:
@@ -2077,7 +2099,7 @@ class SidePanel(QWidget):
             if kind == "meeting":
                 now_on = item["start"] <= now < item["end"] and not item["all_day"]
                 past = item["end"] <= now and not item["all_day"]
-                when = "now" if now_on else "all day" if item["all_day"] else _when_text(item["start"])
+                when = tr("now") if now_on else tr("all day") if item["all_day"] else _when_text(item["start"])
                 text, icon = item["title"] + (f"  ·  {item['location']}" if item.get("location") else ""), "calendar"
             elif kind == "reminder":
                 when, text, icon = _day_time(at), item["text"], "bell"
@@ -2098,9 +2120,9 @@ class SidePanel(QWidget):
                     self._text(p, hits[key], ICONS["close"], self.f_icon, 200 if self.hot == key else 110, Qt.AlignCenter)
             y += 24
         half = (rect.width() - 8) / 2
-        self._add_row(p, hits, QRectF(rect.x() + 4, y, half, 22), "rem_add", "Reminder")
+        self._add_row(p, hits, QRectF(rect.x() + 4, y, half, 22), "rem_add", tr("Reminder"))
         self._add_row(p, hits, QRectF(rect.x() + 4 + half, y, half, 22), "cal_add",
-                      "Calendar link" if not sources else "Another calendar")
+                      tr("Calendar link") if not sources else tr("Another calendar"))
         return rect.bottom()
 
     def _card_activity(self, p, hits, area: QRectF, data: dict, now: float) -> float:
@@ -2108,12 +2130,12 @@ class SidePanel(QWidget):
         day = self.owner.st.get("day") or {}
         focus = self.owner.st.get("focus")
         rect = QRectF(area.x(), area.y(), area.width(), 160)
-        self._card(p, rect, ICONS["chat"], "Activity", f"focus: {focus}, holding replies" if focus else "today")
+        self._card(p, rect, ICONS["chat"], tr("Activity"), tr("focus: {why}, holding replies", why=_focus_words(focus)) if focus else tr("today"))
         if p is None:
             return rect.bottom()
         x, y, w = rect.x() + 10, rect.y() + 30, rect.width() - 20
-        cards = (("Turns", str(day.get("turns", 0))), ("Threads", str(day.get("threads", 0))),
-                 ("Tokens", tokens_label(int(day.get("tokens") or 0))))
+        cards = ((tr("Turns"), str(day.get("turns", 0))), (tr("Threads"), str(day.get("threads", 0))),
+                 (tr("Tokens"), tokens_label(int(day.get("tokens") or 0))))
         gap = 6
         cw = (w - 2 * gap) / 3
         for i, (label, value) in enumerate(cards):
@@ -2206,9 +2228,9 @@ class SidePanel(QWidget):
             menu.addAction(act)
         if names:
             menu.addSeparator()
-        menu.addAction("New category…").triggered.connect(lambda: self._ask_category(item_id))
+        menu.addAction(tr("New category…")).triggered.connect(lambda: self._ask_category(item_id))
         if current:
-            menu.addAction("No category").triggered.connect(
+            menu.addAction(tr("No category")).triggered.connect(
                 lambda: _post("/todo", {"action": "category", "id": item_id, "category": ""}))
         menu.exec(at)
 
@@ -2291,7 +2313,7 @@ class SidePanel(QWidget):
         menu.setStyleSheet(_qss(MENU_STYLE))
         chosen = self.owner.side_widgets[self.name]
         for card in SIDE_CARDS[self.name]:
-            act = QAction(self.LABELS[card], menu)
+            act = QAction(tr(self.LABELS[card]), menu)
             act.setCheckable(True)
             act.setChecked(card in chosen)
             act.triggered.connect(lambda on, c=card: self.owner.set_side_widget(self.name, c, on))
@@ -2428,6 +2450,9 @@ class VoiceWidget(QWidget):
 
         cfg = load_config()
         self.hotkeys = cfg["hotkeys"]
+        # The interface's language, read once before any text is built (a change relaunches the widget, like the theme).
+        self._ui_lang = ui_language(cfg)
+        set_ui_language(self._ui_lang)
 
         self.st: dict = {}
         self.phase = "offline"
@@ -2579,8 +2604,8 @@ class VoiceWidget(QWidget):
         perm = self.st.get("permission")
         if perm:
             summary = perm["summary"]
-            return {"question": summary[:1].upper() + summary[1:] + "?", "header": "Permission",
-                    "options": ["Allow once", "Deny"], "more": 0, "agent": "claude", "permission": perm["id"]}
+            return {"question": summary[:1].upper() + summary[1:] + "?", "header": tr("Permission"),
+                    "options": [tr("Allow once"), tr("Deny")], "more": 0, "agent": "claude", "permission": perm["id"]}
         return self.st.get("question") or None
 
     @property
@@ -2760,6 +2785,12 @@ class VoiceWidget(QWidget):
         if changed:
             for side in (*self.sides.values(), self.full):
                 side.refresh()
+        lang = self.st.get("ui_language")
+        if lang and lang != self._ui_lang:
+            self._ui_lang = lang
+            set_ui_language(lang)
+            self._relaunch()  # every box and label is rebuilt in the new language
+            return
         boot = self.st.get("boot")
         if boot and self._boot and boot != self._boot:
             self._relaunch()  # the service restarted (an update, `agent-voice restart`): come back with its code
@@ -2930,26 +2961,26 @@ class VoiceWidget(QWidget):
         """Contextual main button: (id, icon, tooltip)."""
         hk = self.hotkeys
         if self.phase == "offline":
-            return ("start", ICONS["power"], "Start the voice service")
+            return ("start", ICONS["power"], tr("Start the voice service"))
         if self.phase == "speaking":
-            return ("reply", ICONS["skip"], f"Skip and answer now ({_hotkey_label(hk.get('reply', ''))})")
+            return ("reply", ICONS["skip"], tr("Skip and answer now ({key})", key=_hotkey_label(hk.get('reply', ''))))
         if self.phase in ("waiting", "recording"):
-            return ("stop", ICONS["stop"], f"Cancel ({_hotkey_label(hk.get('stop', ''))})")
+            return ("stop", ICONS["stop"], tr("Cancel ({key})", key=_hotkey_label(hk.get('stop', ''))))
         if self.phase == "transcribing":
             return None
         if self._output() == "silent":
-            back = "Chimes" if self.st.get("dnd_from") == "chime" else "Voice"
-            return ("undnd", ICONS["bell"], f"Do not disturb is on: click to go back to {back}")
-        return ("reply", ICONS["mic"], f"Talk now ({_hotkey_label(hk.get('reply', ''))})")
+            back = tr("Chimes") if self.st.get("dnd_from") == "chime" else tr("Voice")
+            return ("undnd", ICONS["bell"], tr("Do not disturb is on: click to go back to {mode}", mode=back))
+        return ("reply", ICONS["mic"], tr("Talk now ({key})", key=_hotkey_label(hk.get('reply', ''))))
 
     def _tiles(self) -> list[tuple[str, str, str, str, bool]]:
         """(id, icon, label, hotkey, active): what isn't about one thread (each thread has its own talk, type,
         replay and copy buttons; the switches are in Settings)."""
         hk = self.hotkeys
         tiles = [
-            ("hold", ICONS["mic"], "Hold to talk", hk.get("push_to_talk", ""), self.pressed == "hold"),
-            ("stop", ICONS["stop"], "Stop", hk.get("stop", ""), False),
-            ("read", ICONS["read"], "Read selection", hk.get("read_selection", ""), False),
+            ("hold", ICONS["mic"], tr("Hold to talk"), hk.get("push_to_talk", ""), self.pressed == "hold"),
+            ("stop", ICONS["stop"], tr("Stop"), hk.get("stop", ""), False),
+            ("read", ICONS["read"], tr("Read selection"), hk.get("read_selection", ""), False),
         ]
         if self._output() != "voice":
             tiles = [t for t in tiles if t[0] not in VOICE_ONLY]  # nothing to hear: their tiles go
@@ -3025,7 +3056,7 @@ class VoiceWidget(QWidget):
         state = (self.st.get("update") or {}).get("state")
         if not self.st.get("update"):
             return ""
-        return {"downloading": "Updating…", "installing": "Restarting…"}.get(state, "Update")
+        return {"downloading": tr("Updating…"), "installing": tr("Restarting…")}.get(state, "Update")
 
     def start_update(self) -> None:
         """The Update chip / tray item: install it (release build) or say how (source checkout, other OS)."""
@@ -3142,7 +3173,7 @@ class VoiceWidget(QWidget):
                 items.append(("phone", y))
                 y += self._phone_h()
             y += 6
-        items.append(("head", "Agents", y))
+        items.append(("head", tr("Agents"), y))
         y += 18
         items.append(("agents", y))
         rows = -(-(len(AGENT_LABELS) + 1) // self._agents_per_row())
@@ -3178,6 +3209,8 @@ class VoiceWidget(QWidget):
             return "light" if LIGHT else "dark"
         if name == "language":
             return st.get("language") or "en"
+        if name == "ui_language":
+            return st.get("ui_language") or self._ui_lang
         key = SETTING_TOGGLES[name][1]
         return "on" if st.get(key, name in ("summary", "approve")) else "off"  # summaries and approvals start on
 
@@ -3209,14 +3242,17 @@ class VoiceWidget(QWidget):
             _post("/phone", {"on": on})
             if on:
                 self.phone_folded = False  # just turned on: the QR code, to scan it
-                self._note("Phone notifications on: scan the QR code in Settings with the ntfy app (iPhone or "
-                           "Android). Whoever has that link can read them, so keep it to yourself.")
+                self._note(tr("Phone notifications on: scan the QR code in Settings with the ntfy app (iPhone or "
+                           "Android). Whoever has that link can read them, so keep it to yourself."))
         elif name == "theme":
             if value != self._setting_value("theme"):
                 self.toggle_theme()
         elif name == "language":
             self.st["language"] = value
             _post("/language", {"language": value})
+        elif name == "ui_language":
+            if value != self._setting_value("ui_language"):
+                _post("/language", {"ui_language": value})  # the next status relaunches the widget in it
         else:
             path, key = SETTING_TOGGLES[name]
             self.st[key] = value == "on"
@@ -3505,17 +3541,17 @@ class VoiceWidget(QWidget):
         st, cy = self.st, NOTCH_H / 2
         chips = []
         if st.get("permission"):
-            chips.append("Approve?")
+            chips.append(tr("Approve?"))
         elif self._question():
-            chips.append("Choose")
+            chips.append(tr("Choose"))
         waiting = len(self._needs())
         if waiting:
-            chips.append(f"{waiting} need{'s' if waiting == 1 else ''} you")
+            chips.append(plural(waiting, "{n} needs you", "{n} need you"))
         ctx = self._context_warning()
         if ctx:
-            chips.append(f"Context {ctx}%")
+            chips.append(tr("Context {pct}%", pct=ctx))
         if st.get("queued"):
-            chips.append(f"+{st['queued']} waiting")
+            chips.append(tr("+{n} waiting", n=st['queued']))
         update_chip = self._update_label()
         if update_chip:
             chips.append(update_chip)
@@ -3526,20 +3562,20 @@ class VoiceWidget(QWidget):
         pills = self._pills()
         if act:
             if act.get("others") and not pills:  # the pills already show who else is working
-                chips.append(f"+{act['others']} working")
+                chips.append(tr("+{n} working", n=act['others']))
             chips.append(f"{act['elapsed'] // 60}:{act['elapsed'] % 60:02d}")
         if st.get("focus") and not st.get("in_call"):
-            chips.append("Focus")
+            chips.append(tr("Focus"))
         elif st.get("in_call"):
-            chips.append("In a call")
+            chips.append(tr("In a call"))
         elif st.get("speakers"):
-            chips.append("Speakers")
+            chips.append(tr("Speakers"))
         elif self._output() == "chime":
-            chips.append("Chime")
+            chips.append(tr("Chime"))
         elif self._output() == "silent":
-            chips.append("Do not disturb")
+            chips.append(tr("Do not disturb"))
         elif st.get("hands_free"):
-            chips.append("Auto")
+            chips.append(tr("Auto"))
         if st.get("speed_x") and self.phase == "speaking":  # only while there's a voice to speed up
             chips.append(f"{float(st['speed_x']):g}×")
         fm_chip = QFontMetrics(self.f_notch_chip)
@@ -3573,10 +3609,11 @@ class VoiceWidget(QWidget):
         x = NOTCH_EAR + 38.0
         avail = right - x - 6
         _, title, sub = PHASES.get(self.phase, PHASES["idle"])
+        title, sub = tr(title), tr(sub) if sub else ""
         if self._question() and self.phase in ("idle", "waiting", "recording"):
-            title = "Your choice"
+            title = tr("Your choice")
         if act:
-            title = "Working"
+            title = tr("Working")
         p.setFont(self.f_notch_title)
         fm = QFontMetrics(self.f_notch_title)
         p.setPen(_ink(240))
@@ -3595,25 +3632,25 @@ class VoiceWidget(QWidget):
         if st.get("reading") and not self.banner.dismissed:
             line = ""  # the text is in the banner below: the hint instead of the same sentence twice
         if self._drop:
-            line = f"Drop to add to {self._drop['title']}"
+            line = tr("Drop to add to {title}", title=self._drop['title'])
         result = self._result()
         if not line and result:
-            line = f"Done · {result_label(result)}"
+            line = tr("Done · {result}", result=result_label(result))
             if self.hover == "result":
-                line += "  ·  open"
+                line += tr("  ·  open")
         if not line and act:
             steps = act["steps"]
-            line = act.get("label") or "Thinking"
+            line = action(act.get("label") or "Thinking")
             if steps:
-                line += f" · {steps} step{'s' if steps != 1 else ''}"
+                line += plural(steps, " · {n} step", " · {n} steps")
         if not line:
             q = self._question()
             if q:
                 line = q["question"]
             elif self.phase == "idle" and st.get("last_heard"):
-                line = f"You: “{st['last_heard']}”"
+                line = tr("You: “{text}”", text=st['last_heard'])
             elif self.phase == "idle":
-                line = f"{_hotkey_label(self.hotkeys.get('reply', ''))} to talk"
+                line = tr("{key} to talk", key=_hotkey_label(self.hotkeys.get('reply', '')))
             else:
                 line = sub
         p.setFont(self.f_notch_sub)
@@ -3717,11 +3754,11 @@ class VoiceWidget(QWidget):
         """The agent's question and its options, each one clickable."""
         q = self._question()
         head, text, rows, _ = self._question_layout()
-        self._chip(p, head.x(), head.y(), (q.get("header") or "Question").upper())
+        self._chip(p, head.x(), head.y(), (q.get("header") or tr("Question")).upper())
         if q.get("more"):
             p.setFont(self.f_hint)
             p.setPen(_soft(120))
-            p.drawText(head, Qt.AlignRight | Qt.AlignVCenter, f"+{q['more']} more in {q.get('agent') or 'the app'}")
+            p.drawText(head, Qt.AlignRight | Qt.AlignVCenter, tr("+{n} more in {agent}", n=q['more'], agent=q.get('agent') or tr('the app')))
         p.setFont(self.f_q)
         p.setPen(_ink(235))
         p.drawText(text, Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignTop, q["question"])
@@ -3747,8 +3784,8 @@ class VoiceWidget(QWidget):
         p.setFont(self.f_hint)
         p.setPen(_soft(110))
         y = rows[-1].bottom() + 4 if rows else text.bottom() + 4
-        hint = ("Or say “yes” or “no” · no answer in a minute: Claude asks you itself" if q.get("permission")
-                else "Or say it: “the second one”, or the option’s name")
+        hint = (tr("Or say “yes” or “no” · no answer in a minute: Claude asks you itself") if q.get("permission")
+                else tr("Or say it: “the second one”, or the option’s name"))
         p.drawText(QRectF(14, y, self.pw - 28, 14), Qt.AlignLeft | Qt.AlignVCenter, hint)
 
     def _paint_panel(self, p: QPainter) -> None:
@@ -3824,39 +3861,39 @@ class VoiceWidget(QWidget):
         p.drawEllipse(QPointF(rect.x() + 9, rect.center().y()), 3, 3)
         p.setFont(self.f_tile)
         p.setPen(_soft(170))
-        p.drawText(rect.adjusted(20, 0, 0, 0), Qt.AlignLeft | Qt.AlignVCenter, "Agents")
+        p.drawText(rect.adjusted(20, 0, 0, 0), Qt.AlignLeft | Qt.AlignVCenter, tr("Agents"))
         p.setFont(self.f_hint)
         p.setPen(_soft(int(120 + 80 * ht)))
-        text = (f"{on} connected" if on else "none connected yet") + (f" · {todo} to connect" if todo else "")
-        p.drawText(rect.adjusted(20 + QFontMetrics(self.f_tile).horizontalAdvance("Agents") + 10, 0, 0, 0),
+        text = (tr("{n} connected", n=on) if on else tr("none connected yet")) + (tr(" · {n} to connect", n=todo) if todo else "")
+        p.drawText(rect.adjusted(20 + QFontMetrics(self.f_tile).horizontalAdvance(tr("Agents")) + 10, 0, 0, 0),
                    Qt.AlignLeft | Qt.AlignVCenter, text)
-        p.drawText(rect.adjusted(0, 0, -8, 0), Qt.AlignRight | Qt.AlignVCenter, "Settings ›")
+        p.drawText(rect.adjusted(0, 0, -8, 0), Qt.AlignRight | Qt.AlignVCenter, tr("Settings ›"))
         p.restore()
 
     def _paint_settings(self, p: QPainter, progress: float) -> None:
         """The Settings sheet: each section's switches, the phone's QR code, the agents."""
         p.setFont(self.f_tile)
         p.setPen(_ink(235))
-        p.drawText(QRectF(14, BAR_H + 10, self.cw - 28, 18), Qt.AlignLeft | Qt.AlignVCenter, "Settings")
-        self._pill(p, self._done_rect(), "Done", _ink(int(16 + 30 * self.hover_t.get("setdone", 0.0))))
+        p.drawText(QRectF(14, BAR_H + 10, self.cw - 28, 18), Qt.AlignLeft | Qt.AlignVCenter, tr("Settings"))
+        self._pill(p, self._done_rect(), tr("Done"), _ink(int(16 + 30 * self.hover_t.get("setdone", 0.0))))
         order = 0
         for item in self._settings_layout()[0]:
             if item[0] == "head":
                 appear = max(0.0, min(1.0, (progress - order * 0.03) / 0.6))
                 p.save()
                 p.setOpacity(appear)
-                self._section_head(p, QRectF(14, item[2], self.cw - 28, 16), item[1],
-                                   "click to connect" if item[1] == "Agents" else "")
+                self._section_head(p, QRectF(14, item[2], self.cw - 28, 16), tr(item[1]),
+                                   tr("click to connect") if item[1] == "Agents" else "")
                 p.restore()
             elif item[0] == "row":
                 name = item[1]
                 label, options = SETTING_ROWS[name]
-                texts = [text for _value, text in options]
+                texts = [tr(text) for _value, text in options]
                 fetching = self.st.get("engine_state") or "" if name == "engine" else ""
                 if fetching:  # "downloading 40%": the natural voice, the first time
-                    texts = [f"Natural · {fetching.split()[-1]}" if value == "kokoro" else text
+                    texts = [tr("Natural · {pct}", pct=fetching.split()[-1]) if value == "kokoro" else tr(text)
                              for value, text in options]
-                self._paint_segmented(p, progress, order, item[2], label, [f"{name}:{v}" for v, _t in options], texts,
+                self._paint_segmented(p, progress, order, item[2], tr(label), [f"{name}:{v}" for v, _t in options], texts,
                                       self._setting_pos(name))
                 order += 1
         self._paint_phone(p, progress)
@@ -3869,14 +3906,14 @@ class VoiceWidget(QWidget):
             return
         p.setFont(self.f_tile)
         p.setPen(_tone("#FBBF24"))
-        p.drawText(QRectF(14, BAR_H + 10, self.cw - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, "Needs you")
+        p.drawText(QRectF(14, BAR_H + 10, self.cw - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, tr("Needs you"))
         p.setFont(self.f_hint)
         p.setPen(_soft(105))
         more = len(self._needs()) - len(needs)
         perms = sum(1 for n in needs if n["kind"] == "permission")
         p.drawText(QRectF(14, BAR_H + 10, self.cw - 28, 16), Qt.AlignRight | Qt.AlignVCenter,
-                   f"+{more} more" if more > 0 else "or say “approve all”, “deny two”" if perms > 1
-                   else "or say “approve Codex”")
+                   tr("+{n} more", n=more) if more > 0 else tr("or say “approve all”, “deny two”") if perms > 1
+                   else tr("or say “approve Codex”"))
         fm = QFontMetrics(self.f_sub)
         for i, n in enumerate(needs):
             row = self._need_row(i)
@@ -3897,7 +3934,7 @@ class VoiceWidget(QWidget):
             label = number + f"{n['title']}: {n['text'][:1].upper()}{n['text'][1:]}" + ("?" if buttons else "")
             p.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, fm.elidedText(label, Qt.ElideRight, int(text_rect.width())))
             if buttons:
-                for key, text, fill in ((f"allow:{i}", "Allow", "#34D399"), (f"deny:{i}", "Deny", "#F87171")):
+                for key, text, fill in ((f"allow:{i}", tr("Allow"), "#34D399"), (f"deny:{i}", tr("Deny"), "#F87171")):
                     if key in rects:
                         c = QColor(fill)
                         c.setAlpha(int(60 + 90 * self.hover_t.get(key, 0.0)))
@@ -3908,11 +3945,11 @@ class VoiceWidget(QWidget):
                     on = bool(n.get("resume"))
                     c = QColor("#34D399" if on else "#FBBF24")
                     c.setAlpha(int((110 if on else 60) + 80 * self.hover_t.get(key, 0.0)))
-                    self._pill(p, rects[key], "✓ Resume" if on else "Resume", c)
+                    self._pill(p, rects[key], tr("✓ Resume") if on else tr("Resume"), c)
             else:
                 p.setFont(self.f_hint)
                 p.setPen(_ink(int(150 + 90 * ht)))
-                p.drawText(row.adjusted(0, 0, -10, 0), Qt.AlignRight | Qt.AlignVCenter, "Open")
+                p.drawText(row.adjusted(0, 0, -10, 0), Qt.AlignRight | Qt.AlignVCenter, tr("Open"))
 
     def _section_head(self, p: QPainter, rect: QRectF, title: str, hint: str = "",
                       hint_color: QColor | None = None) -> None:
@@ -3940,7 +3977,7 @@ class VoiceWidget(QWidget):
 
     def _note(self, text: str) -> None:
         """A short message under the notch from the widget itself (no conversation behind it)."""
-        self.banner.present({"id": -1, "kind": "note", "title": "Agents", "tag": "agents", "session": "",
+        self.banner.present({"id": -1, "kind": "note", "title": tr("Agents"), "tag": "agents", "session": "",
                              "text": text}, int(self.pw))
 
     def _agent_state(self, agent: str) -> str:
@@ -3965,7 +4002,7 @@ class VoiceWidget(QWidget):
                 p.setPen(_ink(int(170 + 80 * ht)))
                 p.drawText(rect, Qt.AlignCenter, ICONS["help"])
                 continue
-            label = dict(AGENT_LABELS)[key.split(":", 1)[1]]
+            label = tr(dict(AGENT_LABELS)[key.split(":", 1)[1]])
             fm = QFontMetrics(self.f_hint)
             tw = fm.horizontalAdvance(label)
             x = max(rect.x() + 6, rect.center().x() - (tw + 9) / 2)
@@ -4001,24 +4038,24 @@ class VoiceWidget(QWidget):
         p.setOpacity(appear)
         p.setFont(self.f_tile)
         p.setPen(_soft(170))
-        p.drawText(QRectF(14, self._threads_y(), self.cw - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, "Threads")
+        p.drawText(QRectF(14, self._threads_y(), self.cw - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, tr("Threads"))
         p.setFont(self.f_hint)
         p.setPen(_soft(105))
         queued = int(self.st.get("queued") or 0)
         new, past = self._new_rect(), self._history_rect()
         p.drawText(QRectF(14, self._threads_y(), past.x() - 22, 16), Qt.AlignRight | Qt.AlignVCenter,
-                   f"{queued} waiting to speak" if queued else "click to open" if threads else "none yet")
-        self._pill(p, past, "History", QColor(139, 124, 255, int(40 + 70 * self.hover_t.get("history", 0.0))))
-        self._pill(p, new, "+ New", self._go_button("newthread"))
-        labels = {"speaking": "speaking", "listening": "listening", "queued": "next up",
-                  "question": "asks you", "permission": "needs approval", "working": "working",
-                  "input": "waiting for you"}
+                   tr("{n} waiting to speak", n=queued) if queued else tr("click to open") if threads else tr("none yet"))
+        self._pill(p, past, tr("History"), QColor(139, 124, 255, int(40 + 70 * self.hover_t.get("history", 0.0))))
+        self._pill(p, new, tr("+ New"), self._go_button("newthread"))
+        labels = {"speaking": tr("speaking"), "listening": tr("listening"), "queued": tr("next up"),
+                  "question": tr("asks you"), "permission": tr("needs approval"), "working": tr("working"),
+                  "input": tr("waiting for you")}
         fm = QFontMetrics(self.f_sub)
         if not threads:
             p.setFont(self.f_sub)
             p.setPen(_soft(95))
             p.drawText(self._thread_row(0).adjusted(6, 0, 0, -16), Qt.AlignLeft | Qt.AlignVCenter,
-                       "Your agents' conversations show up here")
+                       tr("Your agents' conversations show up here"))
         for i, t in enumerate(threads):
             row = self._thread_row(i)
             ht = self.hover_t.get(f"thr:{i}", 0.0)
@@ -4034,7 +4071,8 @@ class VoiceWidget(QWidget):
             state = labels.get(t.get("state", ""), "")
             if not state:
                 ago = int(t.get("ago", 0))
-                state = "now" if ago < 60 else f"{ago // 60} min ago" if ago < 3600 else f"{ago // 3600} h ago"
+                state = (tr("now") if ago < 60 else tr("{n} min ago", n=ago // 60) if ago < 3600
+                         else tr("{n} h ago", n=ago // 3600))
             p.setFont(self.f_hint)
             p.setPen((color.darker(150) if LIGHT else color.lighter(130)) if t.get("state") else _soft(110))
             sw = QFontMetrics(self.f_hint).horizontalAdvance(state)
@@ -4047,7 +4085,7 @@ class VoiceWidget(QWidget):
             reply = t.get("reply") or ""
             extras = [result_label(t["result"])] if t.get("result") else []
             if isinstance(t.get("context"), (int, float)):
-                extras.append(f"context {int(t['context'])}%")
+                extras.append(tr("context {pct}%", pct=int(t['context'])))
             if extras:
                 reply = " · ".join(extras) + ("  —  " + reply if reply else "")
             buttons = self._thread_buttons(i, t)
@@ -4089,12 +4127,12 @@ class VoiceWidget(QWidget):
         p.setFont(self.f_tile)
         p.setPen(_ink(230))
         p.drawText(QRectF(x, card.y() + 8, card.right() - x - 34, 16), Qt.AlignLeft | Qt.AlignVCenter,
-                   "Scan it with the ntfy app")
+                   tr("Scan it with the ntfy app"))
         p.setFont(self.f_hint)
         p.setPen(_soft(140))
-        when = "When you're away" if phone.get("when", "away") == "away" else "Always"
-        detail = when + (f" · {phone['sent']} sent" if phone.get("sent") else "") + (
-            f" · not sent: {phone['error']}" if phone.get("error") else "")
+        when = tr("When you're away") if phone.get("when", "away") == "away" else tr("Always")
+        detail = when + (tr(" · {n} sent", n=phone['sent']) if phone.get("sent") else "") + (
+            tr(" · not sent: {why}", why=phone['error']) if phone.get("error") else "")
         fm = QFontMetrics(self.f_hint)
         width = int(card.right() - x - 8)
         for i, (line, alpha, elide) in enumerate(((detail, 150, Qt.ElideRight),
@@ -4106,8 +4144,8 @@ class VoiceWidget(QWidget):
             p.setFont(self.f_hint)
             p.setPen(_tone("#34D399"))
             p.fillRect(self._phone_rects()["phone:copy"], _body())
-            p.drawText(self._phone_rects()["phone:copy"], Qt.AlignLeft | Qt.AlignVCenter, "Link copied: paste it in ntfy")
-        self._phone_buttons(p, (("phone:test", "Test"), ("phone:new", "New link"), ("phone:fold", "⌃")))
+            p.drawText(self._phone_rects()["phone:copy"], Qt.AlignLeft | Qt.AlignVCenter, tr("Link copied: paste it in ntfy"))
+        self._phone_buttons(p, (("phone:test", tr("Test")), ("phone:new", tr("New link")), ("phone:fold", "⌃")))
         p.restore()
 
     def _phone_buttons(self, p: QPainter, buttons: tuple) -> None:
@@ -4127,13 +4165,13 @@ class VoiceWidget(QWidget):
         p.drawText(QRectF(row.x() + 8, row.y(), 18, row.height()), Qt.AlignCenter, ICONS["phone"])
         p.setFont(self.f_hint)
         p.setPen(_soft(170) if not phone.get("error") else _tone("#F87171"))
-        text = "Phone notifications on" + (f" · {phone['sent']} sent" if phone.get("sent") else "") + (
-            f" · not sent: {phone['error']}" if phone.get("error") else "")
+        text = tr("Phone notifications on") + (tr(" · {n} sent", n=phone['sent']) if phone.get("sent") else "") + (
+            tr(" · not sent: {why}", why=phone['error']) if phone.get("error") else "")
         rects = self._phone_rects()
         room = int(rects["phone:test"].x() - row.x() - 34)
         p.drawText(QRectF(row.x() + 30, row.y(), room, row.height()), Qt.AlignLeft | Qt.AlignVCenter,
                    QFontMetrics(self.f_hint).elidedText(text, Qt.ElideRight, room))
-        self._phone_buttons(p, (("phone:test", "Test"), ("phone:fold", "⌄")))
+        self._phone_buttons(p, (("phone:test", tr("Test")), ("phone:fold", "⌄")))
 
     def _paint_segmented(self, p: QPainter, progress: float, order: int, track: QRectF, label: str,
                          keys: list[str], texts: list[str], pos: float) -> None:
@@ -4270,134 +4308,135 @@ class VoiceWidget(QWidget):
 
     def _tooltip_text(self, key: str | None) -> str:
         if key in ("sprev", "snext"):
-            return "Previous song" if key == "sprev" else "Next song"
+            return tr("Previous song") if key == "sprev" else tr("Next song")
         if key == "splay":
-            return "Pause" if (self.st.get("media") or {}).get("playing") else "Play"
+            return tr("Pause") if (self.st.get("media") or {}).get("playing") else tr("Play")
         if key == "phone:test":
-            return "Send a test notification"
+            return tr("Send a test notification")
         if key == "phone:copy":
-            return ("Copy the link. In the ntfy app: + (Subscribe to topic), paste it. Scanning the QR code with "
-                    "the camera opens it in the browser instead: subscribe from the app")
+            return (tr("Copy the link. In the ntfy app: + (Subscribe to topic), paste it. Scanning the QR code with "
+                    "the camera opens it in the browser instead: subscribe from the app"))
         if key == "phone:new":
-            return "Make a new private link (the old QR code stops getting anything)"
+            return tr("Make a new private link (the old QR code stops getting anything)")
         if key == "phone:fold":
-            return ("Show the QR code" if self.phone_folded else "Fold it away (notifications stay on; the Phone "
-                    "button turns them off)")
+            return (tr("Show the QR code") if self.phone_folded else tr("Fold it away (notifications stay on; the Phone "
+                    "button turns them off)"))
         if key == "primary":
             prim = self._primary()
             return prim[2] if prim else ""
         if key == "chevron":
-            return "Collapse" if self.expanded else "Open: what needs you and your threads"
+            return tr("Collapse") if self.expanded else tr("Open: what needs you and your threads")
         if key == "settings":
-            return "Back to your threads" if self.settings else "Settings: the voice, when it speaks, listening, phone, agents"
+            return tr("Back to your threads") if self.settings else tr("Settings: the voice, when it speaks, listening, phone, agents")
         if key == "setdone":
-            return "Back to your threads"
+            return tr("Back to your threads")
         if key == "agents":
-            return "Connect your agents (in Settings)"
+            return tr("Connect your agents (in Settings)")
         if key == "tab:utils":
-            return ("Hide Utils" if self.side_open["utils"] else
-                    "Utils: Pomodoro, timer, stopwatch, your to-do list, notes, clipboard")
+            return (tr("Hide Utils") if self.side_open["utils"] else
+                    tr("Utils: Pomodoro, timer, stopwatch, your to-do list, notes, clipboard"))
         if key == "tab:companion":
-            return ("Hide the Companion" if self.side_open["companion"] else
-                    "Companion: your agenda, your agents' usage and activity, what's playing")
+            return (tr("Hide the Companion") if self.side_open["companion"] else
+                    tr("Companion: your agenda, your agents' usage and activity, what's playing"))
         if key == "strip":
-            return "Open Utils"
+            return tr("Open Utils")
         if key == "tuck":
-            return "Tuck away until something new happens"
+            return tr("Tuck away until something new happens")
         if key == "history":
-            return "Search every conversation: what you asked and what each agent answered (kept on this PC)"
+            return tr("Search every conversation: what you asked and what each agent answered (kept on this PC)")
         if key == "newthread":
-            return f"Start a new thread: type or say its first prompt ({_hotkey_label(self.hotkeys.get('new_thread', ''))})"
+            return tr("Start a new thread: type or say its first prompt ({key})", key=_hotkey_label(self.hotkeys.get('new_thread', '')))
         if key == "guide":
-            return "Setup guide: every agent, step by step"
+            return tr("Setup guide: every agent, step by step")
         if key and key.startswith("pill:"):
             t = self._nth(key, self._pills())
             if t:
-                state = {"permission": "needs approval", "question": "asks you", "input": "waiting for you",
-                         "working": "working", "speaking": "speaking", "listening": "listening",
-                         "queued": "next up"}.get(t.get("state", ""), "done")
-                return f"{t['title']}: {state} · click to open"
+                state = {"permission": tr("needs approval"), "question": tr("asks you"), "input": tr("waiting for you"),
+                         "working": tr("working"), "speaking": tr("speaking"), "listening": tr("listening"),
+                         "queued": tr("next up")}.get(t.get("state", ""), tr("done"))
+                return tr("{title}: {state} · click to open", title=t['title'], state=state)
             return ""
         if key == "result":
-            return "Open the conversation to see the changes"
+            return tr("Open the conversation to see the changes")
         if key == "update":
             up = self.st.get("update") or {}
             if up.get("state"):
-                return f"Updating to version {up.get('version')}"
+                return tr("Updating to version {v}", v=up.get('version'))
             if up.get("how") == "auto":
-                return f"Install version {up.get('version')}: downloads it, then restarts agent-voice"
-            return f"Version {up.get('version')} is out: click for how to update"
+                return tr("Install version {v}: downloads it, then restarts agent-voice", v=up.get('version'))
+            return tr("Version {v} is out: click for how to update", v=up.get('version'))
         if key and (key.startswith("need:") or key.startswith("allow:") or key.startswith("deny:")
                     or key.startswith("resume:")):
             n = self._nth(key, self._needs())
             if n is None:
                 return ""
             if key.startswith("resume:"):
-                return ("Won't send it anything: click to send it “continue” when its limit resets"
-                        if not n.get("resume") else "Sends it “continue” once its limit resets: click to cancel")
+                return (tr("Won't send it anything: click to send it “continue” when its limit resets")
+                        if not n.get("resume") else tr("Sends it “continue” once its limit resets: click to cancel"))
             if key.startswith("allow:"):
-                return f"Let {n['title']} {n['text']}"
+                return tr("Let {agent}: {action}", agent=n['title'], action=n['text'])
             if key.startswith("deny:"):
-                return f"Don't let {n['title']} {n['text']}"
-            return f"{n['title']}: {n['text']}\n\nClick to open it"
+                return tr("Don't let {agent}: {action}", agent=n['title'], action=n['text'])
+            return tr("{title}: {text}\n\nClick to open it", title=n['title'], text=n['text'])
         if key and key.startswith("agent:"):
             agent = key.split(":", 1)[1]
-            name = AGENT_NAMES.get(agent, agent)
+            name = tr(AGENT_NAMES.get(agent, agent))
             state = self._agent_state(agent)
             if state == "on":
-                extra = " (in Cline, turn on Settings > Features > Enable Hooks)" if agent == "cline" else ""
-                return f"{name} speaks through agent-voice{extra}"
+                extra = tr(" (in Cline, turn on Settings > Features > Enable Hooks)") if agent == "cline" else ""
+                return tr("{name} speaks through agent-voice", name=name) + extra
             if state == "off":
-                return f"Connect {name}: adds agent-voice to its settings"
+                return tr("Connect {name}: adds agent-voice to its settings", name=name)
             if state == "setup":
-                return "Bridge ready, extension not loaded yet: click for the steps (chrome://extensions, Load unpacked)"
-            return f"{name} isn't installed on this PC"
+                return tr("Bridge ready, extension not loaded yet: click for the steps (chrome://extensions, Load unpacked)")
+            return tr("{name} isn't installed on this PC", name=name)
         if key and key.startswith("speed:"):
-            return f"Voice speed {float(key.split(':', 1)[1]):g}×"
+            return tr("Voice speed {x}×", x=f"{float(key.split(':', 1)[1]):g}")
         if key and key.startswith("thr:"):
             return ""  # resting on it shows its last reply in full; a click opens it
         if key and key.startswith("opt:"):
             return self._nth(key, (self._question() or {}).get("options") or []) or ""
         if key == "engine:piper":
-            return "Light voice (Piper): quick, and easy on the battery"
+            return tr("Light voice (Piper): quick, and easy on the battery")
         if key == "engine:kokoro":
-            return ("Natural voice (Kokoro): more expressive, about three times the CPU. Downloaded the first time "
-                    "(about 120 MB), then offline like the light one")
+            return (tr("Natural voice (Kokoro): more expressive, about three times the CPU. Downloaded the first time "
+                    "(about 120 MB), then offline like the light one"))
         if key == "mode:voice":
-            return "Voice: replies are read aloud and the mic opens"
+            return tr("Voice: replies are read aloud and the mic opens")
         if key == "mode:chime":
             hk = _hotkey_label(self.hotkeys.get("chime", ""))
-            return f"Chimes: no voice, a soft sound and the reply as a banner ({hk})"
+            return tr("Chimes: no voice, a soft sound and the reply as a banner ({key})", key=hk)
         if key == "mode:silent":
             hk = _hotkey_label(self.hotkeys.get("mute", ""))
-            return (f"Do not disturb: no voice, no sound, no banner, the notch stays up. What happens meanwhile is "
-                    f"told when you're back ({hk})")
+            return tr("Do not disturb: no voice, no sound, no banner, the notch stays up. What happens meanwhile is "
+                      "told when you're back ({key})", key=hk)
         if key and key.startswith("thrtalk:"):
-            return "Talk to this conversation: what you say is sent to it"
+            return tr("Talk to this conversation: what you say is sent to it")
         if key and key.startswith("thrtype:"):
-            return "Type a reply to this conversation"
+            return tr("Type a reply to this conversation")
         if key and key.startswith("thrplay:"):
-            return "Hear this conversation's last reply again"
+            return tr("Hear this conversation's last reply again")
         if key and key.startswith("thrcopy:"):
-            return "Copy this conversation's last reply"
+            return tr("Copy this conversation's last reply")
         return self._setting_tip((key or "").split(":", 1)[0])
 
     def _setting_tip(self, name: str) -> str:
         """What a settings row does (the same for each of its choices)."""
         if name == "handsfree":
-            return (f"Auto-send: what you dictate is sent as soon as you stop talking (with a few seconds to take it "
-                    f"back), instead of waiting for Enter ({_hotkey_label(self.hotkeys.get('hands_free', ''))})")
+            return tr("Auto-send: what you dictate is sent as soon as you stop talking (with a few seconds to take it "
+                      "back), instead of waiting for Enter ({key})", key=_hotkey_label(self.hotkeys.get('hands_free', '')))
         return {
-            "summary": "Final answers as a one-sentence summary, or read in full",
-            "headphones": ("The voice only in headphones: through the speakers (an open office), chimes and the reply "
-                           "as a banner instead. It switches by itself when you plug them in or take them off"),
-            "wake": "Hey Claude: while idle, say “Hey Claude, …” to send a new prompt to your last thread",
-            "approve": "Permission requests read out: answer yes / no by voice, or click Allow / Deny",
-            "phone": ("Phone notifications (ntfy): replies, what needs you, limits and the recap on your phone while "
-                      "you're away. Sends them over the internet: off until you turn it on"),
-            "theme": "Dark like a hardware notch, or light frosted glass (the notch restarts to switch)",
-            "language": ("The language you speak and hear most: when it's unsure, the voice reads in it and what you "
-                         "say is taken in it; the notch speaks it too"),
+            "summary": tr("Final answers as a one-sentence summary, or read in full"),
+            "headphones": (tr("The voice only in headphones: through the speakers (an open office), chimes and the reply "
+                           "as a banner instead. It switches by itself when you plug them in or take them off")),
+            "wake": tr("Hey Claude: while idle, say “Hey Claude, …” to send a new prompt to your last thread"),
+            "approve": tr("Permission requests read out: answer yes / no by voice, or click Allow / Deny"),
+            "phone": (tr("Phone notifications (ntfy): replies, what needs you, limits and the recap on your phone while "
+                      "you're away. Sends them over the internet: off until you turn it on")),
+            "theme": tr("Dark like a hardware notch, or light frosted glass (the notch restarts to switch)"),
+            "language": tr("The language you speak and hear most: when it's unsure, the voice reads in it, what you "
+                           "say is taken in it, and the voice's own short phrases use it"),
+            "ui_language": tr("The language of the notch, its buttons, notifications and menus (it restarts to switch)"),
         }.get(name, "")
 
     def mousePressEvent(self, e):
@@ -4473,7 +4512,7 @@ class VoiceWidget(QWidget):
             self._copied, self._copied_at = key, time.time()
         elif key == "phone:new":
             _post("/phone", {"action": "new"})
-            self._note("New private link: scan the new QR code; the old one gets nothing any more.")
+            self._note(tr("New private link: scan the new QR code; the old one gets nothing any more."))
         elif key == "phone:fold":
             self.phone_folded = not self.phone_folded  # the QR code only when you need it
             self._save_position()
@@ -4515,17 +4554,17 @@ class VoiceWidget(QWidget):
                 _post("/open_thread", {"session": t["session"]})
         elif key.startswith("agent:"):
             agent = key.split(":", 1)[1]
-            state, name = self._agent_state(agent), AGENT_NAMES.get(agent, agent)
+            state, name = self._agent_state(agent), tr(AGENT_NAMES.get(agent, agent))
             if state in ("off", "setup"):  # connect it (again: the browser re-opens the extension's folder)
                 _post("/install", {"agent": agent})
                 if state == "off":
                     self.st.setdefault("agents", {})[agent] = "setup" if agent == "browser" else "on"
             elif state == "on":
-                self._note(f"{name[:1].upper()}{name[1:]} is connected. Not hearing it? Restart it once; to "
-                           f"disconnect it: agent-voice uninstall {agent}")
+                self._note(tr("{name} is connected. Not hearing it? Restart it once; to disconnect it: agent-voice "
+                              "uninstall {agent}", name=name[:1].upper() + name[1:], agent=agent))
             else:
-                self._note(f"{name[:1].upper()}{name[1:]} isn't installed on this PC. Install it, then click "
-                           "here to connect it. The ? opens the setup guide.")
+                self._note(tr("{name} isn't installed on this PC. Install it, then click here to connect it. The ? opens "
+                              "the setup guide.", name=name[:1].upper() + name[1:]))
         elif key == "guide":
             QDesktopServices.openUrl(QUrl(GUIDE_URL))
         elif key.startswith("opt:"):
@@ -4550,7 +4589,7 @@ class VoiceWidget(QWidget):
             return {"session": t["session"], "title": t["title"]}
         last = (self.st.get("last_reply") or {}).get("session", "")
         title = next((t["title"] for t in threads if t["session"] == last), threads[0]["title"] if threads else "")
-        return {"session": last, "title": title or "the last conversation"}
+        return {"session": last, "title": title or tr("the last conversation")}
 
     def dragEnterEvent(self, e):
         mime = e.mimeData()
@@ -4836,7 +4875,7 @@ class VoiceWidget(QWidget):
         pomo = data.get("pomodoro") or {}
         if pomo.get("phase"):
             left = max(0.0, pomo["end"] - now) if pomo["end"] else float(pomo["left"])
-            items.append((ICONS["bolt"] if pomo["end"] else ICONS["pause"], companion.PHASES[pomo["phase"]],
+            items.append((ICONS["bolt"] if pomo["end"] else ICONS["pause"], tr(companion.PHASES[pomo["phase"]]),
                           companion_clock(left), 1 - left / max(1.0, float(pomo["length"])),
                           SidePanel.BREAK if pomo["phase"] != "focus" else SidePanel.TOMATO))
         for t in data.get("timers") or []:
@@ -4852,7 +4891,7 @@ class VoiceWidget(QWidget):
         if meeting:
             soon = meeting["start"] - now
             items.append((ICONS["calendar"], meeting["title"],
-                          "now" if soon <= 0 else f"in {max(1, math.ceil(soon / 60))} min", None, ""))
+                          tr("now") if soon <= 0 else tr("in {n} min", n=max(1, math.ceil(soon / 60))), None, ""))
         playing = self.st.get("media") or {}
         if playing.get("app"):  # playing or paused: while a player is open, its controls stay at hand
             song = " · ".join(filter(None, (playing.get("title"), playing.get("artist")))) or playing["app"]
@@ -4937,27 +4976,27 @@ class VoiceWidget(QWidget):
         menu.setStyleSheet(_qss(MENU_STYLE))
         geo = (self.screen() or QApplication.primaryScreen()).availableGeometry()
         if self.compact:
-            actions = [("Full widget", self.toggle_compact), ("Show all actions", self.toggle_expanded), (None, None)]
+            actions = [(tr("Full widget"), self.toggle_compact), (tr("Show all actions"), self.toggle_expanded), (None, None)]
         elif self.notch:
-            actions = [("Collapse" if self.expanded else "Show all actions", self.toggle_expanded),
-                       ("Float the widget again", self.toggle_notch), (None, None)]
+            actions = [(tr("Collapse") if self.expanded else tr("Show all actions"), self.toggle_expanded),
+                       (tr("Float the widget again"), self.toggle_notch), (None, None)]
         else:
             actions = [
-                ("Collapse" if self.expanded else "Show all actions", self.toggle_expanded),
-                ("Compact (orb only)", self.toggle_compact),
-                ("Notch (top of the screen)", self.toggle_notch),
+                (tr("Collapse") if self.expanded else tr("Show all actions"), self.toggle_expanded),
+                (tr("Compact (orb only)"), self.toggle_compact),
+                (tr("Notch (top of the screen)"), self.toggle_notch),
                 (None, None),
             ]
         if not self.notch:
             actions += [
-                ("Move to top right", lambda: self._place(geo.right() - NOTCH_W - 8, geo.top() + 64)),
-                ("Move to top left", lambda: self._place(geo.left() + 16, geo.top() + 64)),
+                (tr("Move to top right"), lambda: self._place(geo.right() - NOTCH_W - 8, geo.top() + 64)),
+                (tr("Move to top left"), lambda: self._place(geo.left() + 16, geo.top() + 64)),
                 (None, None),
             ]
         actions += [
-            ("Dark theme" if LIGHT else "Light theme", self.toggle_theme),
-            (f"Hide widget ({_hotkey_label(self.hotkeys.get('widget', ''))})", self.toggle_visible),
-            ("Stop voice service", lambda: (_post("/shutdown"))),
+            (tr("Dark theme") if LIGHT else tr("Light theme"), self.toggle_theme),
+            (tr("Hide widget ({key})", key=_hotkey_label(self.hotkeys.get('widget', ''))), self.toggle_visible),
+            (tr("Stop voice service"), lambda: (_post("/shutdown"))),
         ]
         for label, fn in actions:
             if label is None:
@@ -4998,11 +5037,11 @@ class Tray(QSystemTrayIcon):
         self._shown_phase = phase
         color = QColor(PHASES.get(phase, PHASES["idle"])[0])
         self.setIcon(orb_icon(color, ICONS[self.GLYPHS.get(phase, "mic")]))
-        title = PHASES.get(phase, PHASES["idle"])[1]
+        title = tr(PHASES.get(phase, PHASES["idle"])[1])
         lang = self.w.st.get("speaking_lang", "")
-        extra = " · auto-send" if self.w.st.get("hands_free") else ""
+        extra = tr(" · auto-send") if self.w.st.get("hands_free") else ""
         if self.w.st.get("chime"):
-            extra += " · chime mode"
+            extra += tr(" · chime mode")
         self.setToolTip(f"agent-voice · {title}{f' ({lang.upper()})' if lang else ''}{extra}")
 
     def _on_activated(self, reason) -> None:
@@ -5028,43 +5067,43 @@ class Tray(QSystemTrayIcon):
         update = st.get("update")
         if update:
             how, state = update.get("how"), update.get("state")
-            label = (f"Updating to v{update['version']}…" if state else
-                     f"Update to v{update['version']} (restarts agent-voice)" if how == "auto" else
-                     f"Update available: v{update['version']} (download)" if how == "page" else
-                     f"Update available: v{update['version']} (how to)")
+            label = tr("Updating to v{v}…" if state else
+                       "Update to v{v} (restarts agent-voice)" if how == "auto" else
+                       "Update available: v{v} (download)" if how == "page" else
+                       "Update available: v{v} (how to)", v=update['version'])
             add(label, w.start_update, enabled=not state)
             m.addSeparator()
-        add("Today's recap", lambda: _post("/recap"), enabled=online)
-        add("Check for updates (and install)", lambda: _post("/update_check", {"install": True}), enabled=online)
+        add(tr("Today's recap"), lambda: _post("/recap"), enabled=online)
+        add(tr("Check for updates (and install)"), lambda: _post("/update_check", {"install": True}), enabled=online)
         m.addSeparator()
-        add("Hide widget" if w.isVisible() else "Show widget", w.toggle_visible, key=hk.get("widget", ""))
-        add("Compact widget (orb only)", w.toggle_compact, checked=w.compact)
-        add("Notch (top of the screen)", w.toggle_notch, checked=w.notch)
-        add("Light theme", w.toggle_theme, checked=LIGHT)
+        add(tr("Hide widget") if w.isVisible() else tr("Show widget"), w.toggle_visible, key=hk.get("widget", ""))
+        add(tr("Compact widget (orb only)"), w.toggle_compact, checked=w.compact)
+        add(tr("Notch (top of the screen)"), w.toggle_notch, checked=w.notch)
+        add(tr("Light theme"), w.toggle_theme, checked=LIGHT)
         m.addSeparator()
-        add("New thread…", w.open_new_thread, online, key=hk.get("new_thread", ""))
-        add("Search history…", w.open_history, online)
-        add("Utils (Pomodoro, timers, to-do, notes...)", lambda: w.toggle_side("utils"), online, w.side_open["utils"])
-        add("Companion (agenda, usage, music)", lambda: w.toggle_side("companion"), online,
+        add(tr("New thread…"), w.open_new_thread, online, key=hk.get("new_thread", ""))
+        add(tr("Search history…"), w.open_history, online)
+        add(tr("Utils (Pomodoro, timers, to-do, notes...)"), lambda: w.toggle_side("utils"), online, w.side_open["utils"])
+        add(tr("Companion (agenda, usage, music)"), lambda: w.toggle_side("companion"), online,
             w.side_open["companion"])
-        add("Reply now", lambda: _post("/reply"), online, key=hk.get("reply", ""))
-        add("Stop", lambda: _post("/stop"), online, key=hk.get("stop", ""))
-        add("Read selection", lambda: _post("/read"), online, key=hk.get("read_selection", ""))
+        add(tr("Reply now"), lambda: _post("/reply"), online, key=hk.get("reply", ""))
+        add(tr("Stop"), lambda: _post("/stop"), online, key=hk.get("stop", ""))
+        add(tr("Read selection"), lambda: _post("/read"), online, key=hk.get("read_selection", ""))
         m.addSeparator()
-        add("Auto-send replies", lambda: _post("/handsfree", {"mode": "toggle"}), online,
+        add(tr("Auto-send replies"), lambda: _post("/handsfree", {"mode": "toggle"}), online,
             bool(st.get("hands_free")), hk.get("hands_free", ""))
-        add("Do not disturb", lambda: _post("/mute", {"mode": "toggle"}), online, bool(st.get("muted")), hk.get("mute", ""))
-        add("Chime mode (sounds only)", lambda: _post("/chime", {"mode": "toggle"}), online,
+        add(tr("Do not disturb"), lambda: _post("/mute", {"mode": "toggle"}), online, bool(st.get("muted")), hk.get("mute", ""))
+        add(tr("Chime mode (sounds only)"), lambda: _post("/chime", {"mode": "toggle"}), online,
             bool(st.get("chime")), hk.get("chime", ""))
-        add("Summarize answers", lambda: _post("/summary", {"mode": "toggle"}), online, bool(st.get("summary", True)))
-        add("Approve permissions by voice", lambda: _post("/approvals", {"mode": "toggle"}), online,
+        add(tr("Summarize answers"), lambda: _post("/summary", {"mode": "toggle"}), online, bool(st.get("summary", True)))
+        add(tr("Approve permissions by voice"), lambda: _post("/approvals", {"mode": "toggle"}), online,
             bool(st.get("approvals", True)))
-        add("Wake word (Hey Claude)", lambda: _post("/wake", {"mode": "toggle"}), online, bool(st.get("wake")))
-        add("Voice in headphones only", lambda: _post("/headphones", {"mode": "toggle"}), online,
+        add(tr("Wake word (Hey Claude)"), lambda: _post("/wake", {"mode": "toggle"}), online, bool(st.get("wake")))
+        add(tr("Voice in headphones only"), lambda: _post("/headphones", {"mode": "toggle"}), online,
             bool(st.get("headphones_only")))
-        add("Read ChatGPT / Copilot notifications", lambda: _post("/apps", {"mode": "toggle"}), online,
+        add(tr("Read ChatGPT / Copilot notifications"), lambda: _post("/apps", {"mode": "toggle"}), online,
             bool(st.get("desktop_apps")))
-        speed_menu = m.addMenu("Voice speed")
+        speed_menu = m.addMenu(tr("Voice speed"))
         speed_menu.setStyleSheet(_qss(MENU_STYLE))
         speed_menu.setEnabled(online)
         current = float(st.get("speed_x", 1.5) or 1.5)
@@ -5076,12 +5115,12 @@ class Tray(QSystemTrayIcon):
             speed_menu.addAction(act)
         m.addSeparator()
         if not online:
-            add("Start agent-voice", lambda: threading.Thread(target=client.start_detached, daemon=True).start())
-        add("Restart agent-voice", lambda: threading.Thread(target=client.restart, daemon=True).start())
-        add("Start with macOS" if MAC else "Start with Windows" if sys.platform == "win32" else "Start at login",
+            add(tr("Start agent-voice"), lambda: threading.Thread(target=client.start_detached, daemon=True).start())
+        add(tr("Restart agent-voice"), lambda: threading.Thread(target=client.restart, daemon=True).start())
+        add(tr("Start with macOS") if MAC else tr("Start with Windows") if sys.platform == "win32" else tr("Start at login"),
             self._toggle_autostart, checked=_autostart_enabled())
         m.addSeparator()
-        add("Quit agent-voice", self._quit_all)
+        add(tr("Quit agent-voice"), self._quit_all)
 
     @staticmethod
     def _quit_all() -> None:

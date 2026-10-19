@@ -2120,3 +2120,70 @@ def test_your_language_wins_when_detection_is_unsure(daemon, monkeypatch):
     assert t.transcribe(audio)[1] == "en" and calls == [None]
     daemon.set_language("en")
     assert lang.detect("Docker") == "en"
+
+
+def _translated_strings():
+    """Every literal passed to tr() / plural() (and the voice's _confirm / _say) in agent_voice."""
+    import ast
+    from pathlib import Path
+
+    def literals(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return [node.value]
+        if isinstance(node, ast.IfExp):
+            return literals(node.body) + literals(node.orelse)
+        return []
+
+    found = {}
+    for path in sorted((Path(__file__).parent.parent / "agent_voice").glob("*.py")):
+        if path.name in ("i18n.py", "i18n_fr.py"):
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call):
+                f = node.func
+                name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+                args = node.args[:1] if name in ("tr", "_confirm", "_say") else node.args[1:3] if name == "plural" else []
+                for a in args:
+                    for v in literals(a):
+                        found.setdefault(v, f"{path.name}:{node.lineno}")
+    return found
+
+
+def test_every_string_has_its_french():
+    import ast
+    import string
+    from pathlib import Path
+
+    from agent_voice import companion, i18n, i18n_fr, ntfy, server, widget
+
+    def fields(text):
+        return {f for _, f, _, _ in string.Formatter().parse(text) if f}
+
+    # Shown where they're displayed (tr(variable)): the constants behind them.
+    shown = [title for _c, title, sub in widget.PHASES.values()] + [sub for _c, _t, sub in widget.PHASES.values() if sub]
+    shown += [label for label, options in widget.SETTING_ROWS.values()]
+    shown += [text for _l, options in widget.SETTING_ROWS.values() for _v, text in options if not text[0].isdigit()]
+    shown += [section for section, _rows in widget.SETTINGS] + list(widget.SidePanel.LABELS.values())
+    shown += list(widget.SidePanel.TITLES.values()) + [h for _c, h in widget.BANNER_KINDS.values() if h]
+    shown += list(companion.PHASES.values()) + list(widget.QuickInput.HINTS.values())
+    shown += [label for _icon, label in widget.BANNER_BUTTONS.values()]
+    shown += [said for _p, _t, said in ntfy.KINDS.values()] + list(server.Daemon._NEXT_STEP.values())
+    shown += ["Claude app", "Browser", "the Claude desktop app", "Yours", "From your agents", "presenting",
+              "full screen", "focus session", "meeting", "daily", "weekdays", "passed", "failed"]
+    missing = {k: w for k, w in _translated_strings().items() if k not in i18n_fr.FR}
+    missing.update({k: "constant" for k in shown if k not in i18n_fr.FR})
+    assert not missing, missing
+    for en, fr in i18n_fr.FR.items():
+        assert fields(en) == fields(fr), (en, fr)  # the same placeholders, or format() fails in French
+    keys = [k.value for k in ast.parse(Path(i18n_fr.__file__).read_text(encoding="utf-8")).body[-1].value.keys]
+    assert len(keys) == len(set(keys)), [k for k in keys if keys.count(k) > 1]  # no key given twice
+
+    i18n.set_language("fr")
+    try:
+        assert i18n.tr("Settings") == "Réglages" and i18n.plural(2, "{n} needs you", "{n} need you") == "2 vous attendent"
+        assert i18n.plural(0, "{n} turn", "{n} turns") == "0 tour"  # French: 0 is singular
+        assert i18n.action("Run pytest") == "Exécuter pytest" and i18n.action("edit widget.py") == "modifier widget.py"
+        assert i18n.tr("Speed {x}.", in_lang="en", x="1.5") == "Speed 1.5."  # the voice keeps its own language
+    finally:
+        i18n.set_language("en")
+    assert i18n.tr("Settings") == "Settings" and i18n.plural(0, "{n} turn", "{n} turns") == "0 turns"

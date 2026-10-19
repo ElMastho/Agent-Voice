@@ -24,6 +24,8 @@ from agent_voice import (__version__, agenda, calls, claudeapp, companion, histo
 from agent_voice.config import HOME, LOG_DIR, LOOPBACK, load_config, load_state, save_state
 from agent_voice.hooks import strip_summary
 from agent_voice.textclean import result_label
+from agent_voice.i18n import action, day_time, plural, tr
+from agent_voice.i18n import set_language as set_ui_language
 from agent_voice.tts import Speaker
 
 log = logging.getLogger("agent_voice.server")
@@ -404,8 +406,8 @@ def names_match(said: str, label: str) -> bool:
     return bool(want) and want <= have
 
 
-def _join(items: list[str]) -> str:
-    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+def _join(items: list[str], in_lang: str | None = None) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + tr(" and ", in_lang=in_lang) + items[-1]
 
 
 def _plain(text: str) -> str:
@@ -440,6 +442,7 @@ class Daemon:
         self._apply_engine()
         # Your language (Settings): an unsure detection falls back to it, for the voice and for what you say.
         self._apply_language(self.state.get("language") or config.get("default_lang", "en"))
+        set_ui_language(self.state.get("ui_language") or config.get("ui_language") or "en")
         self.speaker = Speaker(config)
         # HTTP handlers, the job worker, the mic and wake threads all touch the thread queue.
         self._lock = threading.RLock()
@@ -642,7 +645,7 @@ class Daemon:
         log.info("speed=%sx", x)
         # Applies from the next sentence; give a sample when idle so the change can be heard.
         if not self.speaker.busy:
-            self._confirm(f"Speed {x:g}.")
+            self._confirm("Speed {x}.", x=f"{x:g}")
 
     @property
     def chime(self) -> bool:
@@ -678,21 +681,30 @@ class Daemon:
         langmod.prefer(code)  # text detection's fallback
 
     def set_language(self, code: str) -> None:
-        """English or French: the language you speak and hear most (and the notch's own words)."""
+        """English or French: the language you speak and hear most."""
         self._apply_language(code)
         self.state["language"] = self.language
         save_state(self.state)
         log.info("language=%s", self.language)
-        if not self.quiet:
-            self.speaker.stop()
-            self.speaker.speak("Je parle français." if self.language == "fr" else "English it is.", self.language)
+        self._confirm("English it is.")
+
+    @property
+    def ui_language(self) -> str:
+        return self.state.get("ui_language") or self.config.get("ui_language") or "en"
+
+    def set_ui_language(self, code: str) -> None:
+        """English or French for what's shown: the notch, its notifications, the phone's (the widget relaunches)."""
+        self.state["ui_language"] = "fr" if code == "fr" else "en"
+        save_state(self.state)
+        set_ui_language(self.ui_language)
+        log.info("ui_language=%s", self.ui_language)
 
     def set_engine(self, name: str) -> None:
         """Light (Piper) or natural (Kokoro): the natural voice is downloaded the first time (~120 MB)."""
         from agent_voice import kokoro
 
         if name == "kokoro" and not kokoro.available():
-            self._show_banner("The natural voice needs the kokoro-onnx package: pip install kokoro-onnx.", "", "",
+            self._show_banner(tr("The natural voice needs the kokoro-onnx package: pip install kokoro-onnx."), "", "",
                               kind="note", tag="voice")
             return
         self.state["engine"] = name
@@ -713,7 +725,7 @@ class Daemon:
             self._engine_state = f"downloading {int(frac * 100)}%"
 
         self._engine_state = "downloading 0%"
-        self._show_banner("Downloading the natural voice (about 120 MB, once)...", "", "", kind="note", tag="voice")
+        self._show_banner(tr("Downloading the natural voice (about 120 MB, once)..."), "", "", kind="note", tag="voice")
         try:
             kokoro.download(progress)
             kokoro.engine()  # loaded now, not on the first sentence
@@ -721,7 +733,7 @@ class Daemon:
             log.exception("kokoro download failed")
             self.state["engine"] = "piper"
             save_state(self.state)
-            self._show_banner(f"Couldn't get the natural voice ({exc}). Still the light one.", "", "", kind="note",
+            self._show_banner(tr("Couldn't get the natural voice ({why}). Still the light one.", why=exc), "", "", kind="note",
                               tag="voice")
             return
         finally:
@@ -795,11 +807,15 @@ class Daemon:
     def output(self) -> str:
         return "silent" if self.muted else "chime" if self.chime else "voice"
 
-    def _confirm(self, text: str) -> None:
-        """Say a setting change out loud, unless the voice is off (chimes, silent)."""
+    def _confirm(self, text: str, **values) -> None:
+        """Say a setting change out loud, in your speech language, unless the voice is off (chimes, silent)."""
         if not self.quiet:
             self.speaker.stop()
-            self.speaker.speak(text, "en")
+            self.speaker.speak(tr(text, in_lang=self.language, **values), self.language)
+
+    def _say(self, text: str, **values) -> None:
+        """Something the app says itself (not an agent's reply): in your speech language."""
+        self.speaker.speak(tr(text, in_lang=self.language, **values), self.language)
 
     def set_chime(self, on: bool) -> None:
         self.state["chime"] = on
@@ -958,16 +974,18 @@ class Daemon:
         if session:
             self.threads[session] = {"source": source, "last": time.time()}
         self._event("needs", session, source, text)
-        self._push("needs", title, text or "Waiting for you")
+        self._push("needs", title, text or tr("Waiting for you"))
         log.info("%s needs you", title)
         if not announce or self.muted:
             return
-        self._show_banner(text or "Waiting for you", session, source, kind="needs", tag="needs you")
+        self._show_banner(text or tr("Waiting for you"), session, source, kind="needs", tag="needs you")
         if self.chime:
             self.play_chime("attention")
         else:
             self._wake_cancel.set()
-            self.speaker.speak(f"{title} needs you." + (f" {text}" if text and len(text) < 160 else ""))
+            self._say("{title} needs you.", title=title)
+            if text and len(text) < 160:
+                self.speaker.speak(text)
 
     def _settled(self, session: str) -> None:
         """The conversation moved on (it talks, works, or you wrote to it): it no longer waits on you."""
@@ -978,7 +996,7 @@ class Daemon:
         items = []
         for p in sorted(self._perms.values(), key=lambda p: p["at"]):
             items.append({"kind": "permission", "id": p["id"], "session": p["session"], "source": p["source"],
-                          "text": p["summary"], "at": p["at"]})
+                          "text": action(p["summary"]), "at": p["at"]})
         q = self.question
         if q:
             items.append({"kind": "question", "session": q["session"], "source": q["agent"], "text": q["question"],
@@ -987,11 +1005,12 @@ class Daemon:
         self.attention = {s: a for s, a in self.attention.items() if now - a["at"] < 3600}
         for session, a in self.attention.items():
             items.append({"kind": "input", "session": session, "source": a["source"],
-                          "text": a["text"] or "Waiting for you", "at": a["at"]})
+                          "text": a["text"] or tr("Waiting for you"), "at": a["at"]})
         for session, info in self._limited.items():
-            when = ("about " if info.get("guess") else "") + _clock(info["resets"], "five_hour")
+            when = (tr("about ") if info.get("guess") else "") + _clock(info["resets"], "five_hour")
             items.append({"kind": "limit", "session": session, "source": info["source"], "resume": info["resume"],
-                          "text": f"Out of quota · resumes {when}" if info["resume"] else f"Out of quota until {when}",
+                          "text": tr("Out of quota · resumes {when}" if info["resume"] else "Out of quota until {when}",
+                                     when=when),
                           "at": info["at"]})
         for item in items:
             item["title"] = self._title(item["session"], item.pop("source"))
@@ -1157,7 +1176,8 @@ class Daemon:
         title = self._title(session, self.threads.get(session, {}).get("source", ""))
         if not (hwnd and winfocus.is_window(hwnd)):
             log.info("no window known for %r: message not sent", title)
-            self._show_banner(f"I don't know where {title} is yet: send it one message from its window first.",
+            self._show_banner(tr("I don't know where {title} is yet: send it one message from its window first.",
+                                 title=title),
                               session, "", kind="you", tag="not sent")
             _beep(300)
             return
@@ -1188,7 +1208,7 @@ class Daemon:
         """
         session = self._find_thread(name)
         if session is None:
-            self._show_banner(f"I don't know a thread called {name}.", "", "", kind="note", tag="not sent")
+            self._show_banner(tr("I don't know a thread called {name}.", name=name), "", "", kind="note", tag="not sent")
             _beep(300)
             return
         window = winfocus.foreground()  # what you're looking at, before anything moves
@@ -1198,22 +1218,23 @@ class Daemon:
             content = self._save_shot(winfocus.clipboard_png() or winfocus.window_png(window))
         title = self._title(session, self.threads.get(session, {}).get("source", ""))
         if not content:
-            self._show_banner(f"Nothing to send to {title}: select some text or copy a screenshot first.", "", "",
+            self._show_banner(tr("Nothing to send to {title}: select some text or copy a screenshot first.", title=title), "", "",
                               kind="note", tag="not sent")
             _beep(300)
             return
-        self._deliver(session, message, content, lang, f"(to {title}) {content[:120]}")
+        self._deliver(session, message, content, lang, tr("(to {title}) {text}", title=title, text=content[:120]))
 
     def look_at(self, session: str, message: str, lang: str) -> None:
         """'Look at this': a picture of the window in front goes to the conversation, with what you asked."""
         window = winfocus.foreground()
         path = self._save_shot(winfocus.window_png(window))
         if not path:
-            self._show_banner("Couldn't take a picture of that window.", "", "", kind="note", tag="not sent")
+            self._show_banner(tr("Couldn't take a picture of that window."), "", "", kind="note", tag="not sent")
             _beep(300)
             return
         log.info("look at %r", winfocus.title(window)[:60])
-        self._deliver(session, message, path, lang, f"(a picture of {winfocus.title(window)[:60] or 'the window'})")
+        self._deliver(session, message, path, lang,
+                      tr("(a picture of {window})", window=winfocus.title(window)[:60] or tr("the window")))
 
     def _deliver(self, session: str, message: str, content: str, lang: str, shown: str) -> None:
         """Content for a conversation: with a message, sent (after the take-back); alone, typed in for your question."""
@@ -1261,19 +1282,20 @@ class Daemon:
         when = _clock(self._limited[session]["resets"], "five_hour")
         log.info("%s hit its limit (resets %s%s)", title, when, ", resuming then" if resume else "")
         self._event("needs", session, source, "limit reached")
-        self._push("limit", title, f"Out of quota until {'about ' if guess else ''}{when}"
-                   + (": it gets “continue” then." if resume else "."))
+        about = tr("about ") if guess else ""
+        self._push("limit", title, tr("Out of quota until {when}", when=about + when)
+                   + (tr(": it gets “continue” then.") if resume else "."))
         if source == "claude" and resets and not guess:
             window = "seven_day" if resets - time.time() > 6 * 3600 else "five_hour"
             self._set_limits("claude", {window: {"pct": 100, "resets": int(resets)}})
         if before.get("sent") and resume:
             return  # our "continue" came too early: quietly try again at the next reset
         if resume:
-            self._show_banner(f"{title} is out of quota until {'about ' if guess else ''}{when}: I'll send it "
-                              f"\"continue\" then.", session, source, kind="note", tag="limit")
+            self._show_banner(tr("{title} is out of quota until {when}: I'll send it “continue” then.", title=title,
+                                 when=about + when), session, source, kind="note", tag="limit")
             return
-        self._show_banner(f"{title} is out of quota until {'about ' if guess else ''}{when}. Say \"resume when it "
-                          "resets\" or click Resume, and I'll send it \"continue\" then.", session, source,
+        self._show_banner(tr("{title} is out of quota until {when}. Say “resume when it resets” or click Resume, and "
+                             "I'll send it “continue” then.", title=title, when=about + when), session, source,
                           kind="needs", tag="limit")
         if self.chime:
             self.play_chime("attention")
@@ -1288,7 +1310,8 @@ class Daemon:
         info = self._limited[session]
         title = self._title(session, info["source"])
         when = _clock(info["resets"], "five_hour")
-        self._show_banner(f"I'll send {title} \"continue\" at {when}." if on else f"{title} won't be resumed.",
+        self._show_banner(tr("I'll send {title} “continue” at {when}." if on else "{title} won't be resumed.",
+                             title=title, when=when),
                           session, info["source"], kind="note", tag="limit")
         return True
 
@@ -1307,7 +1330,8 @@ class Daemon:
                 self._save_limited()
                 message = str(self.config.get("resume", {}).get("message") or "Continue.")
                 log.info("resuming %s after its limit reset", self._title(session, info["source"]))
-                self._push("resumed", self._title(session, info["source"]), f"Sent “{message}” after its limit reset.")
+                self._push("resumed", self._title(session, info["source"]),
+                           tr("Sent “{message}” after its limit reset.", message=message))
                 self.jobs.put(lambda s=session, m=message: self._send_to(s, m, "en"))
 
     def _not_limited(self, session: str) -> None:
@@ -1382,7 +1406,8 @@ class Daemon:
         prompt = prompt.strip()
         if not prompt or not at:
             raise ValueError("a prompt and a time")
-        title = (f"New thread ({launch.LABELS.get((new or {}).get('target', ''), 'where you last worked')})"
+        title = (tr("New thread ({where})", where=launch.LABELS.get((new or {}).get('target', ''),
+                                                                     tr('where you last worked')))
                  if new is not None else self._title(session, self.threads.get(session, {}).get("source", "")))
         item = {"id": max((s["id"] for s in self._schedules), default=0) + 1, "at": int(at), "prompt": prompt[:4000],
                 "session": session, "new": new, "repeat": repeat if repeat in schedule.REPEATS else "",
@@ -1390,8 +1415,10 @@ class Daemon:
         self._schedules.append(item)
         self._save_schedules()
         log.info("scheduled #%d for %s: %s", item["id"], _clock(at, "seven_day"), title)
-        self._show_banner(f"At {_clock(at, 'seven_day')}" + (f" ({item['repeat']})" if item["repeat"] else "")
-                          + f", {title} gets: {prompt[:160]}", "", "", kind="note", tag="scheduled")
+        self._show_banner(tr("At {when}", when=_clock(at, 'seven_day'))
+                          + (f" ({tr(item['repeat'])})" if item["repeat"] else "")
+                          + tr(", {title} gets: {prompt}", title=title, prompt=prompt[:160]), "", "", kind="note",
+                          tag="scheduled")
         return item
 
     def cancel_schedule(self, item_id: int) -> bool:
@@ -1435,7 +1462,8 @@ class Daemon:
                 self._schedules.remove(item)
             changed = True
             if late:
-                self._show_banner(f"Missed while the PC was off: {item['title']}: {item['prompt'][:120]}", "", "",
+                self._show_banner(tr("Missed while the PC was off: {title}: {prompt}", title=item['title'],
+                                     prompt=item['prompt'][:120]), "", "",
                                   kind="note", tag="scheduled")
                 continue
             self.jobs.put(lambda i=dict(item): self._run_schedule(i))
@@ -1482,37 +1510,44 @@ class Daemon:
             return
         if kind == "timer":
             what = item.get("label") or companion.duration_words(int(item.get("total") or 0))
-            title, text, said = "Timer done", what, f"Time's up: {what}." if item.get("label") else "Time's up."
+            title, text = "Timer done", what
+            said = tr("Time's up: {what}.", in_lang=self.language, what=what) if item.get("label") else tr(
+                "Time's up.", in_lang=self.language)
             snooze = {"kind": "timer", "seconds": 300, "label": item.get("label") or ""}
         else:
-            title, text, said = "Reminder", item["text"], f"Reminder: {item['text']}"
+            title, text = "Reminder", item["text"]
+            said = tr("Reminder: {text}", in_lang=self.language, text=item["text"])
             snooze = {"kind": "reminder", "seconds": 600, "text": item["text"]}
         if late:
-            text += f" (due at {time.strftime('%H:%M', time.localtime(item.get('end') or item.get('at')))})"
+            text += tr(" (due at {time})", time=time.strftime('%H:%M', time.localtime(item.get('end') or item.get('at'))))
         log.info("companion: %s due", kind)
         self._show_banner(text, "", "", kind=kind, tag=title, extra={"snooze": snooze})
-        self._push("scheduled", title, text)
+        self._push("scheduled", tr(title), text)
         if self.muted or late:
             return
         self.play_chime("attention")
         if not self.chime:
-            self.speaker.speak(said)
+            self.speaker.speak(said, self.language)
 
     def _pomodoro_due(self, ended: dict, late: bool) -> None:
         """A focus session or a break ended: the next one has started. Say so, softly."""
         nxt = ended["next"]
         minutes = companion.duration_words(int(nxt["length"]))
+        long = nxt["phase"] == "long"
         if ended["phase"] == "focus":
-            text = f"Focus done ({nxt['today']} today): {minutes} {'long ' if nxt['phase'] == 'long' else ''}break."
-            said = f"Time for a {'long ' if nxt['phase'] == 'long' else ''}break: {minutes}."
+            text = tr("Focus done ({n} today): {minutes} long break." if long else
+                      "Focus done ({n} today): {minutes} break.", n=nxt['today'], minutes=minutes)
+            said = tr("Time for a long break: {minutes}." if long else "Time for a break: {minutes}.",
+                      in_lang=self.language, minutes=minutes)
         else:
-            text, said = f"Break over: {minutes} of focus.", "Back to focus."
+            text = tr("Break over: {minutes} of focus.", minutes=minutes)
+            said = tr("Back to focus.", in_lang=self.language)
         self._show_banner(text, "", "", kind="pomodoro", tag="Pomodoro")
         if self.muted or late:
             return
         self.play_chime("done" if ended["phase"] == "focus" else "attention")
         if not self.chime:
-            self.speaker.speak(said)
+            self.speaker.speak(said, self.language)
 
     def companion_said(self, text: str, lang: str = "") -> bool:
         """'Timer 10 minutes', 'add milk to my list', 'remind me at 4 to call Paul': done here; False if it isn't one."""
@@ -1539,7 +1574,7 @@ class Daemon:
             elif kind == "reminder":
                 self.companion.reminder("add", text=action["text"], at=action["at"])
         except ValueError as exc:
-            self._show_banner(f"Not done: {exc}.", "", "", kind="note", tag="companion")
+            self._show_banner(tr("Not done: {why}.", why=tr(str(exc))), "", "", kind="note", tag="companion")
             _beep(300)
             return True
         _beep(880)
@@ -1549,7 +1584,7 @@ class Daemon:
         item = self.companion.note("add", text=text)
         if self.history_db is not None:  # searchable from History, with everything else
             try:
-                self.history_db.add("note", item["text"], title="Note")
+                self.history_db.add("note", item["text"], title=tr("Note"))
             except Exception:
                 log.exception("note not kept in the history")
         return item
@@ -1653,44 +1688,48 @@ class Daemon:
                 "tokens": sum(int(t.get("tokens") or 0) for t in threads), "hours": day["hours"]}
 
     def recap_text(self) -> tuple[str, str]:
-        """(shown, spoken): what each thread did today, what's waiting, the limits and the tokens."""
+        """(shown, spoken): what each thread did today, what's waiting, the limits and the tokens. Shown in the
+        interface's language, spoken in your speech language."""
         day, stats = self._day(), self._day_status()
         if not stats["turns"]:
-            return "Nothing yet today.", "Nothing yet today."
+            return tr("Nothing yet today."), tr("Nothing yet today.", in_lang=self.language)
         threads = sorted(day["threads"].items(), key=lambda kv: -kv[1]["turns"])
-        lines = [f"{stats['turns']} turn{'s' if stats['turns'] != 1 else ''} in {stats['threads']} "
-                 f"thread{'s' if stats['threads'] != 1 else ''}" +
-                 (f" · {textclean.tokens_label(stats['tokens'])} tokens" if stats["tokens"] else "") + "."]
+        lines = [plural(stats["turns"], "{n} turn", "{n} turns") + " "
+                 + plural(stats["threads"], "in {n} thread", "in {n} threads")
+                 + (tr(" · {tokens} tokens", tokens=textclean.tokens_label(stats['tokens'])) if stats["tokens"] else "")
+                 + "."]
         for session, t in threads[:5]:
             title = self._title(session, t.get("source", "")) if session in self.threads else t.get("title") or "?"
-            lines.append(f"{title} ({t['turns']}): {textclean.truncate(t['last'], 110) or 'done'}")
-        waiting = [n["title"] for n in self._needs_status()]
+            lines.append(f"{title} ({t['turns']}): {textclean.truncate(t['last'], 110) or tr('done')}")
+        waiting = sorted({n["title"] for n in self._needs_status()})
         if waiting:
-            lines.append(f"Still waiting on you: {_join(sorted(set(waiting)))}.")
+            lines.append(tr("Still waiting on you: {who}.", who=_join(waiting)))
         limits = []
         for source, windows in self._limits_status().items():
-            parts = [f"{'5h' if k == 'five_hour' else 'week'} "
+            parts = [(tr("5h") if k == "five_hour" else tr("week")) + " "
                      + (f"{'~' if w.get('est') else ''}{w['pct']}%" if w.get("pct") is not None
-                        else f"{textclean.tokens_label(w.get('tokens', 0))} tokens") for k, w in sorted(windows.items())]
+                        else tr("{tokens} tokens", tokens=textclean.tokens_label(w.get('tokens', 0))))
+                     for k, w in sorted(windows.items())]
             limits.append(f"{AGENT_TITLES.get(source, source.capitalize())} {', '.join(parts)}")
         if limits:
-            lines.append("Limits: " + "; ".join(limits) + ".")
-        top = threads[0][1]
-        said = (f"Today: {stats['turns']} turns in {stats['threads']} threads, most of it in "
-                f"{top.get('title') or 'one thread'}." + (f" {_join(sorted(set(waiting)))} still "
-                                                           f"need{'s' if len(set(waiting)) == 1 else ''} you."
-                                                           if waiting else ""))
+            lines.append(tr("Limits: ") + "; ".join(limits) + ".")
+        top, sl = threads[0][1], self.language
+        said = tr("Today: {turns} turns in {threads} threads, most of it in {top}.", in_lang=sl, turns=stats['turns'],
+                  threads=stats['threads'], top=top.get('title') or tr('one thread', in_lang=sl))
+        if waiting:
+            said += " " + plural(len(waiting), "{who} still needs you.", "{who} still need you.", in_lang=sl,
+                                 who=_join(waiting, sl))
         week = [w["pct"] for windows in self._limits_status().values() for k, w in windows.items()
                 if k == "seven_day" and w.get("pct") is not None]
         if week:
-            said += f" You've used {max(week)}% of your weekly limit."
+            said += " " + tr("You've used {pct}% of your weekly limit.", in_lang=sl, pct=max(week))
         return " ".join(lines), said
 
     def recap(self, spoken: bool = True) -> None:
         shown, said = self.recap_text()
         log.info("recap: %s", said)
         self._show_banner(shown, "", "", kind="recap")
-        self._push("recap", "Today", shown, full=shown)
+        self._push("recap", tr("Today"), shown, full=shown)
         if spoken and not self.quiet:
             self._wake_cancel.set()
             self.speaker.speak(said, "en")
@@ -1760,23 +1799,27 @@ class Daemon:
                     summaries[title] = e["text"]  # its latest turn
             elif e["kind"] == "needs" and e["session"] in waiting and title not in needs:
                 needs.append(title)
-        parts = ([f"{_join(done)} finished"] if done else []) + (
-            [f"{_join(needs)} need{'s' if len(needs) == 1 else ''} you"] if needs else [])
+        def news(in_lang: str | None = None) -> list[str]:
+            return ([plural(len(done), "{who} finished", "{who} finished", in_lang=in_lang, who=_join(done, in_lang))]
+                    if done else []) + ([plural(len(needs), "{who} needs you", "{who} need you", in_lang=in_lang,
+                                                who=_join(needs, in_lang))] if needs else [])
+
+        parts = news()
         if not parts:
             return
-        said = f"While you were away: {'; '.join(parts)}."
+        said = tr("While you were away: {news}.", in_lang=self.language, news="; ".join(news(self.language)))
         log.info("catch-up: %s", said)
         # The banner's header already says "While you were away": the body goes straight to the news. One
         # conversation finished: its summary right after its name, not the name twice.
         if len(done) == 1 and done[0] in summaries:
-            body = [f"{done[0]} finished: {summaries[done[0]]}"] + (
-                [f"{_join(needs)} need{'s' if len(needs) == 1 else ''} you."] if needs else [])
+            body = [tr("{who} finished: {summary}", who=done[0], summary=summaries[done[0]])] + (
+                [plural(len(needs), "{who} needs you.", "{who} need you.", who=_join(needs))] if needs else [])
         else:
             body = [f"{'; '.join(parts)}."] + [f"{t}: {x}" for t, x in list(summaries.items())[-3:]]
         self._show_banner(" ".join(body), "", "", kind="catchup")
         if not self.quiet:
             self._wake_cancel.set()
-            self.speaker.speak(said, "en")
+            self.speaker.speak(said, self.language)
 
     # -- desktop apps -----------------------------------------------------------
     @property
@@ -1875,12 +1918,12 @@ class Daemon:
             if w["pct"] >= 90 and key not in self._limit_warned:
                 self._limit_warned.add(key)
                 name = AGENT_TITLES.get(source, source.capitalize())
-                span = "5-hour" if window == "five_hour" else "weekly"
-                when = f", it resets at {_clock(w['resets'], window)}" if w["resets"] else ""
+                when = tr(", it resets at {time}", time=_clock(w['resets'], window)) if w["resets"] else ""
                 log.info("%s %s limit at %d%%", source, window, w["pct"])
-                about = "about " if w.get("est") else ""
-                self._show_banner(f"{name} has used {about}{w['pct']}% of its {span} limit{when}.", "", "",
-                                  kind="note", tag="limits")
+                about = tr("about ") if w.get("est") else ""
+                self._show_banner(tr("{name} has used {pct}% of its 5-hour limit{when}." if window == "five_hour" else
+                                     "{name} has used {pct}% of its weekly limit{when}.", name=name,
+                                     pct=f"{about}{w['pct']}", when=when), "", "", kind="note", tag="limits")
 
     def _quota_watch(self) -> None:
         """Every minute: every agent's limits, re-read where they changed."""
@@ -2014,16 +2057,16 @@ class Daemon:
         log.info("usage line: %s", result)
         self._agents_at = 0.0
         if result.startswith("skipped"):
-            text = "Claude Code already has your own status line: agent-voice leaves it alone."
+            text = tr("Claude Code already has your own status line: agent-voice leaves it alone.")
         elif result.startswith("failed"):
-            text = f"Couldn't change Claude Code's status line ({result[8:]})."
+            text = tr("Couldn't change Claude Code's status line ({why}).", why=result[8:])
         elif enable:
-            text = "Claude Code's limits will show here after its next reply (from its status line)."
+            text = tr("Claude Code's limits will show here after its next reply (from its status line).")
         else:
             self.limits.pop("claude", None)
             self.state["limits"] = self.limits
             save_state(self.state)
-            text = "Claude Code's limits are off; its status line is back to normal."
+            text = tr("Claude Code's limits are off; its status line is back to normal.")
         self._show_banner(text, "", "", kind="note", tag="limits")
 
     def set_muted(self, muted: bool) -> None:
@@ -2264,7 +2307,7 @@ class Daemon:
             log.info("browser extension connected")
             self.state["browser_seen"] = round(time.time())
             save_state(self.state)
-            self._show_banner("The extension is connected: replies on ChatGPT, Claude and Gemini will be read out.",
+            self._show_banner(tr("The extension is connected: replies on ChatGPT, Claude and Gemini will be read out."),
                               "", "", kind="note", tag="browser")
         self._agents_at = 0.0
 
@@ -2284,10 +2327,12 @@ class Daemon:
             if result.startswith("skipped"):
                 text = f"{name}: {result}"
             else:
-                text = f"{name} connected. " + self._NEXT_STEP.get(agent, f"Restart {name} to load agent-voice.")
+                text = tr("{name} connected.", name=name) + " " + (
+                    tr(self._NEXT_STEP[agent]) if agent in self._NEXT_STEP
+                    else tr("Restart {name} to load agent-voice.", name=name))
         except Exception as exc:  # a malformed settings file must not take the daemon down
             log.exception("install %s failed", agent)
-            text = f"Couldn't connect {name}: {exc}"
+            text = tr("Couldn't connect {name}: {why}", name=name, why=exc)
         self._agents_at = 0.0
         if agent == "browser":
             self.state.pop("browser_seen", None)  # "on" again once the extension says hello
@@ -2343,11 +2388,11 @@ class Daemon:
         except Exception:
             log.exception("new thread failed")
         if ok:
-            self._show_banner(prompt, "", "", kind="you", tag=f"new · {label}")
+            self._show_banner(prompt, "", "", kind="you", tag=tr("new · {where}", where=label))
             self.history = [{"text": prompt, "lang": lang or langmod.detect(prompt), "at": round(time.time())},
                             *self.history][:5]
         else:
-            self._show_banner(f"Couldn't start a new thread in {label}. Your prompt is on the clipboard.", "", "",
+            self._show_banner(tr("Couldn't start a new thread in {where}. Your prompt is on the clipboard.", where=label), "", "",
                               kind="note", tag="new thread")
             import pyperclip
 
@@ -3047,7 +3092,7 @@ class Daemon:
         if session:
             self.threads[session] = {"source": source, "last": time.time()}
         self._event("needs", session, source, summary)
-        self._push("permission", self._title(session, source), f"Wants to {summary}.")
+        self._push("permission", self._title(session, source), tr("Wants to {action}.", action=action(summary)))
         log.info("permission #%d: %s (%d waiting)", self._perm_seq, summary, len(self._perms))
         if self.permission is None:
             self._present_permission(perm)
@@ -3064,7 +3109,8 @@ class Daemon:
             return
         self.speaker.stop()
         self._wake_cancel.set()
-        self.speaker.speak(f"{self._title(perm['session'], perm['source'])} wants to {perm['summary']}. Allow?", "en")
+        self._say("{title} wants to {action}. Allow?", title=self._title(perm['session'], perm['source']),
+                  action=action(perm['summary'], in_lang=self.language))
         if self.transcriber is not None:
             self._reply_session = perm["session"]
             self._listen_armed = True
@@ -3139,19 +3185,19 @@ class Daemon:
     def check_updates(self, install: bool = True) -> None:
         """The tray's "Check for updates": ask GitHub now; a newer version is installed right away (`install`),
         and agent-voice restarts with it."""
-        self._show_banner("Checking for updates...", "", "", kind="note", tag="update")
+        self._show_banner(tr("Checking for updates..."), "", "", kind="note", tag="update")
         found = self._fetch_release()
         if found is None:
-            self._show_banner("Couldn't reach GitHub to check for updates: try again in a moment.", "", "",
+            self._show_banner(tr("Couldn't reach GitHub to check for updates: try again in a moment."), "", "",
                               kind="note", tag="update")
         elif not found:
             self.update = None
-            self._show_banner(f"agent-voice is up to date (version {__version__}).", "", "", kind="note",
+            self._show_banner(tr("agent-voice is up to date (version {v}).", v=__version__), "", "", kind="note",
                               tag="update")
         elif install:
             self.install_update()
         else:
-            self._show_banner(f"Version {self.update['version']} is available: click Update in the notch.", "", "",
+            self._show_banner(tr("Version {v} is available: click Update in the notch.", v=self.update['version']), "", "",
                               kind="note", tag="update")
 
     def _update_result(self) -> None:
@@ -3162,53 +3208,53 @@ class Daemon:
         if not result:
             return
         if result.get("ok"):
-            text = f"Updated to version {result.get('version')}. Your settings and voices are unchanged."
+            text = tr("Updated to version {v}. Your settings and voices are unchanged.", v=result.get('version'))
         else:
-            text = (f"The update to version {result.get('version')} didn't go through: {result.get('error')}. "
-                    "Nothing was changed; try again from the tray.")
+            text = tr("The update to version {v} didn't go through: {why}. Nothing was changed; try again from the "
+                      "tray.", v=result.get('version'), why=result.get('error'))
         self._show_banner(text, "", "", kind="note", tag="update")
 
     def install_update(self) -> None:
         """The widget's Update button: download, verify and hand off to the updater (release build only)."""
         up = self.update
         if not up:
-            self._show_banner("agent-voice is up to date.", "", "", kind="note", tag="update")
+            self._show_banner(tr("agent-voice is up to date."), "", "", kind="note", tag="update")
             return
         version = up["version"]
         if up.get("how") == "git":
             self._git_update(up)
             return
         if up.get("how") != "auto":
-            self._show_banner(f"Version {version} is out: download it from the release page.",
+            self._show_banner(tr("Version {v} is out: download it from the release page.", v=version),
                               "", "", kind="note", tag="update")
             return
         if up.get("state"):
             return
         up["state"] = "downloading"
-        self._show_banner(f"Downloading version {version}...", "", "", kind="note", tag="update")
+        self._show_banner(tr("Downloading version {v}...", v=version), "", "", kind="note", tag="update")
         try:
             def progress(frac: float) -> None:
-                self._show_banner(f"Downloading version {version}... {int(frac * 100)}%", "", "",
+                self._show_banner(tr("Downloading version {v}... {pct}%", v=version, pct=int(frac * 100)), "", "",
                                   kind="note", tag="update")
 
             zip_path = updater.download(self._release["asset"], progress)
-            self._show_banner(f"Checking version {version}...", "", "", kind="note", tag="update")
+            self._show_banner(tr("Checking version {v}...", v=version), "", "", kind="note", tag="update")
             root = updater.extract(zip_path, zip_path.parent / "build")
         except Exception as e:
             log.exception("update download failed")
             up["state"] = ""
-            self._show_banner(f"Couldn't download version {version} ({e}). Nothing was changed.",
+            self._show_banner(tr("Couldn't download version {v} ({why}). Nothing was changed.", v=version, why=e),
                               "", "", kind="note", tag="update")
             return
         up["state"] = "installing"  # the widget quits when it sees this
-        self._show_banner(f"Installing version {version}: agent-voice restarts in a few seconds.",
+        self._show_banner(tr("Installing version {v}: agent-voice restarts in a few seconds.", v=version),
                           "", "", kind="note", tag="update")
         try:
             updater.launch_apply(root, updater.install_dir(), os.getpid(), version)
         except OSError as e:
             log.exception("could not start the updater")
             up["state"] = ""
-            self._show_banner(f"Couldn't start the update ({e}). Nothing was changed.", "", "",
+            self._show_banner(tr("Couldn't start the update ({why}). Nothing was changed.", why=e), "", "",
                               kind="note", tag="update")
 
     def _git_update(self, up: dict) -> None:
@@ -3221,15 +3267,16 @@ class Daemon:
             return
         version, repo = up["version"], updater.checkout()
         up["state"] = "downloading"
-        self._show_banner(f"Updating to version {version}...", "", "", kind="note", tag="update")
+        self._show_banner(tr("Updating to version {v}...", v=version), "", "", kind="note", tag="update")
         why = updater.git_update(repo) if repo else "this isn't a git checkout"
         if why:
             up["state"] = ""
-            self._show_banner(f"Couldn't update to version {version}: {why}. Nothing was changed. By hand: git pull, "
-                              "pip install -e . then agent-voice restart.", "", "", kind="note", tag="update")
+            self._show_banner(tr("Couldn't update to version {v}: {why}. Nothing was changed. By hand: git pull, "
+                                 "pip install -e . then agent-voice restart.", v=version, why=tr(why)), "", "",
+                              kind="note", tag="update")
             return
         up["state"] = "installing"  # the widget quits when it sees this; the restart brings both back
-        self._show_banner(f"Updated to version {version}: agent-voice restarts.", "", "", kind="note", tag="update")
+        self._show_banner(tr("Updated to version {v}: agent-voice restarts.", v=version), "", "", kind="note", tag="update")
         flags = ({"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
                   | subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True})
         subprocess.Popen(self_command("restart"), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -3432,6 +3479,7 @@ class Daemon:
             "chime": self.chime,
             "summary": self.summary,
             "language": self.language,
+            "ui_language": self.ui_language,
             "speed_x": self.speed_x,
             "speaking": self.speaker.busy,
             "listening": self._listening,
@@ -3545,7 +3593,7 @@ def _clock(at: float, window: str) -> str:
     from datetime import datetime
 
     when = datetime.fromtimestamp(at)
-    return when.strftime("%H:%M" if window == "five_hour" and at - time.time() < 20 * 3600 else "%a %H:%M")
+    return when.strftime("%H:%M") if window == "five_hour" and at - time.time() < 20 * 3600 else day_time(when)
 
 
 def status_tag(st: dict) -> str:
@@ -3804,12 +3852,15 @@ def _handler(daemon: Daemon):
                 daemon.limit_hit(str(data.get("session") or ""), str(data.get("source") or ""),
                                  str(data.get("text") or "")[:400])
                 return self._json(200, {"ok": True})
-            if self.path == "/language":  # your language: English or French
-                code = str(data.get("language") or "")
-                if code not in ("en", "fr"):
-                    return self._json(400, {"error": "language must be en or fr"})
-                daemon.set_language(code)
-                return self._json(200, {"language": daemon.language})
+            if self.path == "/language":  # what you speak and hear (language), what's shown (ui_language)
+                codes = {k: str(data.get(k) or "") for k in ("language", "ui_language") if data.get(k)}
+                if not codes or any(c not in ("en", "fr") for c in codes.values()):
+                    return self._json(400, {"error": "language / ui_language must be en or fr"})
+                if "language" in codes:
+                    daemon.set_language(codes["language"])
+                if "ui_language" in codes:
+                    daemon.set_ui_language(codes["ui_language"])
+                return self._json(200, {"language": daemon.language, "ui_language": daemon.ui_language})
             if self.path == "/engine":  # the voice: light (Piper) or natural (Kokoro)
                 name = str(data.get("engine") or "")
                 if name not in ("piper", "kokoro"):

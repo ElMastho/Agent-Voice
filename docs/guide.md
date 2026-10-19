@@ -251,7 +251,7 @@ Select text in any application and press **`Ctrl+Alt+R`**: it is read in the rig
 | Answer a conversation later, by voice or typing | Its thread row in the panel: 🎙️ talks to it (sent when you pause), ⌨️ opens a box to type to it |
 | Answer a notification by typing | **Reply** on the banner: type, Enter sends it to that conversation (Shift+Enter for a new line, Esc to close); **Talk** opens the mic for it |
 | See what needs you and every thread | Click the chevron ⌄: what needs you, your threads, Hold to talk / Stop / Read selection, and your agents |
-| Change how it behaves | ⚙ on the open notch: your language, the voice, its speed, summaries, the mode, headphones, Hey Claude, auto-send, approvals, phone, the theme, your agents |
+| Change how it behaves | ⚙ on the open notch: the interface's language and yours, the voice, its speed, summaries, the mode, headphones, Hey Claude, auto-send, approvals, phone, the theme, your agents |
 | See who's working | A dot per live conversation on the right; hover for its name, click to open it |
 | Answer an approval | *Allow* / *Deny* at the top of the panel, or say *"approve Codex"* |
 | Send files to a conversation | Drop them on the notch, or on a thread in the panel |
@@ -334,7 +334,8 @@ File: `~/.agent-voice/config.json`. Only put the keys you want to change; they'r
 | Key | Default | Notes |
 |---|---|---|
 | `voices` | `{"en": "en_US-hfc_male-medium", "fr": "fr_FR-siwis-medium"}` | See section 5 |
-| `default_lang` | `"en"` | Used when detection is unsure (Settings' *Language* overrides it, for the voice and for what you say) |
+| `default_lang` | `"en"` | Used when detection is unsure (Settings' *Voice & dictation* overrides it, for the voice, what you say and the voice's own phrases) |
+| `ui_language` | `"en"` | The interface's language: `"en"` or `"fr"` (Settings' *Interface* overrides it) |
 | `speed` | `0.67` | Lower is faster |
 | `volume` | `1.0` | |
 | `max_chars` | `1500` | Longer replies are cut at a sentence |

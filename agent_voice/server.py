@@ -461,6 +461,7 @@ class Daemon:
         self._voice_session, self._voice_source = "", ""
         self._file_titles: dict[str, str] = {}
         self._transcript_titles = claudeapp.TranscriptTitles()
+        self._recent_said: dict[str, tuple[float, str]] = {}  # what was just said (and by whom): never twice
         # Speech from other threads that arrived while one was talking (or waiting for your reply).
         self._queue: list[tuple] = []
         # Recent conversations, for the widget's thread list: session -> {source, last}.
@@ -2055,6 +2056,11 @@ class Daemon:
             self.limit_hit(session, source, text)  # "5-hour limit reached ∙ resets 3pm": not a reply
             self.activity.pop(session, None)
             return 0
+        if text.strip() and self._said_lately(text, session):
+            # The same words from another conversation a moment ago: one reply reaching us twice (an app's MCP
+            # `speak` beside its hooks). Said once, and the mic isn't opened a second time.
+            log.info("already said a moment ago: source=%s final=%s", source, final)
+            return 0
         if session and text.strip():
             self._not_limited(session)
         self._record_turn(session, source, text, lang, voice, final, full)
@@ -2091,6 +2097,20 @@ class Daemon:
             self._listen_armed = True
         return n
 
+    def _said_lately(self, text: str, session: str, window: float = 120.0) -> bool:
+        """Was this said in the last `window` seconds by another conversation? (Remembered either way.) Within one
+        conversation the hooks' own dedupe already decides."""
+        key = " ".join(re.sub(r"[^\w]+", " ", text.lower()).split())[:300]
+        if not key:
+            return False
+        now = time.time()
+        self._recent_said = {k: v for k, v in self._recent_said.items() if now - v[0] < window}
+        before = self._recent_said.get(key)
+        if before is not None and before[1] != session:
+            return True  # still the first one's: it said them
+        self._recent_said[key] = (now, session)
+        return False
+
     def _record_turn(self, session: str, source: str, text: str, lang, voice, final: bool, full: str = "") -> None:
         """Collect what a conversation says in one turn (progress, then the end), for replay and copy; and all of
         it (`full`: the reply behind a summary) for the preview and the history."""
@@ -2107,11 +2127,24 @@ class Daemon:
             self._last_session = session
         if final:
             turn["done"] = True
-            for task in companion.agent_todos("\n".join(turn["full"])):  # "To-do for you: ..." -> your list
-                try:
-                    self.companion.todo("add", text=task, source=source or "agent", session=session)
-                except ValueError:
-                    break
+            self._agent_todo(companion.agent_todos("\n".join(turn["full"])), source, session)
+
+    AGENT_TODOS_PER_THREAD, AGENT_TODOS_OPEN = 2, 8
+
+    def _agent_todo(self, tasks: list[str], source: str, session: str) -> None:
+        """A reply's "To-do for you" line -> your list. Only the first of a turn; and not once that thread already has
+        2 waiting on you, nor once your agents have 8 open: the list stays yours, not a log of their suggestions."""
+        if not tasks:
+            return
+        mine = [t for t in self.companion.data["todos"] if not t["done"] and (t.get("source") or "you") != "you"]
+        if len(mine) >= self.AGENT_TODOS_OPEN:
+            return
+        if session and sum(1 for t in mine if t.get("session") == session) >= self.AGENT_TODOS_PER_THREAD:
+            return
+        try:
+            self.companion.todo("add", text=tasks[0], source=source or "agent", session=session)
+        except ValueError:
+            pass
 
     def _finished(self, session: str, source: str, text: str, result: dict | None) -> None:
         """A turn ended: keep its outcome for the notch, and note it for when you come back."""
@@ -2608,7 +2641,10 @@ class Daemon:
         elif self._duck_state:
             # A pause between two sentences, or between the voice and the mic, isn't the end: wait a moment.
             self._duck_idle = self._duck_idle or now
-            if now - self._duck_idle >= 1.2 and not self._listen_armed:
+            # While the thread that spoke is still at work, its next progress note is seconds away: the others
+            # stay lowered (up to 15 s), instead of coming back up and going down again with each note.
+            hold = 15.0 if self._voice_session and self._voice_session in self.activity else 1.2
+            if now - self._duck_idle >= hold and not self._listen_armed:
                 self._duck_state, self._duck_idle = "", 0.0
                 self._duck_jobs.put(("restore",))
 

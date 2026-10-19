@@ -148,6 +148,9 @@ Send a prompt later, to a thread or as a new thread:
 
 They wait in the panel's **Upcoming** list (× cancels one) and survive restarts. At that time the prompt is typed into the thread's own window and sent (saved prompts expand), and your phone hears about it if that's on. If the PC was off and it's more than 6 hours late, you're told and nothing is sent.
 
+### Tucked away, still in sight
+When the notch is tucked up to its last few pixels, that line glows while something runs: an agent at work (in its conversation's colour), the voice or the mic, a song, the Pomodoro or a timer. A brighter stretch glides along it, calmly; with nothing running it's dark, and in Do not disturb it stays quiet.
+
 ### The Companion (left): music, today's meetings, usage
 Open the panel: the small arrow on its **left** edge opens the Companion (the tray's *Companion* too).
 
@@ -162,14 +165,15 @@ The small arrow on the open panel's **right** edge opens Utils (the tray's *Util
 - **Timer**: *1m* to *1 h* in one click, **…** for your own (*"12 min tea"*, *1h30*, *90 s*); pause, resume, cancel; several at once.
 - **Stopwatch**: start, pause, reset.
 - **To-do**: click the box to tick an item, × to remove it, *Clear done* for the ticked ones, *Add* to type one. **Yours** and **From your agents** are kept apart, and each is grouped by **category**: a `#tag` files what you type (*call Paul #work*), right-click an item to move it to another category (or a new one), and agents can pass one (`todo_add`'s `category`, or a `#tag` in their *To-do for you:* line).
-- **Full screen**: ⤢ beside a card's title opens it over the whole screen, larger and with every item (the to-do list in two columns, yours and your agents'); the open panel folds away meanwhile and comes back. ⤡, ✕ or a click beside the card closes it.
+- **Large**: ⤢ beside a card's title opens it over the open panel (the notch's row stays in sight), a little larger and with every item (the to-do list in two columns, yours and your agents'). ⤡, ✕, a click beside the card or closing the panel closes it.
+- **Adding to-dos**: *Add* opens a line under the panel that stays open: type, Enter, the next one, Esc when you're done. *Clear* on *From your agents* removes all of theirs (yours stay).
 - **Notes**: *Add a note*, or say *"note: ..."* / *"prends note : ..."*: one line, kept (the latest 200), searchable in History; × removes one.
 - **Clipboard**: the last 10 things you copied, kept in memory only (never written to disk; what password managers copy is marked private and left out). Click one to copy it again; ➤ puts it in the current conversation's message box, for you to finish and send.
 - **Reminders**: *Add a reminder* takes a time and what: *16:00 call Paul*, *in 20 minutes stretch*, *tomorrow at 9 send the invoice*, *demain à 9h ...*.
 
 **By voice**, with the companion's 🎤 or after *"Hey Claude"*: *"start a pomodoro"*, *"pause the pomodoro"*, *"skip the break"*, *"stop the pomodoro"*, *"timer 10 minutes for the tea"*, *"a 5 minute timer"*, *"cancel the timer"*, *"start / stop the stopwatch"*, *"add call the bank to my list"*, *"remind me at 4 pm to call Paul"*, *"in 20 minutes remind me to stretch"*; in French *"lance un pomodoro"*, *"minuteur de 3 minutes"*, *"lance le chrono"*, *"ajoute appeler Paul à ma liste"*, *"rappelle-moi dans 10 minutes de sortir le linge"*. Into the companion's 🎤, anything that isn't one of these is added to the to-do list.
 
-**Your agents and the list.** Claude Code is asked to end a reply with *"To-do for you: ..."* for anything only you can do (run something, check, decide); each such line from any agent goes on your list, once, tagged with the agent; click it to open that conversation. MCP apps also get `todo_list`, `todo_add` and `todo_update`, and are told to add a follow-up only you can do and to tick items off once done. Claude Code gets them through an MCP server of its own, with only those tools (`agent-voice install claude` adds it with `claude mcp add`; `agent-voice uninstall` removes it). An item an agent added shows its name.
+**Your agents and the list.** Claude Code is asked, rarely, to end a reply with *"To-do for you: ..."*: only for a step only you can do that the work is waiting on, never a suggestion. One per reply goes on your list (at most two waiting per conversation, eight from all your agents), tagged with the agent; click it to open that conversation. MCP apps also get `todo_list`, `todo_add` and `todo_update`, and are told to add a follow-up only you can do and to tick items off once done. Claude Code gets them through an MCP server of its own, with only those tools (`agent-voice install claude` adds it with `claude mcp add`; `agent-voice uninstall` removes it). An item an agent added shows its name.
 
 **While something runs**, the notch stays down with a second line: the Pomodoro's phase, each timer (and its progress along the bottom) and the stopwatch; click it to open the companion. Not in Do not disturb: the notch stays up then. **When a timer ends** or a reminder is due: a banner with *+5 min* (*+10 min* for a reminder) and *Done*, a chime and the voice (*"Time's up: the tea."*). In Chimes, just the chime; in Do not disturb, only the banner, silently; your phone hears about it if that's on and you're away. Everything is kept by the service (in `state.json`) through restarts; a timer that ran out while the PC slept is told when it wakes, without the sound.
 

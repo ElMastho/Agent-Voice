@@ -358,9 +358,11 @@ class Companion:
                 todos.append(item)
                 self._changed()
                 return item
-            if action == "clear_done":
+            if action in ("clear_done", "clear_agents"):  # the ticked ones; or all your agents' (yours stay)
                 before = len(todos)
-                todos[:] = [t for t in todos if not t["done"]]
+                keep = ((lambda t: not t["done"]) if action == "clear_done"
+                        else (lambda t: (t.get("source") or "you") == "you"))
+                todos[:] = [t for t in todos if keep(t)]
                 self._changed()
                 return before - len(todos)
             item = self._find("todos", item_id)

@@ -1,6 +1,6 @@
 # agent-voice: to-do
 
-Everything listed so far is released in 0.7.0. What's left:
+Everything listed so far is released in 0.8.0. What's left:
 
 ## To check live (built and tested, not yet seen working for real)
 - **Utils and the Companion**: both arrows and the open/fold order; the Pomodoro holding replies during a focus and the catch-up at the break; a "To-do for you:" line from Claude Code landing on the list; now playing with Spotify and YouTube; a real iCal link and Outlook classic; the clipboard skipping a password manager's copy.

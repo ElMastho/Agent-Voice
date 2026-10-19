@@ -33,8 +33,8 @@ INSTRUCTIONS = (
 )
 TODO_INSTRUCTIONS = (
     "The user keeps a to-do list beside the notch at the top of their screen: read it with `todo_list`, add to it "
-    "(`todo_add`) when they ask you to note something or for a follow-up only they can do, and tick items off "
-    "(`todo_update`) once they're done."
+    "(`todo_add`) when they ask you to note something, or (rarely) for a step only they can do that the work is "
+    "waiting on, never for suggestions; tick items off (`todo_update`) once they're done."
 )
 HOOKED_INSTRUCTIONS = (
     "agent-voice already reads your replies aloud. Call `set_status` with a few words when you start a task or a "
@@ -72,9 +72,10 @@ TOOLS = [
                     "added it.",
      "inputSchema": {"type": "object", "properties": {}, "required": []}},
     {"name": "todo_add",
-     "description": "Add an item to the user's to-do list: something they asked you to note, or a follow-up only "
-                    "they can do. One short line per item; `category` files it (a word or two: the project's name, "
-                    "an existing category from todo_list).",
+     "description": "Add an item to the user's to-do list: something they asked you to note, or a step only they "
+                    "can do outside this conversation that the work is waiting on. Never for suggestions, options or "
+                    "anything you could do yourself; rarely, and one item at a time. One short line; `category` files "
+                    "it (a word or two: the project's name, an existing category from todo_list).",
      "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}, "category": {"type": "string"}},
                      "required": ["text"]}},
     {"name": "todo_update",
@@ -121,6 +122,11 @@ class Server:
 
     def _dispatch(self, method: str, params: dict) -> dict:
         if method == "initialize":
+            if "claude-code" in str((params.get("clientInfo") or {}).get("name") or "").lower() and _claude_hooked():
+                # Claude Code, even when it's the desktop app's Code tab (which starts the app's own MCP servers, so
+                # with --client claude-desktop): its hooks already speak. A `speak` tool too would say each reply
+                # twice and open the mic twice; only the to-do list is left to give it.
+                self.source, self.hooked, self.todo_only = "claude", True, True
             self.source = self.source or self._name(params.get("clientInfo") or {})
             self.session = f"mcp-{self.source}-{os.getpid()}"
             asked = params.get("protocolVersion")
@@ -218,6 +224,16 @@ class Server:
             time.sleep(0.5)
         client.request("/ask_state", {"id": made["id"], "cancel": True})
         return "The user didn't answer in time: ask in the chat instead, or go on with your best judgement.", False
+
+
+def _claude_hooked() -> bool:
+    """agent-voice's hooks are in Claude Code's settings (`agent-voice install claude`)."""
+    try:
+        with open(os.path.expanduser("~/.claude/settings.json"), encoding="utf-8") as f:
+            settings = f.read()
+    except OSError:
+        return False
+    return "agent_voice hook" in settings or "agent_voice\", \"hook" in settings or "agent-voice.exe" in settings
 
 
 def run(name: str = "", hooked: bool = False, todo_only: bool = False) -> int:

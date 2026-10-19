@@ -439,6 +439,8 @@ def _over_us() -> bool:
     put the notch or the companion over it, and it would seem to vanish."""
     if QToolTip.isVisible() or QApplication.activePopupWidget() is not None:
         return True
+    if any(type(w).__name__ == "FullCard" and w.isVisible() for w in QApplication.topLevelWidgets()):
+        return True  # a large card over the panel: the notch mustn't come back over it
     active = QApplication.activeWindow()
     return active is not None and type(active).__name__ in ("QuickInput", "ReplyBox", "HistoryBox")
 
@@ -1397,6 +1399,7 @@ class QuickInput(QWidget):
         self.setAttribute(Qt.WA_MacAlwaysShowToolWindow)
         self.mode = "todo"
         self.item_id = 0  # the to-do a "category" box files
+        self.added = 0  # to-dos added since it opened (it stays open for the next one)
         box = QFrame(self)
         box.setObjectName("box")
         layout = QVBoxLayout(box)
@@ -1418,6 +1421,7 @@ class QuickInput(QWidget):
         """Ask for a `mode` item, just under the companion `beside` (screen coordinates): never over it, which
         re-asserts "on top" and would cover it."""
         self.mode = mode
+        self.added = 0
         self.edit.setPlaceholderText(self.HINTS[mode])
         self.resize(max(300, beside.width()), 52)
         screen = (QApplication.screenAt(beside.center()) or QApplication.primaryScreen()).availableGeometry()
@@ -1438,6 +1442,10 @@ class QuickInput(QWidget):
             return
         if self.mode == "todo":
             _post("/todo", {"action": "add", "text": text})
+            self.edit.clear()  # the next one: Enter adds each, Esc (or a click elsewhere) closes
+            self.added += 1
+            self.edit.setPlaceholderText(f"Added {self.added} · the next one, or Esc")
+            return
         elif self.mode == "category":
             _post("/todo", {"action": "category", "id": self.item_id, "category": text})
         elif self.mode == "note":
@@ -1841,6 +1849,9 @@ class SidePanel(QWidget):
         left = sum(1 for _name, items in groups for t in items if not t["done"])
         self._text(p, QRectF(area.x() + 10, y, area.width() - 20, 18), title + (f"  ·  {left}" if left else ""),
                    self.f_small, 150)
+        if title == "From your agents":  # their follow-ups pile up: all gone in one click (yours stay)
+            hits["tagents"] = QRectF(area.right() - 58, y, 52, 18)
+            self._chip(p, hits["tagents"], "Clear", "tagents")
         y += 20
         for name, items in groups:
             if shown >= budget:
@@ -2187,6 +2198,8 @@ class SidePanel(QWidget):
             _post("/todo", {"action": "remove", "id": item_id})
         elif kind == "tclear":
             _post("/todo", {"action": "clear_done"})
+        elif kind == "tagents":
+            _post("/todo", {"action": "clear_agents"})
         elif kind == "rdel":
             _post("/reminder", {"action": "remove", "id": item_id})
 
@@ -2205,9 +2218,10 @@ class SidePanel(QWidget):
 
 
 class FullCard(SidePanel):
-    """One of Utils' cards over the whole screen: the same drawing scaled up, with every item (the to-do list in two
-    columns, yours and your agents'). Like the panels it never takes the focus: ✕, the card's ⤡ or a click beside the
-    card closes it. While it shows, the clocks repaint once a second; nothing else does."""
+    """One of Utils' cards, large, over the open panel (under the notch's row): the same drawing scaled up a little,
+    with every item (the to-do list in two columns, yours and your agents'). Like the panels it never takes the focus:
+    ✕, the card's ⤡ or a click beside the card closes it, and so does closing the panel. While it shows, the clocks
+    repaint once a second; nothing else does."""
 
     TODO_ROWS, REMINDER_ROWS, TIMER_ROWS, NOTE_ROWS, CLIP_ROWS = 200, 30, 5, 20, 10
     WIDE = 640  # the card's width before scaling
@@ -2220,16 +2234,14 @@ class FullCard(SidePanel):
         self._second = QTimer(self)
         self._second.timeout.connect(self._tick_clock)
 
-    def open_card(self, card: str, screen: QRect) -> None:
+    def open_card(self, card: str, area: QRect) -> None:
+        """Over `area` (screen coordinates: the open panel under the notch's row)."""
         self.card, self.scroll, self.hot = card, 0.0, None
-        self.glass.follow(screen, True)  # the light theme: the whole screen behind, frosted (once, as it opens)
-        self.setGeometry(screen)
+        self.glass.follow(area, True)  # the light theme: what's behind, frosted (once, as it opens)
+        self.setGeometry(area)
         self.setWindowOpacity(1.0)
-        # As large as the screen allows: a clock fills its width, a long list stays readable and scrolls.
-        self.s = max(1.25, min(4.0, screen.width() * 0.8 / self.WIDE))
-        self._fit()
-        room = (screen.height() - NOTCH_H - STRIP_H - 64) / max(1.0, self._content_h - self._top())
-        self.s = max(1.25, min(self.s, room * self.s))
+        # A little larger than in Utils, as wide as the panel allows; a long list scrolls.
+        self.s = max(1.0, min(1.5, area.width() * 0.92 / self.WIDE))
         self._fit()
         self.show()
         self.update()
@@ -2245,6 +2257,7 @@ class FullCard(SidePanel):
         self.owner._full_closed()
 
     def _tick_clock(self) -> None:
+        _keep_on_top(int(self.winId()))  # over the notch's canvas, which re-asserts itself too (not while we show)
         clock = self.clock_key()
         if clock != self._clock:
             self._clock = clock
@@ -2262,7 +2275,7 @@ class FullCard(SidePanel):
             self.update()
 
     def _top(self) -> float:
-        return (NOTCH_H + STRIP_H) / self.s + 16  # under the notch and its second line
+        return 48.0  # under its ✕
 
     def _build(self, p: QPainter | None) -> float:
         """In unscaled units, like the panel: the card centred (down from the notch when it's taller than that)."""
@@ -2290,12 +2303,7 @@ class FullCard(SidePanel):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
-        if LIGHT:
-            path = QPainterPath()
-            path.addRect(QRectF(self.rect()))
-            self.glass.paint(p, path, self.pos())
-        else:
-            p.fillRect(self.rect(), _body(232))
+        _paint_card_body(p, self, self.glass, 18)
         p.scale(self.s, self.s)
         h = self._build(p)
         p.end()
@@ -2595,7 +2603,7 @@ class VoiceWidget(QWidget):
         """Top centre of the primary screen, sliding down when wanted and back up when not."""
         now = time.time()
         busy = (self.phase in ("speaking", "waiting", "recording", "transcribing") or bool(self._activity())
-                or bool(self._drop) or bool(self._strip_items()))  # a timer running: down, to see it
+                or bool(self._drop) or self._strip_busy())  # a timer running, a song playing: down, to see it
         dnd = self._output() == "silent"  # Do not disturb: it stays up until you hover it
         if self._tucked is not None and self._news() != self._tucked:
             self._tucked = None  # something new happened: show it
@@ -2604,7 +2612,10 @@ class VoiceWidget(QWidget):
         if (self._retuck and not (hovering or self.expanded or self.pressed or self._drop or self._question()
                                   or self.banner.item or self._news()[0])):
             self._tucked, self._retuck = self._news(), False
-        if self._tucked is not None:  # tucked by hand: only the mouse (or a drag) brings it down for a look
+        if self.expanded:  # open, it stays down: you may be in Utils, the Companion or a large card, not over it
+            self._tucked, self._retuck = None, False
+            self._reveal_until = now + NOTCH_HIDE_DELAY
+        elif self._tucked is not None:  # tucked by hand: only the mouse (or a drag) brings it down for a look
             if hovering or self.pressed or self._drop:
                 self._reveal_until = now + NOTCH_HIDE_DELAY
         elif hovering or self.expanded or self.pressed or self._drop or (not dnd and (busy or self._question())):
@@ -3214,6 +3225,7 @@ class VoiceWidget(QWidget):
             p.setBrush(Qt.NoBrush)
             p.drawPath(path)
         self._paint_edge_light(p, w, h)
+        self._paint_peek_glow(p, w, h)
         self._paint_side_tabs(p)
         p.end()
 
@@ -3266,8 +3278,56 @@ class VoiceWidget(QWidget):
 
     def _glow_moving(self) -> bool:
         """The working (or music) light glides around the edge: worth a gentle 15 fps, but only while it can be
-        seen."""
-        return bool(self._activity() or self._music_glow()) and self._reveal > 0.3 and self.isVisible()
+        seen (down, or tucked away as the glow on its last few pixels)."""
+        if not self.isVisible():
+            return False
+        if self._reveal > 0.3:
+            return bool(self._activity() or self._music_glow())
+        return self._peek_color() is not None
+
+    def _peek_color(self) -> QColor | None:
+        """Tucked away, what's running shows on the line still in sight: the voice or the mic, an agent at work,
+        a song, a Pomodoro or a timer. None when nothing runs (and in Do not disturb: the notch stays quiet)."""
+        if not self.notch or self._output() == "silent":
+            return None
+        act = self._activity()
+        clocks = (self.st.get("companion") or {})
+        pomo = clocks.get("pomodoro") or {}
+        if self.phase in ("speaking", "recording", "waiting", "transcribing"):
+            color = QColor(self.accent)
+        elif act:
+            color = QColor(act["color"])
+        elif self._music_glow():
+            color = QColor(MUSIC)
+        elif pomo.get("end"):
+            color = QColor(SidePanel.BREAK if pomo.get("phase") != "focus" else SidePanel.TOMATO)
+        elif any(t.get("end") for t in clocks.get("timers") or []):
+            color = QColor("#FBBF24")
+        else:
+            return None
+        return color.darker(135) if LIGHT else color
+
+    def _paint_peek_glow(self, p: QPainter, w: float, h: float) -> None:
+        """The tucked notch's last pixels: a band of the running thing's colour, a brighter stretch gliding along
+        it, fading in as the notch goes up (the edge light fades out meanwhile)."""
+        if not self.notch or self._reveal >= 0.3:
+            return
+        color = self._peek_color()
+        if color is None:
+            return
+        fade = _smooth(1 - self._reveal / 0.3)
+        band = QRectF(NOTCH_EAR, h - NOTCH_PEEK - 1, w - 2 * NOTCH_EAR, NOTCH_PEEK + 1)
+        pos = ((time.time() - self.t0) * 0.35) % 1.0  # once along it every ~3 s: calm, never a flicker
+        grad = QLinearGradient(band.topLeft(), band.topRight())
+        for at, alpha in ((0.0, 110), (max(0.0, pos - 0.18), 110), (pos, 255), (min(1.0, pos + 0.18), 110),
+                          (1.0, 110)):
+            c = QColor(color)
+            c.setAlpha(int(alpha * fade))
+            grad.setColorAt(at, c)
+        p.save()
+        p.setClipPath(self._body_path(w, h))
+        p.fillRect(band, grad)
+        p.restore()
 
     def _paint_edge_light(self, p: QPainter, w: float, h: float) -> None:
         """A thin band of light around the island: running while live, gliding while working, still when ready."""
@@ -4186,6 +4246,8 @@ class VoiceWidget(QWidget):
     def _tooltip_text(self, key: str | None) -> str:
         if key in ("sprev", "snext"):
             return "Previous song" if key == "sprev" else "Next song"
+        if key == "splay":
+            return "Pause" if (self.st.get("media") or {}).get("playing") else "Play"
         if key == "phone":
             return ("Phone notifications (ntfy): replies, what needs you, limits and the recap on your phone while "
                     "you're away. Sends them over the internet: off until you turn it on")
@@ -4345,8 +4407,10 @@ class VoiceWidget(QWidget):
             self.toggle_expanded()
         elif key.startswith("tab:"):
             self.toggle_side(key[4:])
-        elif key in ("sprev", "snext"):  # the song on the second line
-            _post("/media", {"action": "previous" if key == "sprev" else "next"})
+        elif key in ("sprev", "snext", "splay"):  # the song on the second line
+            _post("/media", {"action": {"sprev": "previous", "snext": "next", "splay": "toggle"}[key]})
+            if key == "splay" and self.st.get("media"):  # at once: the next look at the player confirms it
+                self.st["media"] = {**self.st["media"], "playing": not self.st["media"].get("playing")}
         elif key == "strip":  # the running timer: open the panel and Utils
             self.side_open["utils"] = True
             if not self.expanded:
@@ -4564,7 +4628,7 @@ class VoiceWidget(QWidget):
 
     def _banner_closed(self) -> None:
         """The notification brought a tucked notch down: closing it sends the notch straight back to its line."""
-        if self._retuck:
+        if self._retuck and not self.expanded:
             self._tucked, self._retuck = self._news(), False
             self._reveal_until = 0.0
 
@@ -4658,6 +4722,7 @@ class VoiceWidget(QWidget):
     def _panel_closed(self) -> None:
         """The boxes opened from the panel go with it (the history box may never have had the focus to lose)."""
         self.history_box.hide()
+        self.full.close_card()
         for side in self.sides.values():
             side.input.hide()
 
@@ -4670,15 +4735,14 @@ class VoiceWidget(QWidget):
         self._save_position()
 
     def open_full(self, card: str) -> None:
-        """A Utils card over the whole screen; the open panel folds away under the notch meanwhile, and comes back."""
+        """A Utils card, large, over the open panel (the notch's row stays in sight above it)."""
         if self.full.isVisible() and self.full.card == card:
             self.full.close_card()
             return
-        if self.expanded and not self._folding:
-            self._full_reopen = True
-            self.toggle_expanded()
-        screen = QApplication.screenAt(self.visual_rect().center()) or QApplication.primaryScreen()
-        self.full.open_card(card, screen.geometry())
+        island = self.visual_rect()
+        area = QRect(island.x() + NOTCH_EAR, island.y() + NOTCH_H, island.width() - 2 * NOTCH_EAR,
+                     max(260, island.height() - NOTCH_H))
+        self.full.open_card(card, area)
 
     def _full_closed(self) -> None:
         if self._full_reopen:
@@ -4790,10 +4854,16 @@ class VoiceWidget(QWidget):
             items.append((ICONS["calendar"], meeting["title"],
                           "now" if soon <= 0 else f"in {max(1, math.ceil(soon / 60))} min", None, ""))
         playing = self.st.get("media") or {}
-        if playing.get("playing") and playing.get("title"):  # paused, it stays in the Companion only
-            items.append((ICONS["music"], "", " · ".join(filter(None, (playing["title"], playing.get("artist")))),
-                          None, ""))
+        if playing.get("app"):  # playing or paused: while a player is open, its controls stay at hand
+            song = " · ".join(filter(None, (playing.get("title"), playing.get("artist")))) or playing["app"]
+            items.append((ICONS["music"], "", song, None, ""))
         return items[:3]
+
+    def _strip_busy(self) -> bool:
+        """Something on the second line that keeps the notch down: a clock, a meeting, a song playing. A paused
+        song shows when the notch is down, but doesn't hold it there."""
+        return any(icon != ICONS["music"] for icon, *_rest in self._strip_items()) or bool(
+            (self.st.get("media") or {}).get("playing"))
 
     def _strip_h(self) -> int:
         if not self._strip_items() or self._question():
@@ -4817,7 +4887,7 @@ class VoiceWidget(QWidget):
         fm = QFontMetrics(self.f_notch_sub)
         spans, buttons = [], {}
         for icon, label, shown, _done, _color in self._strip_items():
-            extra = 36 if icon == ICONS["music"] else 0
+            extra = 58 if icon == ICONS["music"] else 0  # previous, play/pause, next
             width = min(fm.horizontalAdvance(f"{label}  {shown}" if label else shown), 170, right - left - 19 - extra)
             if x > left and x + 19 + width + extra > right:
                 x, y = left, y + STRIP_H
@@ -4825,8 +4895,9 @@ class VoiceWidget(QWidget):
             x += 19 + width + 18
             if icon == ICONS["music"]:
                 buttons["sprev"] = QRectF(x - 14, y, 18, 18)
-                buttons["snext"] = QRectF(x + 6, y, 18, 18)
-                x += 36
+                buttons["splay"] = QRectF(x + 6, y, 18, 18)
+                buttons["snext"] = QRectF(x + 26, y, 18, 18)
+                x += 58
         return spans, buttons
 
     def _paint_strip(self, p: QPainter) -> None:
@@ -4849,7 +4920,9 @@ class VoiceWidget(QWidget):
         p.setFont(self.f_icon_small)
         for key, rect in buttons.items():
             p.setPen(_ink(int(150 + 90 * self.hover_t.get(key, 0.0) + (15 if self.pressed == key else 0))))
-            p.drawText(rect, Qt.AlignCenter, ICONS["prev" if key == "sprev" else "next"])
+            playing = bool((self.st.get("media") or {}).get("playing"))
+            icon = {"sprev": "prev", "snext": "next"}.get(key) or ("pause" if playing else "play")
+            p.drawText(rect, Qt.AlignCenter, ICONS[icon])
         progress, color = next(((done, c) for *_rest, done, c in items if done is not None), (None, ""))
         if progress is not None:
             bar = QRectF(NOTCH_EAR + 38, NOTCH_H + self._strip_h() - 7, self.nw - 2 * NOTCH_EAR - 76, 2)

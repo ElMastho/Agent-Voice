@@ -22,6 +22,7 @@ SITES = ((" - YouTube Music", "YouTube Music"), (" - YouTube", "YouTube"), (" | 
 KEYS = {"toggle": 0xB3, "next": 0xB0, "previous": 0xB1}  # VK_MEDIA_PLAY_PAUSE, _NEXT_TRACK, _PREV_TRACK
 _IDLE_SPOTIFY = re.compile(r"^Spotify(?: Free| Premium)?$")
 _NAMES: dict[int, str] = {}  # pid -> process name (polled every few seconds: not asked again each time)
+_LAST: dict[str, dict] = {}  # app -> the last song seen playing: paused, Spotify's window shows only its name
 
 
 def parse_title(process: str, title: str) -> dict | None:
@@ -84,6 +85,10 @@ def _windows_playing() -> dict | None:
         if sounding is None and item["title"]:
             sounding = _sounding_pids()
         item["playing"] = bool(item["title"]) and _pid_family(pid, sounding or set())
+        if item["title"]:
+            _LAST[item["app"]] = {"title": item["title"], "artist": item["artist"]}
+        else:
+            item.update(_LAST.get(item["app"], {}))  # paused: still the song it was
         # What's making sound wins; then Spotify (its window is the player), then a browser tab.
         rank = (item["playing"], item["app"] == "Spotify", bool(item["title"]))
         if best is None or rank > best[0]:

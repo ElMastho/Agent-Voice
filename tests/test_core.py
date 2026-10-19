@@ -1985,3 +1985,70 @@ def test_transcript_titles_read_in_chunks_and_refuse_patterns(tmp_path, monkeypa
     seen = [titles.title("abc") for _ in range(6)]
     assert seen[0] == "" and seen[-1] == "Fix the login"  # caught up over a few polls, never all at once
     assert titles.title("*") == "" and titles.title("../abc") == ""
+
+
+def test_agents_add_few_todos_and_the_music_stays_down_while_they_work(daemon):
+    for i in range(4):  # a chatty thread: only 2 wait on you at once, one per turn
+        daemon.speak(f"Done.\nTo-do for you: step {i}\nTo-do for you: extra {i}", source="claude", final=True,
+                     session="a")
+    assert [t["text"] for t in daemon.status()["companion"]["todos"]] == ["step 0", "step 1"]
+    for i in range(10):
+        daemon.speak(f"To-do for you: other {i}", source="codex", final=True, session=f"s{i}")
+    assert sum(1 for t in daemon.companion.data["todos"] if t["source"] != "you") == 8  # 8 open at most
+    daemon.companion.todo("add", text="Mine")
+    assert daemon.companion.todo("clear_agents") == 8 and [t["text"] for t in daemon.companion.data["todos"]] == ["Mine"]
+    # Ducking: between two progress notes of a thread still at work, the music isn't brought back up
+    daemon._ducker = object()
+    daemon._duck_state, daemon._voice_session = "voice", "w"
+    daemon.activity["w"] = {"source": "claude", "started": 0, "steps": 1, "last": server_time()}
+    daemon._duck_tick(100.0)
+    daemon._duck_tick(105.0)
+    assert daemon._duck_state == "voice" and daemon._duck_jobs.empty()
+    daemon.activity.clear()  # the turn is over: back up after a moment
+    daemon._duck_tick(106.5)
+    assert daemon._duck_state == "" and daemon._duck_jobs.get() == ("restore",)
+
+
+def server_time():
+    from agent_voice import server
+
+    return server.time.time()
+
+
+def test_one_reply_is_said_once_even_through_two_channels(daemon, monkeypatch):
+    from agent_voice import mcp
+
+    # Claude Code (the desktop app's Code tab starts the app's MCP servers): no speak tool beside its hooks
+    monkeypatch.setattr(mcp, "_claude_hooked", lambda: True)
+    server = mcp.Server("claude-desktop")
+    server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                   "params": {"protocolVersion": "2025-06-18", "clientInfo": {"name": "claude-code"}}})
+    tools = [t["name"] for t in server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]]
+    assert "speak" not in tools and tools == ["todo_list", "todo_add", "todo_update"]
+    desktop = mcp.Server("claude-desktop")  # the desktop app's own chat keeps its voice
+    desktop.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"clientInfo": {"name": "claude-ai"}}})
+    assert "speak" in [t["name"] for t in desktop.handle({"jsonrpc": "2.0", "id": 2,
+                                                          "method": "tools/list"})["result"]["tools"]]
+    # The daemon's net: the same words from another conversation a moment later aren't said again
+    daemon.speak("All tests pass.", source="claude", final=True, session="hook-a")
+    daemon.speak("All tests pass!", source="claude-desktop", final=True, session="mcp-x")
+    assert [t for t, _p in daemon.speaker.said] == ["All tests pass."]
+    daemon.speak("All tests pass.", source="claude", final=True, session="hook-a")  # the same thread: its own call
+    assert len(daemon.speaker.said) == 2
+
+
+def test_music_is_found_playing_through_a_quiet_moment(monkeypatch):
+    from agent_voice import ducking
+
+    class Meter:
+        def __init__(self, peaks):
+            self.peaks = list(peaks)
+
+        def GetPeakValue(self):
+            return self.peaks.pop(0) if self.peaks else 0.0
+
+    monkeypatch.setattr(ducking.time, "sleep", lambda s: None)
+    quiet_then_loud = [("spotify:1", "Spotify.exe", None, Meter([0.0, 0.0, 0.3])), ("x:2", "x.exe", None, Meter([]))]
+    assert ducking._sounding(quiet_then_loud) == ["Spotify.exe"]
+    assert ducking._sounding([("x:2", "x.exe", None, Meter([]))]) == []

@@ -58,10 +58,18 @@ def test_read_along_leaves_with_the_voice(app):
     assert now + 4.5 <= b.until <= now + 5.5 and not b.holding  # 5 s more to finish reading it
 
 
+# Every test widget lives until the run ends: torn down by the garbage collector halfway (with its side panels,
+# timers and Qt children in whatever order) it can crash Python. The app has one, until it quits.
+_KEEP: list = []
+
+
 def _widget(st):
     w = widget.VoiceWidget()
+    _KEEP.append(w)
     w.poller.stop()
     w.poller.status.disconnect()
+    # One app has one widget; the tests make many: a copy must not reach the ones Qt is tearing down.
+    QApplication.clipboard().dataChanged.disconnect(w._clip_changed)
     w.notch, w.compact, w.expanded = True, False, True
     w._on_status(st)
     w._apply_size()
@@ -517,7 +525,7 @@ def test_notch_second_line_wraps_instead_of_losing_the_song_buttons(app, monkeyp
     busy = {**COMPANION, "timers": [], "pomodoro": {"phase": "focus", "end": now + 1440, "left": 0.0, "length": 1500}}
     agenda = {"events": [{"title": "Weekly sync with the platform team", "start": now + 300, "end": now + 2100,
                           "all_day": False}]}
-    media = {"playing": True, "title": "A rather long song title", "artist": "Somebody"}
+    media = {"app": "Spotify", "playing": True, "title": "A rather long song title", "artist": "Somebody"}
     w = _widget({"phase": "idle", "threads": [], "companion": busy, "agenda": agenda, "media": media})
     w.expanded = False
     spans, buttons = w._strip_layout()
@@ -678,30 +686,37 @@ def test_companion_on_the_left_plays_music_and_shows_the_day(app, monkeypatch):
     assert any(item[1] == "Stand-up" and item[2] == "in 5 min" for item in w._strip_items())  # on the second line
     assert any(item[2] == "Get Lucky · Daft Punk" for item in w._strip_items())  # the song too, while it plays
     w.st["media"] = {**w.st["media"], "playing": False}
-    assert not any(item[0] == widget.ICONS["music"] for item in w._strip_items())  # paused: not on the notch
+    assert any(item[0] == widget.ICONS["music"] for item in w._strip_items())  # paused: its controls stay
+    w.st["media"] = None
+    assert not any(item[0] == widget.ICONS["music"] for item in w._strip_items())  # no player open: gone
     w.hide()
 
 
 def test_a_song_lights_the_notch_and_skips_from_it(app, monkeypatch):
     posted = []
     monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
-    st = {"phase": "idle", "threads": [], "companion": COMPANION,
+    st = {"phase": "idle", "threads": [], "companion": {**COMPANION, "timers": []},
           "media": {"app": "Spotify", "title": "Get Lucky", "artist": "Daft Punk", "playing": True}}
     w = _widget(st)
     w._reveal, w.expanded = 1.0, False
     w.show()
     assert w._music_glow() and w._glow_moving() and w._edge_live() == 0.7  # nothing else on: the song's light
     rects = w._rects()
-    assert {"sprev", "snext"} <= set(rects)
+    assert {"sprev", "splay", "snext"} <= set(rects)
+    assert rects["sprev"].right() <= rects["splay"].left() and rects["splay"].right() <= rects["snext"].left()
     for key, action in (("sprev", "previous"), ("snext", "next")):
         w._activate(key)
         assert posted[-1] == ("/media", {"action": action})
+    assert w._tooltip("splay") == "Pause"
     w.grab()  # paints the second line with its buttons
     w.st["activity"] = {"text": "Editing", "color": "#8B7CFF"}
     assert not w._music_glow()  # an agent at work: its own light
     w.st.pop("activity")
     w.st["media"] = {**w.st["media"], "playing": False}
-    assert not w._music_glow() and not w._glow_moving() and "snext" not in w._rects()  # paused: still again
+    assert not w._music_glow() and not w._glow_moving()  # paused: the light is still again...
+    assert {"sprev", "splay", "snext"} <= set(w._rects()) and not w._strip_busy()  # ...the controls stay, not holding it
+    w._activate("splay")
+    assert posted[-1] == ("/media", {"action": "toggle"}) and w.st["media"]["playing"]  # shown playing at once
     w.hide()
     w.poller.stop()
 
@@ -716,8 +731,10 @@ def test_utils_clipboard_notes_and_agent_todos(app, monkeypatch):
           "companion": {**COMPANION, "todos": todos, "notes": notes}}
     w = _widget(st)
     w._reveal, w.side_open["utils"] = 1.0, True
+    QApplication.clipboard().dataChanged.connect(w._clip_changed)  # this one listens to copies
     QApplication.clipboard().setText("SELECT * FROM users;")
     app.processEvents()
+    QApplication.clipboard().dataChanged.disconnect(w._clip_changed)
     assert w.clips[0] == "SELECT * FROM users;"  # kept in memory
     w.show()
     side = w.utils
@@ -776,24 +793,30 @@ def test_todo_card_separates_yours_and_your_agents_by_category(app, monkeypatch)
     w.hide()
 
 
-def test_a_util_goes_full_screen_and_back(app, monkeypatch):
+def test_a_util_goes_large_over_the_panel_and_back(app, monkeypatch):
     posted = []
     monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    monkeypatch.setattr(widget, "SCREEN_W", 1920)  # a laptop: the open panel takes a third of it
     many = TODOS + [{"id": 100 + i, "text": f"Item {i}", "done": False, "source": "you", "at": 0} for i in range(12)]
     w = _widget({"phase": "idle", "threads": [], "companion": {**COMPANION, "todos": many}})
     w._reveal, w.side_open["utils"] = 1.0, True
     w.show()
+    for _ in range(60):  # the panel opens to its width
+        w._last_tick -= widget.FRAME
+        w._tick()
     w.utils.step(w.visual_rect(), True)
     w.utils._build(None)
     assert {f"full:{card}" for card in widget.SIDE_CARDS["utils"]} <= set(w.utils.hits)
     w.utils.activate("full:todo")
     full = w.full
     try:
-        assert full.isVisible() and full.card == "todo" and full.s >= 1.25 and w._folding  # the panel folds away
-        full.repaint()
-        assert {"trow:111", "trow:2", "full:todo", "fclose"} <= set(full.hits)  # every item, not the panel's 8
-        mine, agents = full.hits["trow:3"], full.hits["trow:2"]
-        assert agents.x() > mine.right() and abs(agents.y() - full.hits["trow:4"].y()) < 30  # two columns
+        island = w.visual_rect()
+        assert full.isVisible() and full.card == "todo" and not w._folding  # over the panel, which stays open
+        assert island.contains(full.geometry()) and full.y() >= island.y() + widget.NOTCH_H  # the notch's row in sight
+        full.grab()
+        assert {"trow:2", "full:todo", "fclose"} <= set(full.hits)
+        mine, agents = full.hits["trow:4"], full.hits["trow:2"]  # the first of yours, the first of your agents'
+        assert agents.x() > mine.right() and abs(agents.y() - mine.y()) < 30  # two columns
         point = full.hits["todo:2"].center()
         QTest.mouseClick(full, Qt.LeftButton, Qt.NoModifier, (point * full.s).toPoint())  # clicks are scaled too
         assert posted[-1] == ("/todo", {"action": "toggle", "id": 2})
@@ -802,3 +825,40 @@ def test_a_util_goes_full_screen_and_back(app, monkeypatch):
     finally:
         full.close_card()
         w.hide()
+
+
+def test_tucked_notch_glows_while_something_runs(app):
+    act = {"session": "a", "title": "Notch", "color": "#F59E0B", "label": "Edit", "steps": 2, "elapsed": 5}
+    w = _widget({"phase": "idle", "threads": [], "activity": act})
+    w.expanded, w._reveal = False, 0.0  # tucked: only its last pixels show
+    w.show()
+    assert w._peek_color() is not None and w._glow_moving()  # an agent works: the line glows, gently moving
+    w.grab()  # paints it without errors
+    w._on_status({"phase": "idle", "threads": [], "activity": act, "output": "silent"})
+    assert w._peek_color() is None  # Do not disturb: quiet
+    now = widget.time.time()
+    w._on_status({"phase": "idle", "threads": [], "companion": {**COMPANION, "timers": [
+        {"id": 1, "label": "", "total": 60, "end": now + 30, "left": 0.0}]}})
+    assert w._peek_color() is not None  # a timer runs
+    w._on_status({"phase": "idle", "threads": []})
+    assert w._peek_color() is None and not w._glow_moving()  # nothing runs: no glow, no redraws
+    w.hide()
+
+
+def test_an_open_notch_never_goes_up_by_itself(app):
+    w = _widget({"phase": "idle", "threads": []})
+    w.expanded = False
+    w.tuck()  # tucked by hand earlier...
+    w._hovering, w._tuck_hover = True, False  # ...brought down by the mouse, and opened
+    w._place_notch()
+    w.toggle_expanded()
+    w._hovering = False  # then off to Utils, the Companion or a large card
+    clock = widget.time.time
+    try:
+        widget.time.time = lambda: clock() + 60  # a minute later
+        w._place_notch()
+        assert w.expanded and w._tucked is None and w._reveal_until > widget.time.time()  # still down
+        w._banner_closed()
+        assert w._tucked is None  # closing a notification doesn't send an open notch up either
+    finally:
+        widget.time.time = clock

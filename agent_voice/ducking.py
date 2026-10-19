@@ -106,6 +106,23 @@ def _media_key() -> None:
     user32.keybd_event(VK_MEDIA_PLAY_PAUSE, 0, KEYEVENTF_KEYUP, 0)
 
 
+def _sounding(sessions, samples: int = 6, gap: float = 0.03) -> list[str]:
+    """The apps making sound: their meters read a few times over ~150 ms, so a quiet moment in a song (or between
+    two) isn't taken for silence."""
+    found: list[str] = []
+    for i in range(samples):
+        for _key, name, _volume, meter in sessions:
+            try:
+                if meter is not None and name not in found and meter.GetPeakValue() > 0.002:
+                    found.append(name)
+            except Exception:
+                continue
+        if found or i == samples - 1:
+            break
+        time.sleep(gap)
+    return found
+
+
 class Ducker:
     """duck(0.3) under the voice, duck(0.0, pause=True) while you speak, restore() after."""
 
@@ -128,17 +145,16 @@ class Ducker:
             except Exception:
                 log.debug("audio sessions unavailable", exc_info=True)
                 return
-            playing = False
-            for key, _name, volume, meter in sessions:
+            for key, _name, volume, _meter in sessions:
                 if key not in self._original:
                     self._original[key] = volume.GetMasterVolume()
-                if meter is not None and meter.GetPeakValue() > 0.005:
-                    playing = True
             self._save()
-            if pause and playing and not self._paused:
-                self._paused = _pause_media()  # a video playing while you reply: paused (and played again after)
-                if self._paused:
-                    log.info("media paused while you speak")
+            if pause and not self._paused:
+                playing = _sounding(sessions)
+                if playing:
+                    self._paused = _pause_media()  # a video playing while you reply: paused (and played again after)
+                log.info("you speak: %s", f"media paused ({', '.join(playing)})" if self._paused
+                         else "nothing playing to pause")
             self._fade(sessions, level)
 
     def restore(self) -> None:

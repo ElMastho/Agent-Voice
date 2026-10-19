@@ -73,13 +73,16 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}, "required": []}},
     {"name": "todo_add",
      "description": "Add an item to the user's to-do list: something they asked you to note, or a follow-up only "
-                    "they can do. One short line per item.",
-     "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
+                    "they can do. One short line per item; `category` files it (a word or two: the project's name, "
+                    "an existing category from todo_list).",
+     "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}, "category": {"type": "string"}},
+                     "required": ["text"]}},
     {"name": "todo_update",
      "description": "Change an item of the user's to-do list (ids from todo_list): tick it off (done=true), untick "
-                    "it, reword it (text), or remove it (remove=true).",
+                    "it, reword it (text), file it under another category (\"\" for none), or remove it (remove=true).",
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "integer"}, "done": {"type": "boolean"}, "text": {"type": "string"},
+         "category": {"type": "string"},
          "remove": {"type": "boolean", "default": False}}, "required": ["id"]}},
 ]
 
@@ -172,11 +175,13 @@ class Server:
             if not items:
                 return "The to-do list is empty.", False
             return "\n".join(f"{t['id']}. [{'x' if t['done'] else ' '}] {t['text']}"
+                             + (f" #{t['category']}" if t.get("category") else "")
                              + (f" (added by {t['source']})" if t.get("source") not in ("", "you") else "")
                              for t in items), False
         if name == "todo_add":
             out = client.request("/todo", {"action": "add", "text": str(args.get("text") or "")[:300],
-                                           "source": self.source or "agent"})
+                                           "source": self.source or "agent",
+                                           "category": str(args.get("category") or "")[:30]})
             if out is None:
                 return "agent-voice is not running, or the item was empty.", True
             return f"Added as item {out['item']['id']}.", False
@@ -184,6 +189,8 @@ class Server:
         steps = [{"action": "remove"}] if args.get("remove") else []
         if not steps and str(args.get("text") or "").strip():
             steps.append({"action": "edit", "text": str(args["text"])[:300]})
+        if not args.get("remove") and args.get("category") is not None:
+            steps.append({"action": "category", "category": str(args["category"])[:30]})
         if not steps or (args.get("done") is not None and not args.get("remove")):
             steps.append({"action": "done", "done": bool(args.get("done", True))})
         for step in steps:

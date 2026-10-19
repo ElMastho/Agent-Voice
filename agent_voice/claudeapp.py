@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -35,6 +36,72 @@ def session_title(cli_session_id: str, root: Path = SESSIONS_DIR) -> str:
         if data.get("cliSessionId") == cli_session_id:
             return str(data.get("title") or "")
     return ""
+
+
+PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+
+class TranscriptTitles:
+    """A Claude Code session's name, as its tab shows it (VS Code, the terminal's /resume): the `ai-title` Claude
+    writes into the transcript, or the `custom-title` of a /rename, which wins.
+
+    Asked on every status poll: the file is found once, then only what was appended since is read.
+    """
+
+    RETRY = 10.0  # a transcript not written yet: look again this long after
+
+    def __init__(self, root: Path = PROJECTS_DIR):
+        self.root = root
+        self._seen: dict[str, dict] = {}  # session -> {path, offset, ai, custom, missed}
+        self._lock = threading.Lock()  # status requests run on several threads: each byte is read once
+
+    def title(self, session: str) -> str:
+        if not session or "/" in session or "\\" in session:
+            return ""
+        with self._lock:
+            return self._title(session)
+
+    def _title(self, session: str) -> str:
+        seen = self._seen.setdefault(session, {"path": None, "offset": 0, "ai": "", "custom": "", "missed": 0.0})
+        if seen["path"] is None:
+            if time.time() - seen["missed"] < self.RETRY:
+                return ""
+            seen["path"] = next(self.root.glob(f"*/{session}.jsonl"), None)
+            if seen["path"] is None:
+                seen["missed"] = time.time()
+                return ""
+        try:
+            size = seen["path"].stat().st_size
+            if size < seen["offset"]:
+                seen.update(offset=0, ai="", custom="")  # rewritten from scratch
+            if size > seen["offset"]:
+                with seen["path"].open("rb") as f:
+                    f.seek(seen["offset"])
+                    chunk = f.read(size - seen["offset"])
+                end = chunk.rfind(b"\n") + 1  # a line still being written is read next time, whole
+                seen["offset"] += end
+                self._scan(seen, chunk[:end])
+        except OSError:
+            seen["path"] = None
+        if len(self._seen) > 200:
+            self._seen = dict(list(self._seen.items())[-100:])
+        return seen["custom"] or seen["ai"]
+
+    @staticmethod
+    def _scan(seen: dict, chunk: bytes) -> None:
+        for line in chunk.splitlines():
+            if b'-title"' not in line:  # skip parsing every message: titles are a few short lines
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("type") == "ai-title" and entry.get("aiTitle"):
+                seen["ai"] = " ".join(str(entry["aiTitle"]).split())[:80]
+            elif entry.get("type") == "custom-title" and entry.get("customTitle"):
+                seen["custom"] = " ".join(str(entry["customTitle"]).split())[:80]
 
 
 PAGE_SUFFIX = " - Claude Code"

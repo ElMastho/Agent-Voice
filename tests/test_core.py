@@ -241,6 +241,30 @@ def test_desktop_session_title_and_sidebar_entry(tmp_path):
     assert not claudeapp.is_current("Fix the build (fork) - Claude Code", "Fix the build")
 
 
+def test_claude_code_session_title_from_its_transcript(tmp_path):
+    import json
+
+    from agent_voice import claudeapp
+
+    d = tmp_path / "c--work-app"
+    d.mkdir()
+    log = d / "s1.jsonl"
+    quoted = {"type": "user", "message": {"content": '{"type":"ai-title","aiTitle":"Quoted"}'}}  # a tool result
+    log.write_text(json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n" + json.dumps(quoted) + "\n",
+                   encoding="utf-8")
+    titles = claudeapp.TranscriptTitles(tmp_path)
+    assert titles.title("s1") == ""  # no title yet
+    with log.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "ai-title", "aiTitle": "Music on the notch", "sessionId": "s1"}) + "\n")
+        f.write('{"type":"ai-title","aiTitle":"Half wr')  # still being written: not read yet
+    assert titles.title("s1") == "Music on the notch"
+    with log.open("a", encoding="utf-8") as f:
+        f.write('itten"}\n' + json.dumps({"type": "custom-title", "customTitle": "Renamed"}) + "\n")
+        f.write(json.dumps({"type": "ai-title", "aiTitle": "Later"}) + "\n")
+    assert titles.title("s1") == "Renamed"  # /rename wins over Claude's own
+    assert titles.title("missing") == "" and titles.title("../s1") == ""
+
+
 def test_permission_answers_and_wake_phrases():
     from agent_voice.server import match_yes_no, strip_wake
 
@@ -1668,6 +1692,33 @@ def test_companion_keeps_timers_todos_and_reminders():
             bad()
 
 
+def test_todo_categories_and_sections():
+    from agent_voice.companion import Companion, split_category, todo_categories, todo_sections
+
+    assert split_category("Call Paul #work") == ("Call Paul", "work")
+    assert split_category("Ship it #release.") == ("Ship it.", "release")
+    assert split_category("Fix issue #42") == ("Fix issue #42", "")  # a number, not a category
+    assert split_category("#home") == ("#home", "")  # nothing left to do: kept as written
+    box = Companion(None, lambda data: None)
+    box.data["todos"].append({"id": 99, "text": "Saved before categories", "done": False, "source": "you"})
+    assert box.todo("add", text="Water the plants")["category"] == ""  # old items have no "category" key
+    box.data["todos"].clear()
+    paul = box.todo("add", text="Call Paul #Work")
+    bank = box.todo("add", text="Call the bank #work")
+    assert (paul["category"], bank["category"]) == ("Work", "Work")  # one category, as first written
+    milk = box.todo("add", text="Buy milk")
+    pr = box.todo("add", text="Review the PR", source="claude", category="agent-voice")
+    box.todo("toggle", paul["id"])
+    assert box.todo("category", milk["id"], category="#home")["category"] == "home"
+    assert todo_categories(box.status()["todos"]) == ["agent-voice", "home", "Work"]
+    sections = todo_sections(box.status()["todos"])
+    assert [(title, [(name, [t["text"] for t in items]) for name, items in groups]) for title, groups in sections] == [
+        ("Yours", [("home", ["Buy milk"]), ("Work", ["Call the bank", "Call Paul"])]),  # what's left first
+        ("From your agents", [("agent-voice", ["Review the PR"])])]
+    box.todo("category", pr["id"], category="")
+    assert todo_sections(box.status()["todos"])[1][1] == [("", [box._find("todos", pr["id"])])]
+
+
 def test_companion_said_and_due(daemon, monkeypatch):
     monkeypatch.setattr(server_module(), "_beep", lambda freq: None)
     assert daemon.companion_said("Timer 10 minutes for the pasta", "en")
@@ -1729,6 +1780,12 @@ def test_companion_endpoints_and_mcp_todo(daemon, monkeypatch):
         assert "[x] Review the migration" in agent.call("todo_list", {})[0]
         assert agent.call("todo_update", {"id": item_id, "remove": True}) == ("Removed.", False)
         assert daemon.status()["companion"]["todos"] == []
+        text, _error = agent.call("todo_add", {"text": "Tag the release", "category": "agent-voice"})
+        item_id = int(text.split()[-1].rstrip("."))
+        assert "Tag the release #agent-voice (added by claude)" in agent.call("todo_list", {})[0]
+        assert agent.call("todo_update", {"id": item_id, "category": ""}) == ("Updated.", False)  # not ticked off
+        todo = daemon.status()["companion"]["todos"][0]
+        assert todo["category"] == "" and not todo["done"]
     finally:
         httpd.shutdown()
         httpd.server_close()

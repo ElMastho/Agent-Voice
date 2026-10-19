@@ -108,6 +108,7 @@ The daemon and widget run as `pythonw` in the background. **Code changes need a 
 - **PySide6 `QPen` rejects keyword args** (`cap=`, `join=`): use `widget._round_pen()`.
 - **ctypes handles must be typed.** Set `restype`/`argtypes` to `wintypes.HWND`/`HRGN` etc., or 64-bit handles are truncated.
 - **No acrylic**: the notch, the floating island and the compact orb draw their own black shape (`_body_path`) with DWM rounding off and the system border hidden. If acrylic ever comes back: it only clips to DWM's native rounding (8 px); `SetWindowRgn` does not clip the acrylic accent.
+- **The light theme is our own glass** (`Glass`): a grab of the screen behind, shrunk and smoothed (the blur), under a frosted tint. In that theme our windows are excluded from screen captures (`WDA_EXCLUDEFROMCAPTURE`), so they don't appear in their own grabs, nor in screenshots or screen shares. Grabs happen only when an area isn't covered yet or every `Glass.REFRESH` s while still, never per frame (~25 ms each). Never while tucked, never offscreen; `render_docs.py` turns them off.
 - **`sounddevice` can hang on a broken audio driver**: playback polls with a deadline instead of `sd.wait()`. Closing the mic stream can take ~1 s, so `cancel_listen()` updates the phase immediately.
 - **Claude `async` hooks may be killed on `Stop`**: only `PreToolUse` is async; `Stop` stays synchronous.
 - **Whisper hallucinates on silence** ("Thank you." and its French equivalent): filtered by `stt.is_hallucination`.

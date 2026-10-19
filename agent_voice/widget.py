@@ -24,6 +24,8 @@ from PySide6.QtGui import (
     QColor,
     QConicalGradient,
     QFont,
+    QImage,
+    QLinearGradient,
     QFontMetrics,
     QPainter,
     QPainterPath,
@@ -143,6 +145,8 @@ ICONS = {
     "calendar": "\ue787",
     "prev": "\ue892",
     "next": "\ue893",
+    "full": "\ue740",
+    "unfull": "\ue73f",
 }
 
 if sys.platform != "win32":
@@ -152,6 +156,7 @@ if sys.platform != "win32":
                   "shield": "✓", "down": "⌄", "up": "⌃", "replay": "↻", "open": "↗", "help": "?", "keyboard": "⌨", "tuck": "–"})
     ICONS.update({"more": "⋯", "play": "▶", "pause": "❚❚", "close": "✕", "stopwatch": "◔", "left": "‹", "right": "›"})
     ICONS.update({"note": "✎", "paste": "⧉", "usage": "▤", "music": "♪", "calendar": "▦", "prev": "⏮", "next": "⏭"})
+    ICONS.update({"full": "⤢", "unfull": "⤡"})
 
 # phase -> (accent colour, title, subtitle)
 PHASES = {
@@ -164,6 +169,152 @@ PHASES = {
     "offline": ("#64748B", "Offline", "Voice service isn't running"),
 }
 
+# The look: dark (the default, black like a hardware notch) or light. Read from widget.json when the widget starts;
+# switching relaunches it, so the stylesheets the boxes were built with follow.
+LIGHT = False
+INK_DARK, INK_LIGHT = (255, 255, 255), (17, 24, 39)  # text, icons, hairlines and faint fills over the body
+SOFT_DARK, SOFT_LIGHT = (226, 232, 240), (51, 65, 85)  # secondary text
+BODY_DARK, BODY_LIGHT = (0, 0, 0), (248, 249, 251)
+# Stylesheets are written for the dark look; in the light one these are swapped (menus' own greys included).
+QSS_LIGHT = (
+    (r"rgba\(255,\s*255,\s*255,", "rgba(17,24,39,"), (r"#000\b", "#F8F9FB"), (r"#fff\b", "#111827"),
+    (r"\bwhite\b", "#111827"), (r"#1E1E24", "#ECEEF2"), (r"#161925", "#FFFFFF"), (r"#E5E7EB", "#111827"),
+    (r"#2A2F3E", "#E2E5EA"), (r"#2A2F45", "#ECEAFF"), (r"#7C8496", "#9AA1AE"),
+)
+
+
+def set_theme(name: str) -> None:
+    global LIGHT
+    LIGHT = name == "light"
+
+
+def _saved_theme() -> str:
+    try:
+        return "light" if json.loads(POS_FILE.read_text(encoding="utf-8")).get("theme") == "light" else "dark"
+    except (OSError, ValueError, AttributeError):
+        return "dark"
+
+
+def _ink(alpha: int = 255) -> QColor:
+    return QColor(*(INK_LIGHT if LIGHT else INK_DARK), alpha)
+
+
+def _soft(alpha: int = 255) -> QColor:
+    return QColor(*(SOFT_LIGHT if LIGHT else SOFT_DARK), alpha)
+
+
+def _body(alpha: int = 255) -> QColor:
+    return QColor(*(BODY_LIGHT if LIGHT else BODY_DARK), alpha)
+
+
+def _tone(color) -> QColor:
+    """An accent used for text or a thin mark: the pastel that reads on black is too pale on white, so darker."""
+    c = QColor(color)
+    if LIGHT:
+        alpha = c.alpha()
+        c = c.darker(160)
+        c.setAlpha(alpha)
+    return c
+
+
+def _qss(css: str) -> str:
+    if not LIGHT:
+        return css
+    for pattern, light in QSS_LIGHT:
+        css = re.sub(pattern, light, css)
+    return css
+
+
+class Glass:
+    """The light theme's liquid glass: what is behind a window, blurred, under a frosted tint, a sheen and a bright rim.
+
+    DWM's acrylic only blurs inside its own 8 px rounding (not the notch's shape), so we blur the screen ourselves.
+    On Windows our windows are left out of screen captures in this theme (`_apply_windows_style`), so a grab of the
+    screen sees what's behind them, not themselves. Grabbed when the area isn't covered yet (a panel opening), and
+    at most every REFRESH seconds once nothing moves: never per frame (a grab takes ~25 ms)."""
+
+    REFRESH = 1.5
+    SHRINK = 12  # the blur: down to 1/12 and smoothly back up
+
+    def __init__(self):
+        self.pix: QPixmap | None = None
+        self.rect = QRect()  # the screen area `pix` shows
+        self.at = 0.0
+        self.tint = 170  # the frost: thicker over a dark background, so dark text keeps reading
+        self._sig = b""
+
+    def follow(self, area: QRect, settled: bool) -> bool:
+        """Keep a picture of `area` (screen coordinates); True when it changed (repaint)."""
+        if not LIGHT or QApplication.platformName() != "windows":  # offscreen (tests): nothing behind to show
+            return False
+        covered = not self.rect.isNull() and self.rect.contains(area)
+        if covered and not (settled and time.time() - self.at > self.REFRESH):
+            return False
+        return self.grab(area if covered else area.adjusted(-24, 0, 24, 24))
+
+    def grab(self, area: QRect) -> bool:
+        screen = QApplication.screenAt(area.center()) or QApplication.primaryScreen()
+        if screen is None or area.isEmpty():
+            return False
+        self.at = time.time()
+        local = area.translated(-screen.geometry().topLeft())
+        img = screen.grabWindow(0, local.x(), local.y(), local.width(), local.height()).toImage()
+        if img.isNull():
+            return False
+        small = img.scaled(max(1, area.width() // self.SHRINK), max(1, area.height() // self.SHRINK),
+                           Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        sig = bytes(small.convertToFormat(QImage.Format_RGB32).constBits())
+        if sig == self._sig and self.rect == area:
+            return False  # nothing behind changed: no repaint
+        self._sig, self.rect = sig, area
+        mean = small.scaled(1, 1, Qt.IgnoreAspectRatio, Qt.SmoothTransformation).pixelColor(0, 0)
+        self.tint = int(110 + 80 * (1 - mean.lightnessF()))
+        self.pix = QPixmap.fromImage(small.scaled(max(1, area.width() // 3), max(1, area.height() // 3),
+                                                  Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+        return True
+
+    def paint(self, p: QPainter, path: QPainterPath, at: QPoint) -> None:
+        """Fill `path` with glass; `at` is where the painter's origin is on the screen."""
+        bounds = path.boundingRect()
+        p.save()
+        p.setClipPath(path, Qt.IntersectClip)
+        if self.pix is not None:
+            p.setRenderHint(QPainter.SmoothPixmapTransform)
+            p.drawPixmap(QRectF(self.rect.translated(-at)), self.pix, QRectF(self.pix.rect()))
+            p.fillPath(path, _body(self.tint))
+        else:  # nothing to show through (not Windows, or a render): frosted, a little see-through
+            p.fillPath(path, _body(225))
+        sheen = QLinearGradient(bounds.topLeft(), bounds.bottomLeft())
+        sheen.setColorAt(0, QColor(255, 255, 255, 120))
+        sheen.setColorAt(min(1.0, 40 / max(1.0, bounds.height())), QColor(255, 255, 255, 25))
+        sheen.setColorAt(1, QColor(255, 255, 255, 0))
+        p.fillPath(path, sheen)
+        p.restore()
+        rim = QLinearGradient(bounds.topLeft(), bounds.bottomRight())  # light catching the edge, top left first
+        rim.setColorAt(0, QColor(255, 255, 255, 240))
+        rim.setColorAt(0.45, QColor(255, 255, 255, 90))
+        rim.setColorAt(1, QColor(255, 255, 255, 190))
+        p.save()
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(_ink(34), 1))  # a hairline outside, so it holds its shape over white pages
+        p.drawPath(path)
+        p.setClipPath(path)
+        p.setPen(QPen(rim, 2.4))  # half of it inside the clip: a 1.2 px bevel
+        p.drawPath(path)
+        p.restore()
+
+
+def _paint_card_body(p: QPainter, win: QWidget, glass: Glass, radius: float) -> None:
+    """A floating card's rounded body (side panels, banner, preview): black, or glass in the light theme."""
+    rect = QRectF(1, 1, win.width() - 2, win.height() - 2)
+    if LIGHT:
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        glass.paint(p, path, win.pos())
+        return
+    p.setPen(QPen(_ink(30), 1))
+    p.setBrush(_body(245))
+    p.drawRoundedRect(rect, radius, radius)
 
 
 _QR: dict[str, list] = {}
@@ -314,6 +465,9 @@ def _apply_windows_style(hwnd: int) -> None:
     # Hide the grey system border.
     no_border = ctypes.c_uint(0xFFFFFFFE)  # DWMWA_COLOR_NONE
     dwm.DwmSetWindowAttribute(wintypes.HWND(hwnd), 34, ctypes.byref(no_border), ctypes.sizeof(no_border))
+    if LIGHT:  # the glass grabs the screen behind us: we mustn't be in the picture (nor in screenshots, then)
+        user32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.SetWindowDisplayAffinity(wintypes.HWND(hwnd), 0x11)  # WDA_EXCLUDEFROMCAPTURE (Windows 10 2004+)
 
 
 
@@ -421,6 +575,7 @@ class Banner(QWidget):
         self._hot: str | None = None  # the button under the mouse
         self.on_reply = None  # opens the reply box (set by the widget)
         self._topmost_at = 0.0
+        self.glass = Glass()
         self._shown_left = -1
         self.f_head = _font(FONT_TEXT, 8)
         self.f_icon = _font(ICON_FONT, 9)
@@ -546,7 +701,7 @@ class Banner(QWidget):
         if now - self._topmost_at > 1.0 and not _over_us():
             self._topmost_at = now
             _keep_on_top(int(self.winId()))
-        if not settled:
+        if self.glass.follow(self.geometry(), settled) or not settled:
             self.update()
         return not settled
 
@@ -567,15 +722,23 @@ class Banner(QWidget):
             ring.setAlpha(210 if self._hover else 170)
             p.setPen(QPen(ring, 1.6))
         else:
-            p.setPen(QPen(QColor(255, 255, 255, 26 + (14 if self._hover else 0)), 1))
-        p.setBrush(QColor(0, 0, 0, 245))
-        p.drawRoundedRect(body, 18, 18)
+            p.setPen(QPen(_ink(26 + (14 if self._hover else 0)), 1))
+        if LIGHT:
+            ring = p.pen()
+            _paint_card_body(p, self, self.glass, 18)
+            if accent:  # the colour frame stays, over the glass's rim
+                p.setPen(ring)
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(body, 18, 18)
+        else:
+            p.setBrush(_body(245))
+            p.drawRoundedRect(body, 18, 18)
         color = QColor(accent if yours or kind in ("catchup", "recap") else self.item.get("color") or "#94A3B8")
         p.setPen(Qt.NoPen)
         p.setBrush(color)
         p.drawEllipse(QPointF(21, 20), 3, 3)
         p.setFont(self.f_head)
-        p.setPen(QColor(255, 255, 255, 150))
+        p.setPen(_ink(150))
         title = fixed_title or self.item.get("title") or ""
         if kind == "pending":
             title = f"Sending to {title}" if title else "Sending"
@@ -583,7 +746,7 @@ class Banner(QWidget):
             title = f"You  →  {title}" if title else "You said"
         head = QFontMetrics(self.f_head).elidedText(title or "Reply", Qt.ElideRight, self.width() - 90)
         p.drawText(QRectF(30, 10, self.width() - 90, 20), Qt.AlignLeft | Qt.AlignVCenter, head)
-        p.setPen(QColor(255, 255, 255, 90))
+        p.setPen(_ink(90))
         tag = "speaking" if self.holding else self.item.get("tag") or ("" if kind in BANNER_KINDS else "done")
         if kind == "pending":
             tag = f"in {self._left()} s · say “wait” or “cancel”"
@@ -591,7 +754,7 @@ class Banner(QWidget):
             tag = _when_text(float(self.item.get("at") or time.time()))
         p.drawText(QRectF(0, 10, self.width() - 18, 20), Qt.AlignRight | Qt.AlignVCenter, tag)
         p.setFont(self.f_text)
-        p.setPen(QColor(255, 255, 255, 228))
+        p.setPen(_ink(228))
         fm = QFontMetrics(self.f_text)
         y = 34.0
         for line in self.lines:
@@ -600,10 +763,10 @@ class Banner(QWidget):
         for key, rect in self._buttons().items():
             hot = key == self._hot
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 255, 255, 48 if hot else 22))
+            p.setBrush(_ink(48 if hot else 22))
             p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
             p.setFont(self.f_icon)
-            p.setPen(QColor(255, 255, 255, 235))
+            p.setPen(_ink(235))
             icon, label = BANNER_BUTTONS[key]
             if key == "snooze":
                 label = f"+{(self.item.get('snooze') or {}).get('seconds', 300) // 60} min"
@@ -612,7 +775,7 @@ class Banner(QWidget):
             p.setFont(self.f_head)
             p.drawText(rect.adjusted(26, 0, -8, 0), Qt.AlignLeft | Qt.AlignVCenter, label)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(255, 255, 255, 45))  # a grabber: it can be swiped away
+        p.setBrush(_ink(45))  # a grabber: it can be swiped away
         p.drawRoundedRect(QRectF(self.width() / 2 - 16, self.height() - 7, 32, 3), 1.5, 1.5)
         p.end()
 
@@ -692,25 +855,26 @@ class Preview(QWidget):
         self.setAttribute(Qt.WA_MacAlwaysShowToolWindow)
         self.session = ""
         self.color = "#94A3B8"
+        self.glass = Glass()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 12, 10, 12)
         layout.setSpacing(6)
         self.head = QLabel()
         self.head.setFont(_font(FONT_TEXT, 8))
-        self.head.setStyleSheet("color: rgba(255,255,255,170); background: transparent;")
+        self.head.setStyleSheet(_qss("color: rgba(255,255,255,170); background: transparent;"))
         self.body = QTextBrowser()
         self.body.setFocusPolicy(Qt.NoFocus)
         self.body.setOpenLinks(False)
         self.body.setFrameShape(QFrame.NoFrame)
         self.body.setFont(_font(FONT_TEXT, 9))
-        self.body.setStyleSheet(
+        self.body.setStyleSheet(_qss(
             "QTextBrowser { background: transparent; color: rgba(255,255,255,225); border: none; }"
             "QScrollBar:vertical { width: 6px; background: transparent; }"
             "QScrollBar::handle:vertical { background: rgba(255,255,255,50); border-radius: 3px; min-height: 30px; }"
-            "QScrollBar::add-line, QScrollBar::sub-line { height: 0; }")
-        self.body.document().setDefaultStyleSheet(
+            "QScrollBar::add-line, QScrollBar::sub-line { height: 0; }"))
+        self.body.document().setDefaultStyleSheet(_qss(
             "code, pre { font-family: Consolas, Menlo, monospace; background-color: #1E1E24; }"
-            "a { color: #8B7CFF; } h1, h2, h3 { color: white; }")
+            "a { color: #8B7CFF; } h1, h2, h3 { color: white; }"))
         layout.addWidget(self.head)
         layout.addWidget(self.body)
 
@@ -739,6 +903,7 @@ class Preview(QWidget):
             x = min(beside.right() + 10, screen.right() - self.WIDTH - 8)
         y = max(screen.top() + 8, min(beside.top() + row_y - 20, screen.bottom() - h - 8))
         self.setGeometry(x, y, self.WIDTH, h)
+        self.glass.follow(self.geometry(), True)
         self.body.verticalScrollBar().setValue(0)
         self.show()
         self.raise_()
@@ -746,9 +911,7 @@ class Preview(QWidget):
     def paintEvent(self, _event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(QPen(QColor(255, 255, 255, 30), 1))
-        p.setBrush(QColor(0, 0, 0, 245))
-        p.drawRoundedRect(QRectF(1, 1, self.width() - 2, self.height() - 2), 16, 16)
+        _paint_card_body(p, self, self.glass, 16)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(self.color))
         p.drawEllipse(QPointF(11, 21), 3, 3)
@@ -830,7 +993,7 @@ class ReplyBox(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(box)
         text, head = f"font-family:'{FONT_TEXT}';", f"font-family:'{FONT_TEXT}';"
-        self.setStyleSheet(
+        self.setStyleSheet(_qss(
             "#box{background:#000;border:1.5px solid #10E0A0;border-radius:18px;}"
             f"QLabel{{color:rgba(255,255,255,150);font-size:{_font(FONT_TEXT, 8).pointSize()}pt;{head}}}"
             f"QPlainTextEdit{{background:transparent;border:none;color:#fff;font-size:"
@@ -841,8 +1004,8 @@ class ReplyBox(QWidget):
             f"color:rgba(255,255,255,190);font-size:{_font(FONT_TEXT, 8).pointSize()}pt;{text}}}"
             "QPushButton:hover{background:rgba(255,255,255,40);}"
             "QPushButton:checked{background:rgba(16,224,160,70);color:#fff;}"
-            f"#talk, #pick{{font-family:'{ICON_FONT}','{FONT_TEXT}';}}")
-        self.hint.setStyleSheet("color:rgba(255,255,255,90);")
+            f"#talk, #pick{{font-family:'{ICON_FONT}','{FONT_TEXT}';}}"))
+        self.hint.setStyleSheet(_qss("color:rgba(255,255,255,90);"))
 
     def open(self, item: dict, anchor: QRectF, width: int) -> None:
         if item.get("session") != self.session:
@@ -891,7 +1054,7 @@ class ReplyBox(QWidget):
     def _folder_menu(self) -> None:
         """The folders you worked in lately, and Browse… for any other."""
         menu = QMenu(self)
-        menu.setStyleSheet(MENU_STYLE)
+        menu.setStyleSheet(_qss(MENU_STYLE))
         for path in self.recent[:8]:
             act = menu.addAction(path)
             act.triggered.connect(lambda _=False, p=path: self._use_folder(p))
@@ -1049,8 +1212,8 @@ class HistoryBox(QWidget):
         self.head = QLabel()
         self.body = QTextBrowser()
         self.body.setOpenLinks(False)
-        self.body.document().setDefaultStyleSheet(
-            "code, pre { font-family: Consolas, Menlo, monospace; background-color: #1E1E24; } a { color: #8B7CFF; }")
+        self.body.document().setDefaultStyleSheet(_qss(
+            "code, pre { font-family: Consolas, Menlo, monospace; background-color: #1E1E24; } a { color: #8B7CFF; }"))
         self.copy = QPushButton(f"{ICONS['copy']}  Copy")
         self.copy.clicked.connect(self._copy)
         self.open_thread = QPushButton(f"{ICONS['open']}  Open the thread")
@@ -1078,7 +1241,7 @@ class HistoryBox(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(box)
         small, text = _font(FONT_TEXT, 8).pointSize(), _font(FONT_TEXT, 9).pointSize()
-        self.setStyleSheet(
+        self.setStyleSheet(_qss(
             "#box{background:#000;border:1.5px solid #8B7CFF;border-radius:18px;}"
             f"QLabel{{color:rgba(255,255,255,150);font-size:{small}pt;font-family:'{FONT_TEXT}';}}"
             f"QLineEdit{{background:rgba(255,255,255,14);border:none;border-radius:8px;padding:5px 10px;color:#fff;"
@@ -1095,7 +1258,7 @@ class HistoryBox(QWidget):
             "QPushButton#act:hover{background:rgba(255,255,255,40);}"
             "QScrollBar:vertical{width:6px;background:transparent;}"
             "QScrollBar::handle:vertical{background:rgba(255,255,255,50);border-radius:3px;min-height:30px;}"
-            "QScrollBar::add-line, QScrollBar::sub-line{height:0;}")
+            "QScrollBar::add-line, QScrollBar::sub-line{height:0;}"))
 
     def open(self, anchor: QRectF, width: int) -> None:
         self.resize(max(560, width), 460)
@@ -1201,7 +1364,8 @@ class QuickInput(QWidget):
 
     Like the reply box it takes the keyboard (you type in it), and closes when you click elsewhere or press Esc."""
 
-    HINTS = {"todo": "Add to your list (Enter)",
+    HINTS = {"todo": "Add to your list (Enter) · #work files it under Work",
+             "category": "A category for this item (Enter): work, home, release…",
              "reminder": "16:00 call Paul · in 20 minutes stretch · tomorrow at 9 send the invoice",
              "timer": "12 min tea · 1h30 · 90 s",
              "note": "A note (Enter): kept, and searchable in History",
@@ -1212,6 +1376,7 @@ class QuickInput(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_MacAlwaysShowToolWindow)
         self.mode = "todo"
+        self.item_id = 0  # the to-do a "category" box files
         box = QFrame(self)
         box.setObjectName("box")
         layout = QVBoxLayout(box)
@@ -1224,10 +1389,10 @@ class QuickInput(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(box)
         text = _font(FONT_TEXT, 9).pointSize()
-        self.setStyleSheet(
+        self.setStyleSheet(_qss(
             "#box{background:#000;border:1.5px solid #8B7CFF;border-radius:14px;}"
             f"QLineEdit{{background:rgba(255,255,255,14);border:none;border-radius:8px;padding:5px 10px;color:#fff;"
-            f"font-size:{text}pt;font-family:'{FONT_TEXT}';selection-background-color:#8B7CFF;}}")
+            f"font-size:{text}pt;font-family:'{FONT_TEXT}';selection-background-color:#8B7CFF;}}"))
 
     def open(self, mode: str, beside: QRect) -> None:
         """Ask for a `mode` item, just under the companion `beside` (screen coordinates): never over it, which
@@ -1253,6 +1418,8 @@ class QuickInput(QWidget):
             return
         if self.mode == "todo":
             _post("/todo", {"action": "add", "text": text})
+        elif self.mode == "category":
+            _post("/todo", {"action": "category", "id": self.item_id, "category": text})
         elif self.mode == "note":
             _post("/note", {"action": "add", "text": text})
         elif self.mode == "calendar":
@@ -1338,6 +1505,7 @@ class SidePanel(QWidget):
         self._content_h = 0.0
         self._refit = False
         self._topmost_at = 0.0
+        self.glass = Glass()
         self.input = QuickInput()
         self.f_head = _font(FONT_TEXT, 8)
         self.f_head.setWeight(QFont.DemiBold)
@@ -1410,6 +1578,8 @@ class SidePanel(QWidget):
             self._refit = False
             self._fit()
             self.update()
+        if self.glass.follow(self.geometry(), settled):
+            self.update()
         clock = self.clock_key()
         if clock != self._clock:
             self._clock = clock
@@ -1453,7 +1623,10 @@ class SidePanel(QWidget):
         y += 30 - self.scroll
         cards = self.owner.side_widgets[self.name]
         for card in cards:
+            top = y
             y = getattr(self, f"_card_{card}")(p, hits, QRectF(10, y, self.W - 20, 0), data, now) + 8
+            if self.name == "utils":
+                self._full_button(p, hits, QPointF(10, top), card, ICONS["full"])
         if not cards:
             self._text(p, QRectF(16, y, self.W - 32, 20), "Choose what to show with ⋯", self.f_small, 120)
             y += 26
@@ -1469,7 +1642,7 @@ class SidePanel(QWidget):
         f = QFont(font)
         f.setStrikeOut(strike)
         p.setFont(f)
-        c = QColor(color or "#FFFFFF")
+        c = _tone(color) if color else _ink()
         c.setAlpha(alpha)
         p.setPen(c)
         p.drawText(rect, align or (Qt.AlignLeft | Qt.AlignVCenter),
@@ -1480,7 +1653,7 @@ class SidePanel(QWidget):
             return
         hot = self.hot == key
         p.setPen(Qt.NoPen)
-        fill = QColor(accent) if accent else QColor(255, 255, 255)
+        fill = QColor(accent) if accent else _ink()
         fill.setAlpha((70 if hot else 40) if accent else (44 if hot else 20))
         p.setBrush(fill)
         p.drawEllipse(rect)
@@ -1489,8 +1662,8 @@ class SidePanel(QWidget):
     def _card(self, p, rect: QRectF, icon: str, title: str, right: str = "") -> None:
         if p is None:
             return
-        p.setPen(QPen(QColor(255, 255, 255, 22), 1))
-        p.setBrush(QColor(255, 255, 255, 12))
+        p.setPen(QPen(_ink(22), 1))
+        p.setBrush(_ink(12))
         p.drawRoundedRect(rect, 12, 12)
         self._text(p, QRectF(rect.x() + 10, rect.y() + 6, 18, 18), icon, self.f_icon, 170, Qt.AlignCenter)
         self._text(p, QRectF(rect.x() + 32, rect.y() + 6, 140, 18), title, self.f_head, 215)
@@ -1498,11 +1671,18 @@ class SidePanel(QWidget):
             self._text(p, QRectF(rect.right() - 150, rect.y() + 6, 140, 18), right, self.f_small, 120,
                        Qt.AlignRight | Qt.AlignVCenter)
 
+    def _full_button(self, p, hits, corner: QPointF, card: str, icon: str) -> None:
+        """Just after a card's title (its right side has the card's own buttons): full screen, or back."""
+        key = f"full:{card}"
+        x = corner.x() + 32 + QFontMetrics(self.f_head).horizontalAdvance(self.LABELS[card]) + 4
+        hits[key] = QRectF(x, corner.y() + 6, 18, 18)
+        self._text(p, hits[key], icon, self.f_icon, 220 if self.hot == key else 80, Qt.AlignCenter)
+
     def _chip(self, p, rect: QRectF, text: str, key: str, alpha: int = 20) -> None:
         if p is None:
             return
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(255, 255, 255, alpha + (26 if self.hot == key else 0)))
+        p.setBrush(_ink(alpha + (26 if self.hot == key else 0)))
         p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
         self._text(p, rect, text, self.f_small, 215, Qt.AlignCenter)
 
@@ -1529,7 +1709,7 @@ class SidePanel(QWidget):
             if p is not None:
                 bar = QRectF(rect.x() + 12, y + 30, rect.width() - 24, 3)
                 p.setPen(Qt.NoPen)
-                p.setBrush(QColor(255, 255, 255, 26))
+                p.setBrush(_ink(26))
                 p.drawRoundedRect(bar, 1.5, 1.5)
                 done = 1 - left / max(1.0, float(t["total"]))
                 p.setBrush(QColor("#FBBF24" if running else "#64748B"))
@@ -1573,7 +1753,7 @@ class SidePanel(QWidget):
         if p is not None and phase:
             bar = QRectF(rect.x() + 12, y + 30, rect.width() - 24, 3)
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 255, 255, 26))
+            p.setBrush(_ink(26))
             p.drawRoundedRect(bar, 1.5, 1.5)
             done = 1 - left / max(1.0, float(pomo.get("length") or 1))
             p.setBrush(QColor(color))
@@ -1598,44 +1778,86 @@ class SidePanel(QWidget):
         return rect.bottom()
 
     def _card_todo(self, p, hits, area: QRectF, data: dict, now: float) -> float:
+        """Yours, then your agents' (side by side when there's room: full screen); in each, by category."""
         todos = data.get("todos") or []
-        ordered = [t for t in todos if not t["done"]] + [t for t in todos if t["done"]]
-        shown = ordered[:self.TODO_ROWS]
+        sections = companion.todo_sections(todos)
+        wide = area.width() >= 520 and len(sections) > 1
+        bottom, _shown = self._todo_columns(None, {}, area, sections, wide)  # measured: the card goes under it
+        rect = QRectF(area.x(), area.y(), area.width(), bottom - area.y() + 26)
         left = sum(1 for t in todos if not t["done"])
-        rect = QRectF(area.x(), area.y(), area.width(), 30 + len(shown) * 24 + 26)
-        right = f"{left} left" if todos else ""
-        self._card(p, rect, ICONS["list"], "To-do", "" if any(t["done"] for t in todos) else right)
-        if any(t["done"] for t in todos):
+        done = any(t["done"] for t in todos)
+        self._card(p, rect, ICONS["list"], "To-do", f"{left} left" if todos and not done else "")
+        if done:
             hits["tclear"] = QRectF(rect.right() - 82, rect.y() + 6, 72, 18)
             self._chip(p, hits["tclear"], "Clear done", "tclear")
-        y = rect.y() + 30
-        for t in shown:
-            row = QRectF(rect.x() + 4, y, rect.width() - 8, 22)
-            hits[f"todo:{t['id']}"] = QRectF(row.x(), y, 30, 22)
-            if p is not None:
-                box = QRectF(row.x() + 10, y + 5, 12, 12)
-                p.setPen(QPen(QColor(255, 255, 255, 150 if not t["done"] else 60), 1.2))
-                p.setBrush(QColor("#10E0A0") if t["done"] else Qt.NoBrush)
-                p.drawRoundedRect(box, 3, 3)
-                if t["done"]:
-                    self._text(p, box, ICONS["check"], self.f_icon, 230, Qt.AlignCenter, "#00110A")
-            source = t.get("source") or ""
-            tag = "" if source in ("", "you") else AGENT_NAMES.get(source, source.capitalize())
-            text_w = row.width() - 34 - 26 - (QFontMetrics(self.f_small).horizontalAdvance(tag) + 8 if tag else 0)
-            self._text(p, QRectF(row.x() + 30, y, text_w, 22), t["text"], self.f_text, 110 if t["done"] else 220,
-                       strike=t["done"])
-            if tag:
-                self._text(p, QRectF(row.x() + 30 + text_w + 4, y, row.width() - 64 - text_w, 22), tag, self.f_small,
-                           170, color="#A99BFF")
-            key = f"tdel:{t['id']}"
-            hits[key] = QRectF(row.right() - 22, y + 2, 18, 18)
-            if self.hot in (key, f"todo:{t['id']}", f"trow:{t['id']}"):
-                self._text(p, hits[key], ICONS["close"], self.f_icon, 200 if self.hot == key else 110, Qt.AlignCenter)
-            hits[f"trow:{t['id']}"] = QRectF(row.x() + 30, y, row.width() - 52, 22)
-            y += 24
-        self._add_row(p, hits, QRectF(rect.x() + 4, y, rect.width() - 8, 22), "todo_add",
-                      "Add" + (f"  ·  {len(ordered) - len(shown)} more" if len(ordered) > len(shown) else ""))
+        bottom, shown = self._todo_columns(p, hits, area, sections, wide)
+        more = len(todos) - shown
+        self._add_row(p, hits, QRectF(rect.x() + 4, bottom, rect.width() - 8, 22), "todo_add",
+                      "Add" + (f"  ·  {more} more" if more > 0 else ""))
         return rect.bottom()
+
+    def _todo_columns(self, p, hits, area: QRectF, sections: list, wide: bool) -> tuple[float, int]:
+        """The sections one under the other (or in two columns): where they end, and how many items show."""
+        gap = 12.0
+        col_w = (area.width() - 8 - gap) / 2 if wide else area.width() - 8
+        y = bottom = area.y() + 30
+        shown = 0
+        for i, (title, groups) in enumerate(sections):
+            if wide:
+                y = area.y() + 30
+            budget = self.TODO_ROWS if wide else self.TODO_ROWS - shown
+            if budget <= 0:
+                break
+            y, n = self._todo_section(p, hits, QRectF(area.x() + 4 + (col_w + gap) * i * wide, y, col_w, 0), title,
+                                      groups, budget)
+            shown += n
+            bottom = max(bottom, y)
+            y += 4
+        return bottom, shown
+
+    def _todo_section(self, p, hits, area: QRectF, title: str, groups: list, budget: int) -> tuple[float, int]:
+        """"Yours" or "From your agents": a line of its own, then each category's items under its name."""
+        y, shown = area.y(), 0
+        left = sum(1 for _name, items in groups for t in items if not t["done"])
+        self._text(p, QRectF(area.x() + 10, y, area.width() - 20, 18), title + (f"  ·  {left}" if left else ""),
+                   self.f_small, 150)
+        y += 20
+        for name, items in groups:
+            if shown >= budget:
+                break
+            if name:
+                self._text(p, QRectF(area.x() + 10, y, area.width() - 20, 18), f"# {name}",
+                           self.f_small, 210, color="#A99BFF")
+                y += 20
+            for t in items[:budget - shown]:
+                self._todo_row(p, hits, QRectF(area.x(), y, area.width(), 22), t)
+                y += 24
+                shown += 1
+        return y, shown
+
+    def _todo_row(self, p, hits, row: QRectF, t: dict) -> None:
+        y = row.y()
+        hits[f"todo:{t['id']}"] = QRectF(row.x(), y, 30, 22)
+        if p is not None:
+            box = QRectF(row.x() + 10, y + 5, 12, 12)
+            p.setPen(QPen(_ink(150 if not t["done"] else 60), 1.2))
+            p.setBrush(QColor("#10E0A0") if t["done"] else Qt.NoBrush)
+            p.drawRoundedRect(box, 3, 3)
+            if t["done"]:
+                self._text(p, box, ICONS["check"], self.f_icon, 230, Qt.AlignCenter, "#00110A")
+        source = t.get("source") or ""
+        tag = "" if source in ("", "you") else AGENT_NAMES.get(source, source.capitalize())
+        text_w = row.width() - 34 - 26 - (QFontMetrics(self.f_small).horizontalAdvance(tag) + 8 if tag else 0)
+        self._text(p, QRectF(row.x() + 30, y, text_w, 22), t["text"], self.f_text, 110 if t["done"] else 220,
+                   strike=t["done"])
+        if tag:
+            self._text(p, QRectF(row.x() + 30 + text_w + 4, y, row.width() - 64 - text_w, 22), tag, self.f_small,
+                       170, color="#A99BFF")
+        key = f"tdel:{t['id']}"
+        hits[key] = QRectF(row.right() - 22, y + 2, 18, 18)
+        if self.hot in (key, f"todo:{t['id']}", f"trow:{t['id']}"):
+            self._text(p, hits[key], ICONS["close"], self.f_icon, 200 if self.hot == key else 110, Qt.AlignCenter)
+        hits[f"trow:{t['id']}"] = QRectF(row.x() + 30, y, row.width() - 52, 22)
 
     def _card_reminders(self, p, hits, area: QRectF, data: dict, now: float) -> float:
         reminders = (data.get("reminders") or [])[:self.REMINDER_ROWS]
@@ -1744,7 +1966,7 @@ class SidePanel(QWidget):
                 if p is not None:
                     bar = QRectF(rect.x() + 52, y + 8, rect.width() - 150, 3)
                     p.setPen(Qt.NoPen)
-                    p.setBrush(QColor(255, 255, 255, 26))
+                    p.setBrush(_ink(26))
                     p.drawRoundedRect(bar, 1.5, 1.5)
                     if pct is not None:
                         p.setBrush(_limit_color(int(pct)))
@@ -1814,9 +2036,7 @@ class SidePanel(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
-        p.setPen(QPen(QColor(255, 255, 255, 30), 1))
-        p.setBrush(QColor(0, 0, 0, 245))
-        p.drawRoundedRect(QRectF(1, 1, self.width() - 2, self.height() - 2), 18, 18)
+        _paint_card_body(p, self, self.glass, 18)
         p.setClipRect(QRectF(0, 0, self.width(), self.height() - 4))
         h = self._build(p)
         if self._content_h > self.height() and p is not None:  # a thin bar: there's more, scroll for it
@@ -1824,7 +2044,7 @@ class SidePanel(QWidget):
             size = track * self.height() / self._content_h
             top = 44 + (track - size) * self.scroll / max(1.0, self._content_h - self.height())
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 255, 255, 50))
+            p.setBrush(_ink(50))
             p.drawRoundedRect(QRectF(self.width() - 6, top, 3, size), 1.5, 1.5)
         p.end()
         self._refit = abs(h - self._content_h) > 0.5  # the content changed size: fitted on the next step
@@ -1853,6 +2073,44 @@ class SidePanel(QWidget):
         if key and key == self._key_at(e.position()):
             self.activate(key)
 
+    def contextMenuEvent(self, e):
+        kind, _, arg = (self._key_at(QPointF(e.pos())) or "").partition(":")
+        if kind in ("todo", "trow", "tdel") and arg.isdigit():
+            self.todo_menu(int(arg), e.globalPos())
+
+    def todo_menu(self, item_id: int, at: QPoint) -> None:
+        """Right-click on a to-do: file it under one of the categories, a new one, or none."""
+        todos = self.data().get("todos") or []
+        item = next((t for t in todos if t["id"] == item_id), None)
+        if item is None:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(_qss(MENU_STYLE))
+        current = item.get("category") or ""
+        names = companion.todo_categories(todos)
+        for name in names:
+            act = QAction(name, menu)
+            act.setCheckable(True)
+            act.setChecked(name == current)
+            act.triggered.connect(lambda _on=False, c=name: _post("/todo", {"action": "category", "id": item_id,
+                                                                             "category": c}))
+            menu.addAction(act)
+        if names:
+            menu.addSeparator()
+        menu.addAction("New category…").triggered.connect(lambda: self._ask_category(item_id))
+        if current:
+            menu.addAction("No category").triggered.connect(
+                lambda: _post("/todo", {"action": "category", "id": item_id, "category": ""}))
+        menu.exec(at)
+
+    def _ask_category(self, item_id: int) -> None:
+        self.input.item_id = item_id
+        self.input.open("category", self._input_at(f"trow:{item_id}"))
+
+    def _input_at(self, _key: str) -> QRect:
+        """Where a QuickInput opens: just under the panel (screen coordinates)."""
+        return self.geometry()
+
     def _todo_session(self, key: str) -> str:
         item_id = int(key.partition(":")[2] or 0)
         return next((t.get("session") or "" for t in self.data().get("todos") or [] if t["id"] == item_id), "")
@@ -1866,9 +2124,11 @@ class SidePanel(QWidget):
             self.choose_widgets()
         elif kind == "preset":
             _post("/timer", {"action": "start", "seconds": int(arg) * 60})
+        elif kind == "full":
+            self.owner.open_full(arg)
         elif kind in ("tcustom", "todo_add", "rem_add", "note_add", "cal_add"):
             self.input.open({"tcustom": "timer", "todo_add": "todo", "rem_add": "reminder", "note_add": "note",
-                             "cal_add": "calendar"}[kind], self.geometry())
+                             "cal_add": "calendar"}[kind], self._input_at(key))
         elif kind == "trow":  # an agent's to-do: open the conversation it came from
             todo = next((t for t in self.data().get("todos") or [] if t["id"] == item_id), None)
             if todo and todo.get("session"):
@@ -1913,7 +2173,7 @@ class SidePanel(QWidget):
     def choose_widgets(self) -> None:
         """Which cards show, in their usual order (kept in widget.json)."""
         menu = QMenu(self)
-        menu.setStyleSheet(MENU_STYLE)
+        menu.setStyleSheet(_qss(MENU_STYLE))
         chosen = self.owner.side_widgets[self.name]
         for card in SIDE_CARDS[self.name]:
             act = QAction(self.LABELS[card], menu)
@@ -1922,6 +2182,126 @@ class SidePanel(QWidget):
             act.triggered.connect(lambda on, c=card: self.owner.set_side_widget(self.name, c, on))
             menu.addAction(act)
         menu.exec(self.mapToGlobal(self.hits["menu"].bottomLeft().toPoint()))
+
+
+class FullCard(SidePanel):
+    """One of Utils' cards over the whole screen: the same drawing scaled up, with every item (the to-do list in two
+    columns, yours and your agents'). Like the panels it never takes the focus: ✕, the card's ⤡ or a click beside the
+    card closes it. While it shows, the clocks repaint once a second; nothing else does."""
+
+    TODO_ROWS, REMINDER_ROWS, TIMER_ROWS, NOTE_ROWS, CLIP_ROWS = 200, 30, 5, 20, 10
+    WIDE = 640  # the card's width before scaling
+
+    def __init__(self, owner):
+        super().__init__(owner, "utils")
+        self.card = ""
+        self.s = 1.0  # the scale: the card is drawn at its usual size, s times larger
+        self.card_rect = QRectF()
+        self._second = QTimer(self)
+        self._second.timeout.connect(self._tick_clock)
+
+    def open_card(self, card: str, screen: QRect) -> None:
+        self.card, self.scroll, self.hot = card, 0.0, None
+        self.glass.follow(screen, True)  # the light theme: the whole screen behind, frosted (once, as it opens)
+        self.setGeometry(screen)
+        self.setWindowOpacity(1.0)
+        # As large as the screen allows: a clock fills its width, a long list stays readable and scrolls.
+        self.s = max(1.25, min(4.0, screen.width() * 0.8 / self.WIDE))
+        self._fit()
+        room = (screen.height() - NOTCH_H - STRIP_H - 64) / max(1.0, self._content_h - self._top())
+        self.s = max(1.25, min(self.s, room * self.s))
+        self._fit()
+        self.show()
+        self.update()
+        _keep_on_top(int(self.winId()))
+        self._second.start(1000)
+
+    def close_card(self) -> None:
+        if not self.isVisible():
+            return
+        self._second.stop()
+        self.input.hide()
+        self.hide()
+        self.owner._full_closed()
+
+    def _tick_clock(self) -> None:
+        clock = self.clock_key()
+        if clock != self._clock:
+            self._clock = clock
+            self.update()
+
+    def _fit(self) -> None:
+        self._content_h = self._build(None)
+        self.scroll = max(0.0, min(self.scroll, self._content_h - self.height() / self.s))
+
+    def wheelEvent(self, e):
+        most = max(0.0, self._content_h - self.height() / self.s)
+        scroll = max(0.0, min(most, self.scroll - e.angleDelta().y() / 2 / self.s))
+        if scroll != self.scroll:
+            self.scroll = scroll
+            self.update()
+
+    def _top(self) -> float:
+        return (NOTCH_H + STRIP_H) / self.s + 16  # under the notch and its second line
+
+    def _build(self, p: QPainter | None) -> float:
+        """In unscaled units, like the panel: the card centred (down from the notch when it's taller than that)."""
+        hits: dict[str, QRectF] = {}
+        lw, lh = self.width() / self.s, self.height() / self.s
+        w = min(self.WIDE, lw - 40)
+        x, top = (lw - w) / 2, self._top()
+        if p is not None and self._content_h - self._top() < lh - top:
+            top = max(top, (lh - (self._content_h - self._top())) / 2)
+        hits["fclose"] = QRectF(lw - 46, 14, 28, 28)
+        self._round_button(p, hits["fclose"], ICONS["close"], "fclose")
+        if p is not None:
+            p.setClipRect(QRectF(0, top - 4, lw, lh - top + 4))
+        bottom = top
+        if self.card:
+            y = top - self.scroll
+            bottom = getattr(self, f"_card_{self.card}")(p, hits, QRectF(x, y, w, 0), self.data(), time.time())
+            self._full_button(p, hits, QPointF(x, y), self.card, ICONS["unfull"])
+            self.card_rect = QRectF(x, y, w, bottom - y)
+        self.hits = {k: r for k, r in hits.items() if k == "fclose" or p is None or (
+            r.top() >= top - 4 and r.bottom() <= lh - 4)}
+        return bottom - (top - self._top()) + self.scroll + 24  # not counting the centring
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        if LIGHT:
+            path = QPainterPath()
+            path.addRect(QRectF(self.rect()))
+            self.glass.paint(p, path, self.pos())
+        else:
+            p.fillRect(self.rect(), _body(232))
+        p.scale(self.s, self.s)
+        h = self._build(p)
+        p.end()
+        self._content_h = h
+
+    def _key_at(self, pos: QPointF) -> str | None:
+        return super()._key_at(QPointF(pos.x() / self.s, pos.y() / self.s))
+
+    def mouseReleaseEvent(self, e):
+        pos = QPointF(e.position().x() / self.s, e.position().y() / self.s)
+        beside = self._press is None and e.button() == Qt.LeftButton and not self.card_rect.contains(pos)
+        super().mouseReleaseEvent(e)
+        if beside:
+            self.close_card()
+
+    def activate(self, key: str) -> None:
+        if key == "fclose" or key.startswith("full:"):
+            self.close_card()
+        else:
+            super().activate(key)
+
+    def _input_at(self, key: str) -> QRect:
+        """Under the row that asked (the card would cover all the screen under it)."""
+        r, s = self.hits.get(key, self.card_rect), self.s
+        return QRect(int(self.x() + self.card_rect.x() * s), int(self.y() + r.y() * s),
+                     int(self.card_rect.width() * s), int(r.height() * s))
 
 
 class VoiceWidget(QWidget):
@@ -1961,6 +2341,8 @@ class VoiceWidget(QWidget):
         self.side_widgets = {name: list(cards) for name, cards in SIDE_CARDS.items()}
         self.sides = {name: SidePanel(self, name) for name in SIDE_CARDS}
         self.utils, self.companion = self.sides["utils"], self.sides["companion"]
+        self.full = FullCard(self)  # a Utils card over the whole screen
+        self._full_reopen = False  # the panel folded away for it: back when it closes
         self._sides_busy = False
         self._folding = False  # closing the panel: the side panels go first, then the panel (see _tick)
         self.clips: list[str] = []  # the last few things you copied: in memory only
@@ -1995,6 +2377,7 @@ class VoiceWidget(QWidget):
         self._h = float(BAR_H)  # eased window height
         self._painted_still = False  # battery: the still frame has been drawn, skip redraws until a change
         self._topmost_at = 0.0
+        self.glass = Glass()
         self._shown_digest = ""
         self._copied: str | None = None  # history row just copied, for a brief confirmation
         self._copied_at = 0.0
@@ -2234,6 +2617,7 @@ class VoiceWidget(QWidget):
             x, y = self._bar_pos if self.notch and self._bar_pos else (self.x(), self.y())
             state = {"x": x, "y": y, "expanded": self.expanded, "compact": self.compact, "notch": self.notch,
                      "hidden": not self.isVisible(), "phone_folded": self.phone_folded,
+                     "theme": "light" if LIGHT else "dark",
                      "sides": {name: {"open": self.side_open[name], "widgets": self.side_widgets[name]}
                                for name in SIDE_CARDS}}
             POS_FILE.write_text(json.dumps(state), encoding="utf-8")
@@ -2265,7 +2649,7 @@ class VoiceWidget(QWidget):
             self._kick()
         self.st = st or {}
         if changed:
-            for side in self.sides.values():
+            for side in (*self.sides.values(), self.full):
                 side.refresh()
         boot = self.st.get("boot")
         if boot and self._boot and boot != self._boot:
@@ -2391,10 +2775,23 @@ class VoiceWidget(QWidget):
         strip = self._strip_key()
         if strip != self._strip_shown:  # a clock in the notch's second line: one repaint as each second turns
             self._strip_shown, self._painted_still = strip, False
+        # Tucked away nothing shows through: a fresh picture only as it starts coming down, then while it's down.
+        dropping = self.notch and self._reveal < 0.05 and now < self._reveal_until
+        fresh = dropping or still and (not self.notch or self._reveal > 0.5)
+        if self.isVisible() and not self._dragged and self.glass.follow(self._glass_area(), fresh):
+            self._painted_still = False  # what's behind the glass changed
         if still and not gliding and self._painted_still:
             return
         self._painted_still = still and not gliding
         self.update()
+
+    def _glass_area(self) -> QRect:
+        """Where the island can be on screen once it settles: the notch's canvas hung from the top edge (wherever
+        the slide is), as tall as where it's going; floating, the window itself."""
+        if not self.notch:
+            return self.geometry()
+        top = QApplication.primaryScreen().geometry().top()
+        return QRect(self.x(), top, self.width(), max(self.height(), int(self._target_size()[1])))
 
     def _is_still(self, opacity_target: float) -> bool:
         """Nothing is animating or easing: the last frame drawn is still right."""
@@ -2775,15 +3172,18 @@ class VoiceWidget(QWidget):
             p.translate((self.width() - w) / 2, 0)
         path = self._body_path(w, h)
         p.setClipPath(path)
-        p.fillPath(path, QColor(0, 0, 0))  # pure black, like a hardware notch
+        if LIGHT:
+            self.glass.paint(p, path, self.pos() + QPoint(int((self.width() - w) / 2) if self.notch else 0, 0))
+        else:
+            p.fillPath(path, _body())  # pure black, like a hardware notch
         if self._is_compact():
             self._paint_compact(p, path)
         else:
             self._paint_island(p, path, w, h)
         p.setClipping(False)
-        if not self.notch:
-            # Floating, it can sit over dark windows: a faint hairline keeps its outline.
-            p.setPen(QPen(QColor(255, 255, 255, 24), 1))
+        if not self.notch and not LIGHT:
+            # Floating, it can sit over dark windows: a faint hairline keeps its outline (the glass has its rim).
+            p.setPen(QPen(_ink(24), 1))
             p.setBrush(Qt.NoBrush)
             p.drawPath(path)
         self._paint_edge_light(p, w, h)
@@ -2841,7 +3241,8 @@ class VoiceWidget(QWidget):
         t = time.time() - self.t0
         act = self._activity() if self.phase == "idle" else None
         # Ready: a cool silver rim, like light on a polished edge; otherwise the state's (or thread's) colour.
-        color = QColor(act["color"]) if act else QColor("#CBD5E1") if self.phase == "idle" else QColor(self.accent)
+        silver = "#94A3B8" if LIGHT else "#CBD5E1"
+        color = QColor(act["color"]) if act else QColor(silver) if self.phase == "idle" else QColor(self.accent)
         if self.phase != "idle":
             angle = -t * (40 + 70 * self.energy)  # live: the light runs around with the voice
         elif act:
@@ -2974,7 +3375,7 @@ class VoiceWidget(QWidget):
             title = "Working"
         p.setFont(self.f_notch_title)
         fm = QFontMetrics(self.f_notch_title)
-        p.setPen(QColor(255, 255, 255, 240))
+        p.setPen(_ink(240))
         p.drawText(QPointF(x, 20), fm.elidedText(title, Qt.ElideRight, int(avail)))
         tx = x + min(fm.horizontalAdvance(title), avail) + 8
         thread = st.get("thread") or act or self._result()
@@ -2983,7 +3384,7 @@ class VoiceWidget(QWidget):
             p.setBrush(QColor(thread["color"]))
             p.drawEllipse(QPointF(tx + 3, 16), 2.5, 2.5)
             p.setFont(self.f_notch_sub)
-            p.setPen(QColor(255, 255, 255, 120))
+            p.setPen(_ink(120))
             p.drawText(QPointF(tx + 10, 20), QFontMetrics(self.f_notch_sub).elidedText(
                 thread["title"], Qt.ElideRight, int(x + avail - tx - 10)))
         line = st.get("caption") or ""
@@ -3012,7 +3413,7 @@ class VoiceWidget(QWidget):
             else:
                 line = sub
         p.setFont(self.f_notch_sub)
-        p.setPen(QColor(255, 255, 255, 140))
+        p.setPen(_ink(140))
         p.drawText(QRectF(x, 23, avail, 15), Qt.AlignLeft | Qt.AlignVCenter,
                    QFontMetrics(self.f_notch_sub).elidedText(line, Qt.ElideRight, int(avail)))
         self._paint_notch_buttons(p)
@@ -3066,10 +3467,10 @@ class VoiceWidget(QWidget):
 
     def _flat_chip(self, p: QPainter, rect: QRectF, text: str) -> None:
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(255, 255, 255, 22))
+        p.setBrush(_ink(22))
         p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
         p.setFont(self.f_notch_chip)
-        p.setPen(QColor(255, 255, 255, 200))
+        p.setPen(_ink(200))
         p.drawText(rect, Qt.AlignCenter, text)
 
     def _paint_notch_buttons(self, p: QPainter) -> None:
@@ -3085,17 +3486,17 @@ class VoiceWidget(QWidget):
             ht = self.hover_t.get(key, 0.0)
             base = 16 if key == "primary" else 0
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 255, 255, int(base + 26 * ht + (24 if self.pressed == key else 0))))
+            p.setBrush(_ink(int(base + 26 * ht + (24 if self.pressed == key else 0))))
             p.drawEllipse(rect)
             p.setFont(self.f_icon_small)
-            p.setPen(QColor(255, 255, 255, int(175 + 80 * ht)))
+            p.setPen(_ink(int(175 + 80 * ht)))
             p.drawText(rect, Qt.AlignCenter, icon)
 
     def _paint_compact(self, p: QPainter, path: QPainterPath) -> None:
         """Compact mode: a black orb with the island's state mark; a click talks, cancels or skips."""
         ht = self.hover_t.get("primary", 0.0)
         if ht > 0.01:
-            p.fillPath(path, QColor(255, 255, 255, int(18 * ht)))
+            p.fillPath(path, _ink(int(18 * ht)))
         p.save()
         p.translate(COMPACT / 2, COMPACT / 2)
         p.scale(1.35, 1.35)
@@ -3113,39 +3514,39 @@ class VoiceWidget(QWidget):
         self._chip(p, head.x(), head.y(), (q.get("header") or "Question").upper())
         if q.get("more"):
             p.setFont(self.f_hint)
-            p.setPen(QColor(226, 232, 240, 120))
+            p.setPen(_soft(120))
             p.drawText(head, Qt.AlignRight | Qt.AlignVCenter, f"+{q['more']} more in {q.get('agent') or 'the app'}")
         p.setFont(self.f_q)
-        p.setPen(QColor(255, 255, 255, 235))
+        p.setPen(_ink(235))
         p.drawText(text, Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignTop, q["question"])
         fm = QFontMetrics(self.f_tile)
         for i, (label, row) in enumerate(zip(q["options"], rows)):
             ht = self.hover_t.get(f"opt:{i}", 0.0)
             fill = QColor(self.accent)
             fill.setAlpha(int(30 + 60 * ht))
-            p.setPen(QPen(QColor(255, 255, 255, int(28 + 50 * ht)), 1))
+            p.setPen(QPen(_ink(int(28 + 50 * ht)), 1))
             p.setBrush(fill)
             p.drawRoundedRect(row, 8, 8)
             badge = QRectF(row.x() + 6, row.y() + 5, 18, 18)
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 255, 255, 40))
+            p.setBrush(_ink(40))
             p.drawEllipse(badge)
             p.setFont(self.f_chip)
-            p.setPen(QColor(255, 255, 255, 235))
+            p.setPen(_ink(235))
             p.drawText(badge, Qt.AlignCenter, str(i + 1))
             p.setFont(self.f_tile)
             label_rect = row.adjusted(32, 0, -8, 0)
             p.drawText(label_rect, Qt.AlignLeft | Qt.AlignVCenter,
                        fm.elidedText(label, Qt.ElideRight, int(label_rect.width())))
         p.setFont(self.f_hint)
-        p.setPen(QColor(226, 232, 240, 110))
+        p.setPen(_soft(110))
         y = rows[-1].bottom() + 4 if rows else text.bottom() + 4
         hint = ("Or say “yes” or “no” · no answer in a minute: Claude asks you itself" if q.get("permission")
                 else "Or say it: “the second one”, or the option’s name")
         p.drawText(QRectF(14, y, self.pw - 28, 14), Qt.AlignLeft | Qt.AlignVCenter, hint)
 
     def _paint_panel(self, p: QPainter) -> None:
-        p.setPen(QPen(QColor(255, 255, 255, 22), 1))
+        p.setPen(QPen(_ink(22), 1))
         p.drawLine(QPointF(14, BAR_H), QPointF(self.pw - 14, BAR_H))
         if self._question():
             self._paint_question(p)
@@ -3176,18 +3577,18 @@ class VoiceWidget(QWidget):
                 border = QColor(fill)
                 border.setAlpha(170)
             else:
-                fill = QColor(255, 255, 255, int(14 + 18 * ht))
-                border = QColor(255, 255, 255, int(22 + 30 * ht))
+                fill = _ink(int(14 + 18 * ht))
+                border = _ink(int(22 + 30 * ht))
             if self.pressed == tid:
                 fill.setAlpha(min(255, fill.alpha() + 40))
             p.setPen(QPen(border, 1))
             p.setBrush(fill)
             p.drawRoundedRect(rect, 8, 8)
             p.setFont(self.f_icon_small)
-            p.setPen(QColor(255, 255, 255, 235))
+            p.setPen(_ink(235))
             p.drawText(QRectF(rect.x() + 8, rect.y(), 18, rect.height()), Qt.AlignCenter, icon)
             p.setFont(self.f_tile)
-            p.setPen(QColor(255, 255, 255, 220))
+            p.setPen(_ink(220))
             room = int(rect.width() - 34)
             p.drawText(QRectF(rect.x() + 30, rect.y(), room, rect.height()), Qt.AlignLeft | Qt.AlignVCenter,
                        QFontMetrics(self.f_tile).elidedText(label, Qt.ElideRight, room))
@@ -3222,10 +3623,10 @@ class VoiceWidget(QWidget):
         if not needs:
             return
         p.setFont(self.f_tile)
-        p.setPen(QColor("#FBBF24"))
+        p.setPen(_tone("#FBBF24"))
         p.drawText(QRectF(14, BAR_H + 10, self.cw - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, "Needs you")
         p.setFont(self.f_hint)
-        p.setPen(QColor(226, 232, 240, 105))
+        p.setPen(_soft(105))
         more = len(self._needs()) - len(needs)
         perms = sum(1 for n in needs if n["kind"] == "permission")
         p.drawText(QRectF(14, BAR_H + 10, self.cw - 28, 16), Qt.AlignRight | Qt.AlignVCenter,
@@ -3244,7 +3645,7 @@ class VoiceWidget(QWidget):
             buttons = n["kind"] == "permission"
             text_rect = row.adjusted(22, 0, -(100 if buttons else 80 if n["kind"] == "limit" else 46), 0)
             p.setFont(self.f_sub)
-            p.setPen(QColor(255, 255, 255, 230))
+            p.setPen(_ink(230))
             # Several approvals: numbered, so "approve two" says which.
             number = f"{sum(1 for m in needs[:i + 1] if m['kind'] == 'permission')} · " if buttons and sum(
                 1 for m in needs if m["kind"] == "permission") > 1 else ""
@@ -3265,18 +3666,18 @@ class VoiceWidget(QWidget):
                     self._pill(p, rects[key], "✓ Resume" if on else "Resume", c)
             else:
                 p.setFont(self.f_hint)
-                p.setPen(QColor(255, 255, 255, int(150 + 90 * ht)))
+                p.setPen(_ink(int(150 + 90 * ht)))
                 p.drawText(row.adjusted(0, 0, -10, 0), Qt.AlignRight | Qt.AlignVCenter, "Open")
 
     def _section_head(self, p: QPainter, rect: QRectF, title: str, hint: str = "",
                       hint_color: QColor | None = None) -> None:
         """A section's name on the left, and a short hint on the right."""
         p.setFont(self.f_tile)
-        p.setPen(QColor(226, 232, 240, 170))
+        p.setPen(_soft(170))
         p.drawText(rect, Qt.AlignLeft | Qt.AlignVCenter, title)
         if hint:
             p.setFont(self.f_hint)
-            p.setPen(hint_color or QColor(226, 232, 240, 105))
+            p.setPen(hint_color or _soft(105))
             p.drawText(rect, Qt.AlignRight | Qt.AlignVCenter, hint)
 
     def _pill(self, p: QPainter, rect: QRectF, text: str, fill: QColor) -> None:
@@ -3285,7 +3686,7 @@ class VoiceWidget(QWidget):
         p.setBrush(fill)
         p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
         p.setFont(self.f_chip)
-        p.setPen(QColor(255, 255, 255, 235))
+        p.setPen(_ink(235))
         p.drawText(rect, Qt.AlignCenter, text)
 
     def _go_button(self, key: str) -> QColor:
@@ -3312,12 +3713,12 @@ class VoiceWidget(QWidget):
         for key, rect in self._agent_rects().items():
             ht = self.hover_t.get(key, 0.0)
             state = "guide" if key == "guide" else self._agent_state(key.split(":", 1)[1])
-            p.setPen(QPen(QColor(255, 255, 255, int(20 + 30 * ht)), 1))
-            p.setBrush(QColor(255, 255, 255, int((16 if state == "on" else 6) + 16 * ht)))
+            p.setPen(QPen(_ink(int(20 + 30 * ht)), 1))
+            p.setBrush(_ink(int((16 if state == "on" else 6) + 16 * ht)))
             p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
             if key == "guide":
                 p.setFont(self.f_icon_small)
-                p.setPen(QColor(255, 255, 255, int(170 + 80 * ht)))
+                p.setPen(_ink(int(170 + 80 * ht)))
                 p.drawText(rect, Qt.AlignCenter, ICONS["help"])
                 continue
             label = dict(AGENT_LABELS)[key.split(":", 1)[1]]
@@ -3329,11 +3730,11 @@ class VoiceWidget(QWidget):
                 p.setBrush(QColor("#34D399"))
                 p.drawEllipse(QPointF(x + 2.5, rect.center().y()), 2.5, 2.5)
             elif state in ("off", "setup"):
-                p.setPen(QPen(QColor("#FBBF24") if state == "setup" else QColor(255, 255, 255, 120), 1))
+                p.setPen(QPen(QColor("#FBBF24") if state == "setup" else _ink(120), 1))
                 p.setBrush(Qt.NoBrush)
                 p.drawEllipse(QPointF(x + 2.5, rect.center().y()), 2.5, 2.5)
             p.setFont(self.f_hint)
-            p.setPen(QColor(255, 255, 255, {"on": 225, "off": 170, "setup": 200}.get(state, 70)))
+            p.setPen(_ink({"on": 225, "off": 170, "setup": 200}.get(state, 70)))
             room = rect.right() - (x + 9) - 4
             p.drawText(QRectF(x + 9 if state != "missing" else x + 4.5, rect.y(), min(tw + 2, room + 6), rect.height()),
                        Qt.AlignLeft | Qt.AlignVCenter, fm.elidedText(label, Qt.ElideRight, int(room + 6)))
@@ -3355,10 +3756,10 @@ class VoiceWidget(QWidget):
         p.save()
         p.setOpacity(appear)
         p.setFont(self.f_tile)
-        p.setPen(QColor(226, 232, 240, 170))
+        p.setPen(_soft(170))
         p.drawText(QRectF(14, self._threads_y(), self.cw - 28, 16), Qt.AlignLeft | Qt.AlignVCenter, "Threads")
         p.setFont(self.f_hint)
-        p.setPen(QColor(226, 232, 240, 105))
+        p.setPen(_soft(105))
         queued = int(self.st.get("queued") or 0)
         new, past = self._new_rect(), self._history_rect()
         p.drawText(QRectF(14, self._threads_y(), past.x() - 22, 16), Qt.AlignRight | Qt.AlignVCenter,
@@ -3374,7 +3775,7 @@ class VoiceWidget(QWidget):
             ht = self.hover_t.get(f"thr:{i}", 0.0)
             if ht > 0.01:
                 p.setPen(Qt.NoPen)
-                p.setBrush(QColor(255, 255, 255, int(20 * ht)))
+                p.setBrush(_ink(int(20 * ht)))
                 p.drawRoundedRect(row, 6, 6)
             color = QColor(t["color"])
             p.setPen(Qt.NoPen)
@@ -3386,12 +3787,12 @@ class VoiceWidget(QWidget):
                 ago = int(t.get("ago", 0))
                 state = "now" if ago < 60 else f"{ago // 60} min ago" if ago < 3600 else f"{ago // 3600} h ago"
             p.setFont(self.f_hint)
-            p.setPen(color.lighter(130) if t.get("state") else QColor(226, 232, 240, 110))
+            p.setPen((color.darker(150) if LIGHT else color.lighter(130)) if t.get("state") else _soft(110))
             sw = QFontMetrics(self.f_hint).horizontalAdvance(state)
             p.drawText(QRectF(row.right() - sw - 6, line1.y(), sw + 2, line1.height()), Qt.AlignRight | Qt.AlignVCenter, state)
             text_rect = QRectF(row.x() + 20, line1.y(), row.width() - sw - 32, line1.height())
             p.setFont(self.f_sub)
-            p.setPen(QColor(226, 232, 240, 215))
+            p.setPen(_soft(215))
             p.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter,
                        fm.elidedText(t["title"], Qt.ElideRight, int(text_rect.width())))
             reply = t.get("reply") or ""
@@ -3404,7 +3805,7 @@ class VoiceWidget(QWidget):
             if reply:
                 # The conversation's last reply, with replay and copy at hand.
                 p.setFont(self.f_hint)
-                p.setPen(QColor(226, 232, 240, 120))
+                p.setPen(_soft(120))
                 line2 = QRectF(row.x() + 20, row.y() + 17, row.width() - 28 - 22 * len(buttons), 16)
                 p.drawText(line2, Qt.AlignLeft | Qt.AlignVCenter,
                            QFontMetrics(self.f_hint).elidedText(reply, Qt.ElideRight, int(line2.width())))
@@ -3413,7 +3814,7 @@ class VoiceWidget(QWidget):
                 done = key.startswith("thrcopy") and self._copied == key and time.time() - self._copied_at < 1.2
                 kt = self.hover_t.get(key, 0.0)
                 p.setFont(self.f_icon_small)
-                p.setPen(QColor(255, 255, 255, 235 if done else int(110 + 140 * kt)))
+                p.setPen(_ink(235 if done else int(110 + 140 * kt)))
                 p.drawText(rect, Qt.AlignCenter, ICONS["check"] if done else ICONS[icons[key.split(":")[0]]])
         p.restore()
 
@@ -3431,21 +3832,21 @@ class VoiceWidget(QWidget):
         focus = self.st.get("focus")
         self._section_head(p, QRectF(x + 4, y, w - 8, 16), "Today",
                            f"focus: {focus}, holding replies" if focus else "since midnight",
-                           QColor(139, 124, 255, 230) if focus else None)
+                           _tone(QColor(139, 124, 255, 230)) if focus else None)
         cards = (("Turns", str(day.get("turns", 0))), ("Threads", str(day.get("threads", 0))),
                  ("Tokens", tokens_label(int(day.get("tokens") or 0))))
         gap = 6
         cw = (w - 2 * gap) / 3
         for i, (label, value) in enumerate(cards):
             card = QRectF(x + i * (cw + gap), y + 20, cw, 46)
-            p.setPen(QPen(QColor(255, 255, 255, 22), 1))
-            p.setBrush(QColor(255, 255, 255, 10))
+            p.setPen(QPen(_ink(22), 1))
+            p.setBrush(_ink(10))
             p.drawRoundedRect(card, 10, 10)
             p.setFont(self.f_kpi)
-            p.setPen(QColor(255, 255, 255, 235))
+            p.setPen(_ink(235))
             p.drawText(card.adjusted(10, 4, -6, -18), Qt.AlignLeft | Qt.AlignVCenter, value)
             p.setFont(self.f_hint)
-            p.setPen(QColor(226, 232, 240, 120))
+            p.setPen(_soft(120))
             p.drawText(card.adjusted(10, 26, -6, -4), Qt.AlignLeft | Qt.AlignVCenter, label)
         # Turns by hour: a bar per hour, this hour in the accent colour.
         hours = list(day.get("hours") or [0] * 24)[:24]
@@ -3463,7 +3864,7 @@ class VoiceWidget(QWidget):
             p.setBrush(c)
             p.drawRoundedRect(QRectF(chart.x() + h * bw + 1, chart.bottom() - bh, bw - 2, bh), 1.5, 1.5)
         p.setFont(self.f_hint)
-        p.setPen(QColor(226, 232, 240, 90))
+        p.setPen(_soft(90))
         for h in (0, 6, 12, 18):
             p.drawText(QRectF(chart.x() + h * bw, chart.bottom() + 2, 30, 14), Qt.AlignLeft | Qt.AlignVCenter, f"{h}h")
         p.drawText(QRectF(chart.x(), chart.y() - 2, chart.width(), 14), Qt.AlignRight | Qt.AlignVCenter,
@@ -3483,17 +3884,17 @@ class VoiceWidget(QWidget):
             p.restore()
             return
         card = QRectF(self.rx + 10, self._phone_y(), self.rw - 20, PHONE_H)
-        p.setPen(QPen(QColor(255, 255, 255, 22), 1))
-        p.setBrush(QColor(255, 255, 255, 10))
+        p.setPen(QPen(_ink(22), 1))
+        p.setBrush(_ink(10))
         p.drawRoundedRect(card, 12, 12)
         qr = QRectF(card.x() + 8, card.y() + 8, PHONE_H - 16, PHONE_H - 16)
         _paint_qr(p, qr, phone.get("url", ""))
         x = qr.right() + 10
         p.setFont(self.f_tile)
-        p.setPen(QColor(255, 255, 255, 230))
+        p.setPen(_ink(230))
         p.drawText(QRectF(x, card.y() + 8, card.right() - x - 34, 16), Qt.AlignLeft | Qt.AlignVCenter, "Phone")
         p.setFont(self.f_hint)
-        p.setPen(QColor(226, 232, 240, 140))
+        p.setPen(_soft(140))
         when = "When you're away" if phone.get("when", "away") == "away" else "Always"
         detail = when + (f" · {phone['sent']} sent" if phone.get("sent") else "") + (
             f" · not sent: {phone['error']}" if phone.get("error") else "")
@@ -3502,13 +3903,13 @@ class VoiceWidget(QWidget):
         for i, (line, alpha, elide) in enumerate((("Scan it with the ntfy app", 150, Qt.ElideRight),
                                                   (detail, 150, Qt.ElideRight),
                                                   (phone.get("url", "").split("://", 1)[-1], 90, Qt.ElideMiddle))):
-            p.setPen(QColor(226, 232, 240, alpha) if not (i == 1 and phone.get("error")) else QColor("#F87171"))
+            p.setPen(_soft(alpha) if not (i == 1 and phone.get("error")) else _tone("#F87171"))
             p.drawText(QRectF(x, card.y() + 26 + 15 * i, width - (30 if i == 0 else 0), 14),
                        Qt.AlignLeft | Qt.AlignVCenter, fm.elidedText(line, elide, width - (30 if i == 0 else 0)))
         if self._copied == "phone:copy" and time.time() - self._copied_at < 1.3:
             p.setFont(self.f_hint)
-            p.setPen(QColor("#34D399"))
-            p.fillRect(self._phone_rects()["phone:copy"], QColor(0, 0, 0))
+            p.setPen(_tone("#34D399"))
+            p.fillRect(self._phone_rects()["phone:copy"], _body())
             p.drawText(self._phone_rects()["phone:copy"], Qt.AlignLeft | Qt.AlignVCenter, "Link copied: paste it in ntfy")
         self._phone_buttons(p, (("phone:test", "Test"), ("phone:new", "New link"), ("phone:fold", "⌃")))
         p.restore()
@@ -3517,19 +3918,19 @@ class VoiceWidget(QWidget):
         rects = self._phone_rects()
         for key, label in buttons:
             fill = (self._go_button(key) if key == "phone:test"
-                    else QColor(255, 255, 255, int(16 + 30 * self.hover_t.get(key, 0.0))))
+                    else _ink(int(16 + 30 * self.hover_t.get(key, 0.0))))
             self._pill(p, rects[key], label, fill)
 
     def _paint_phone_folded(self, p: QPainter, phone: dict) -> None:
         row = QRectF(self.rx + 10, self._phone_y(), self.rw - 20, PHONE_FOLDED_H)
-        p.setPen(QPen(QColor(255, 255, 255, 22), 1))
-        p.setBrush(QColor(255, 255, 255, 10))
+        p.setPen(QPen(_ink(22), 1))
+        p.setBrush(_ink(10))
         p.drawRoundedRect(row, row.height() / 2, row.height() / 2)
         p.setFont(self.f_icon_small)
-        p.setPen(QColor("#34D399"))
+        p.setPen(_tone("#34D399"))
         p.drawText(QRectF(row.x() + 8, row.y(), 18, row.height()), Qt.AlignCenter, ICONS["phone"])
         p.setFont(self.f_hint)
-        p.setPen(QColor(226, 232, 240, 170) if not phone.get("error") else QColor("#F87171"))
+        p.setPen(_soft(170) if not phone.get("error") else _tone("#F87171"))
         text = "Phone notifications on" + (f" · {phone['sent']} sent" if phone.get("sent") else "") + (
             f" · not sent: {phone['error']}" if phone.get("error") else "")
         rects = self._phone_rects()
@@ -3552,16 +3953,16 @@ class VoiceWidget(QWidget):
             row = self._sched_row(i)
             stamp = _when_text(item["at"], "%a %H:%M") + (" ↻" if item.get("repeat") else "")
             p.setFont(self.f_chip)
-            p.setPen(QColor("#8B7CFF"))
+            p.setPen(_tone("#8B7CFF"))
             p.drawText(QRectF(row.x() + 4, row.y(), 64, row.height()), Qt.AlignLeft | Qt.AlignVCenter, stamp)
             p.setFont(self.f_sub)
-            p.setPen(QColor(226, 232, 240, 200))
+            p.setPen(_soft(200))
             text_rect = QRectF(row.x() + 70, row.y(), row.width() - 96, row.height())
             p.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter,
                        fm.elidedText(f"{item['title']}: {item['prompt']}", Qt.ElideRight, int(text_rect.width())))
             key = f"unsched:{i}"
             p.setFont(self.f_icon_small)
-            p.setPen(QColor(255, 255, 255, int(90 + 140 * self.hover_t.get(key, 0.0))))
+            p.setPen(_ink(int(90 + 140 * self.hover_t.get(key, 0.0))))
             p.drawText(QRectF(row.right() - 20, row.y(), 18, row.height()), Qt.AlignCenter, "×")
         p.restore()
 
@@ -3577,7 +3978,7 @@ class VoiceWidget(QWidget):
         items = self._history()
         if not items:
             p.setFont(self.f_sub)
-            p.setPen(QColor(226, 232, 240, 95))
+            p.setPen(_soft(95))
             p.drawText(self._history_row(0).adjusted(4, dy, 0, dy), Qt.AlignLeft | Qt.AlignVCenter,
                        "What you say will show up here")
         fm = QFontMetrics(self.f_sub)
@@ -3587,21 +3988,21 @@ class VoiceWidget(QWidget):
             ht = self.hover_t.get(key, 0.0)
             copied = self._copied == key and time.time() - self._copied_at < 1.2
             if ht > 0.01 or copied:
-                fill = QColor("#34D399") if copied else QColor(255, 255, 255)
+                fill = QColor("#34D399") if copied else _ink()
                 fill.setAlpha(55 if copied else int(20 * ht))
                 p.setPen(Qt.NoPen)
                 p.setBrush(fill)
                 p.drawRoundedRect(rect, 6, 6)
             text_rect = rect.adjusted(6, 0, -52, 0)
             p.setFont(self.f_sub)
-            p.setPen(QColor(226, 232, 240, 210 if i == 0 else 150))
+            p.setPen(_soft(210 if i == 0 else 150))
             p.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter,
                        fm.elidedText(item.get("text", ""), Qt.ElideRight, int(text_rect.width())))
             lang = item.get("lang", "")
             if lang:
                 self._chip(p, rect.right() - 46, rect.y() + (rect.height() - 15) / 2, lang.upper())
             p.setFont(self.f_icon_small)
-            p.setPen(QColor(255, 255, 255, 235 if copied else int(110 + 120 * ht)))
+            p.setPen(_ink(235 if copied else int(110 + 120 * ht)))
             p.drawText(QRectF(rect.right() - 20, rect.y(), 16, rect.height()), Qt.AlignCenter,
                        ICONS["check" if copied else "copy"])
         p.restore()
@@ -3616,18 +4017,18 @@ class VoiceWidget(QWidget):
         p.setOpacity(appear)
         track = track.translated(0, 10 * (1 - appear))
         p.setFont(self.f_tile)
-        p.setPen(QColor(226, 232, 240, 170))
+        p.setPen(_soft(170))
         p.drawText(QRectF(14, track.y(), 56, track.height()), Qt.AlignLeft | Qt.AlignVCenter, label)
 
-        p.setPen(QPen(QColor(255, 255, 255, 22), 1))
-        p.setBrush(QColor(255, 255, 255, 12))
+        p.setPen(QPen(_ink(22), 1))
+        p.setBrush(_ink(12))
         p.drawRoundedRect(track, 8, 8)
 
         seg = track.width() / len(keys)
         ind = QRectF(track.x() + pos * seg + 2, track.y() + 2, seg - 4, track.height() - 4)
         glow = QColor(self.accent)
         glow.setAlpha(110)
-        p.setPen(QPen(QColor(255, 255, 255, 60), 1))
+        p.setPen(QPen(_ink(60), 1))
         p.setBrush(glow)
         p.drawRoundedRect(ind, 6, 6)
 
@@ -3637,10 +4038,10 @@ class VoiceWidget(QWidget):
             ht = self.hover_t.get(key, 0.0)
             if i != active and ht > 0.01:
                 p.setPen(Qt.NoPen)
-                p.setBrush(QColor(255, 255, 255, int(18 * ht)))
+                p.setBrush(_ink(int(18 * ht)))
                 p.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 6, 6)
             p.setFont(self.f_chip if i == active else self.f_hint)
-            p.setPen(QColor(255, 255, 255, 245 if i == active else int(150 + 60 * ht)))
+            p.setPen(_ink(245 if i == active else int(150 + 60 * ht)))
             p.drawText(rect, Qt.AlignCenter, text)
         p.restore()
 
@@ -4158,6 +4559,12 @@ class VoiceWidget(QWidget):
             self.toggle_expanded()
         self._reveal_until = time.time() + NOTCH_HIDE_DELAY
 
+    def toggle_theme(self) -> None:
+        """Dark <-> light: saved, then a fresh widget draws it (the boxes' stylesheets are built when it starts)."""
+        set_theme("dark" if LIGHT else "light")
+        self._save_position()
+        self._relaunch()
+
     def _relaunch(self) -> None:
         """Start a fresh widget (the code may have changed) and leave: our lock goes first so it can take it."""
         if self._quitting:
@@ -4209,6 +4616,23 @@ class VoiceWidget(QWidget):
         self._kick()
         self._save_position()
 
+    def open_full(self, card: str) -> None:
+        """A Utils card over the whole screen; the open panel folds away under the notch meanwhile, and comes back."""
+        if self.full.isVisible() and self.full.card == card:
+            self.full.close_card()
+            return
+        if self.expanded and not self._folding:
+            self._full_reopen = True
+            self.toggle_expanded()
+        screen = QApplication.screenAt(self.visual_rect().center()) or QApplication.primaryScreen()
+        self.full.open_card(card, screen.geometry())
+
+    def _full_closed(self) -> None:
+        if self._full_reopen:
+            self._full_reopen = False
+            if not self.expanded or self._folding:
+                self.toggle_expanded()
+
     def set_side_widget(self, name: str, card: str, on: bool) -> None:
         chosen = set(self.side_widgets[name]) | {card} if on else set(self.side_widgets[name]) - {card}
         self.side_widgets[name] = [w for w in SIDE_CARDS[name] if w in chosen]
@@ -4252,12 +4676,15 @@ class VoiceWidget(QWidget):
             path.addRoundedRect(tab, 8, 8)
             square = QPainterPath()  # flush with the island: rounded on the outside only
             square.addRect(QRectF(tab.x() if right else tab.right() - 8, tab.y(), 8, tab.height()))
-            p.fillPath(path.united(square), QColor(0, 0, 0))
+            if LIGHT:
+                self.glass.paint(p, path.united(square), self.pos() + QPoint(int((self.width() - self.nw) / 2), 0))
+            else:
+                p.fillPath(path.united(square), _body())
             ht = self.hover_t.get(f"tab:{name}", 0.0)
             is_open = self.side_open[name]
             p.setFont(self.f_icon_small)
-            p.setPen(QColor(169, 155, 255, int(170 + 85 * ht)) if is_open else
-                     QColor(255, 255, 255, int(150 + 105 * ht)))
+            p.setPen(_tone(QColor(169, 155, 255, int(170 + 85 * ht))) if is_open else
+                     _ink(int(150 + 105 * ht)))
             pointing = ("left" if is_open else "right") if right else ("right" if is_open else "left")
             p.drawText(tab.adjusted(1 if right else -1, 0, 0, 0), Qt.AlignCenter, ICONS[pointing])
             p.restore()
@@ -4274,14 +4701,15 @@ class VoiceWidget(QWidget):
             return
         self.clips = [text, *[c for c in self.clips if c != text]][:10]
         self.utils.refresh()
+        self.full.refresh()
 
     def _last_thread(self) -> str:
         return ((self.st.get("thread") or {}).get("session") or (self.st.get("last_reply") or {}).get("session")
                 or "")
 
     def _strip_items(self) -> list[tuple[str, str, str, float | None, str]]:
-        """The notch's second line: (icon, label, time, progress, colour) for the Pomodoro, each timer and a running
-        stopwatch.
+        """The notch's second line: (icon, label, time, progress, colour) for the Pomodoro, each timer, a running
+        stopwatch, a meeting about to start and the song playing.
 
         Not in Do not disturb (the notch stays up then) nor in the floating bar's compact orb."""
         data = self.st.get("companion") or {}
@@ -4308,6 +4736,10 @@ class VoiceWidget(QWidget):
             soon = meeting["start"] - now
             items.append((ICONS["calendar"], meeting["title"],
                           "now" if soon <= 0 else f"in {max(1, math.ceil(soon / 60))} min", None, ""))
+        playing = self.st.get("media") or {}
+        if playing.get("playing") and playing.get("title"):  # paused, it stays in the Companion only
+            items.append((ICONS["music"], "", " · ".join(filter(None, (playing["title"], playing.get("artist")))),
+                          None, ""))
         return items[:3]
 
     def _strip_h(self) -> int:
@@ -4326,13 +4758,14 @@ class VoiceWidget(QWidget):
         fm = QFontMetrics(self.f_notch_sub)
         for icon, label, shown, _done, _color in items:
             p.setFont(self.f_icon_small)
-            p.setPen(QColor(251, 191, 36, 230) if icon == ICONS["clock"] else QColor(248, 113, 113, 230)
-                     if icon == ICONS["bolt"] else QColor(255, 255, 255, 160))
+            p.setPen(_tone(QColor(251, 191, 36, 230)) if icon == ICONS["clock"] else _tone(QColor(248, 113, 113, 230))
+                     if icon == ICONS["bolt"] else _tone(QColor(16, 224, 160, 230)) if icon == ICONS["music"]
+                     else _ink(160))
             p.drawText(QRectF(x, y, 16, 18), Qt.AlignCenter, icon)
             x += 19
             text = f"{label}  {shown}" if label else shown
             p.setFont(self.f_notch_sub)
-            p.setPen(QColor(255, 255, 255, 215))
+            p.setPen(_ink(215))
             width = min(fm.horizontalAdvance(text), 170)
             p.drawText(QRectF(x, y, width + 2, 18), Qt.AlignLeft | Qt.AlignVCenter,
                        fm.elidedText(text, Qt.ElideMiddle, int(width + 2)))
@@ -4341,14 +4774,14 @@ class VoiceWidget(QWidget):
         if progress is not None:
             bar = QRectF(NOTCH_EAR + 38, NOTCH_H + STRIP_H - 7, self.nw - 2 * NOTCH_EAR - 76, 2)
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 255, 255, 30))
+            p.setBrush(_ink(30))
             p.drawRoundedRect(bar, 1, 1)
             p.setBrush(QColor(color))
             p.drawRoundedRect(QRectF(bar.x(), bar.y(), bar.width() * max(0.0, min(1.0, progress)), 2), 1, 1)
 
     def contextMenuEvent(self, e):
         menu = QMenu(self)
-        menu.setStyleSheet(MENU_STYLE)
+        menu.setStyleSheet(_qss(MENU_STYLE))
         geo = (self.screen() or QApplication.primaryScreen()).availableGeometry()
         if self.compact:
             actions = [("Full widget", self.toggle_compact), ("Show all actions", self.toggle_expanded), (None, None)]
@@ -4369,6 +4802,7 @@ class VoiceWidget(QWidget):
                 (None, None),
             ]
         actions += [
+            ("Dark theme" if LIGHT else "Light theme", self.toggle_theme),
             (f"Hide widget ({_hotkey_label(self.hotkeys.get('widget', ''))})", self.toggle_visible),
             ("Stop voice service", lambda: (_post("/shutdown"))),
         ]
@@ -4397,7 +4831,7 @@ class Tray(QSystemTrayIcon):
         self.w = widget
         self._shown_phase = None
         self.menu = QMenu()
-        self.menu.setStyleSheet(MENU_STYLE)
+        self.menu.setStyleSheet(_qss(MENU_STYLE))
         self.menu.aboutToShow.connect(self._build_menu)
         self.setContextMenu(self.menu)
         self.activated.connect(self._on_activated)
@@ -4452,6 +4886,7 @@ class Tray(QSystemTrayIcon):
         add("Hide widget" if w.isVisible() else "Show widget", w.toggle_visible, key=hk.get("widget", ""))
         add("Compact widget (orb only)", w.toggle_compact, checked=w.compact)
         add("Notch (top of the screen)", w.toggle_notch, checked=w.notch)
+        add("Light theme", w.toggle_theme, checked=LIGHT)
         m.addSeparator()
         add("New thread…", w.open_new_thread, online, key=hk.get("new_thread", ""))
         add("Search history…", w.open_history, online)
@@ -4476,7 +4911,7 @@ class Tray(QSystemTrayIcon):
         add("Read ChatGPT / Copilot notifications", lambda: _post("/apps", {"mode": "toggle"}), online,
             bool(st.get("desktop_apps")))
         speed_menu = m.addMenu("Voice speed")
-        speed_menu.setStyleSheet(MENU_STYLE)
+        speed_menu.setStyleSheet(_qss(MENU_STYLE))
         speed_menu.setEnabled(online)
         current = float(st.get("speed_x", 1.5) or 1.5)
         for x in SPEEDS:
@@ -4534,6 +4969,7 @@ def run(demo: str | None = None) -> int:
     if not demo and not lock.tryLock(3000):  # a widget relaunching itself lets go of it first
         return 0  # already showing
     _LOCK = lock
+    set_theme(_saved_theme())  # before the boxes are built: their stylesheets are set once
     w = VoiceWidget()
     if demo:  # design preview: fake a status instead of polling the daemon
         w.poller.status.disconnect()

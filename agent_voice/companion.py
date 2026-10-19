@@ -20,6 +20,8 @@ WIDGETS = ("pomodoro", "timer", "stopwatch", "todo", "reminders", "notes", "clip
 COMPANION_WIDGETS = ("media", "calendar", "usage")
 # "To-do for you: run the migration on staging": a line an agent ends its reply with (Claude Code is asked to).
 TODO_LINE = re.compile(r"^[\s>*_`#-]*to-?do for you\s*:[\s*_`]*(.+?)[\s*_`]*$", re.I | re.M)
+# "call Paul #work": a hashtag files a to-do under a category ("#42" stays text: an issue number, not a category).
+_CATEGORY = re.compile(r"(?:^|(?<=\s))#([^\W\d_][\w-]{0,29})(?=\s|[.,;:!?]?$)")
 POMODORO = {"focus": 25, "short": 5, "long": 15, "every": 4}  # minutes; a long break after every 4th focus
 PHASES = {"focus": "Focus", "short": "Short break", "long": "Long break"}
 
@@ -215,6 +217,35 @@ def agent_todos(text: str) -> list[str]:
     return [" ".join(t.split())[:300] for t in TODO_LINE.findall(text or "")][:3]
 
 
+def split_category(text: str) -> tuple[str, str]:
+    """"Call Paul #work" -> ("Call Paul", "work"): the first hashtag is the category, taken out of the text."""
+    m = _CATEGORY.search(text or "")
+    if not m:
+        return text, ""
+    rest = re.sub(r"\s+(?=[.,;:!?]$)", "", " ".join(f"{text[:m.start()]} {text[m.end():]}".split())).strip(" ,;")
+    return (rest, m[1]) if rest else (text, "")
+
+
+def todo_sections(todos: list[dict]) -> list[tuple[str, list[tuple[str, list[dict]]]]]:
+    """The list as shown: yours, then your agents' (each only if it has items); in each, the items without a
+    category first, then one group per category (A to Z); in a group, what's left before what's done."""
+    out = []
+    for title, mine in (("Yours", True), ("From your agents", False)):
+        items = [t for t in todos if ((t.get("source") or "you") == "you") == mine]
+        if not items:
+            continue
+        names = sorted({t.get("category") or "" for t in items}, key=lambda c: (c != "", c.casefold()))
+        groups = [(name, [t for t in items if (t.get("category") or "") == name]) for name in names]
+        out.append((title, [(name, [t for t in g if not t["done"]] + [t for t in g if t["done"]])
+                            for name, g in groups]))
+    return out
+
+
+def todo_categories(todos: list[dict]) -> list[str]:
+    """Every category in use, A to Z."""
+    return sorted({t["category"] for t in todos if t.get("category")}, key=str.casefold)
+
+
 def idle_pomodoro() -> dict:
     """phase: '' (not started), focus, short or long; `end` while it runs, `left` while paused; `round`: focus
     sessions done in this cycle; `today`: done today (`day`)."""
@@ -300,21 +331,30 @@ class Companion:
             self._changed()
             return sw
 
+    def _category(self, name: str) -> str:
+        """A category as first written: "Work" stays "Work" when an item says "#work"."""
+        name = " ".join(str(name or "").lstrip("#").split())[:30]
+        if not name:  # none: items saved before categories have no "category" key
+            return ""
+        return next((t["category"] for t in self.data["todos"]
+                     if (t.get("category") or "").casefold() == name.casefold()), name)
+
     def todo(self, action: str, item_id: int = 0, text: str = "", done: bool | None = None, source: str = "you",
-             session: str = ""):
+             session: str = "", category: str = ""):
         with self.lock:
             todos = self.data["todos"]
             if action == "add":
-                text = " ".join(str(text).split())[:300]
+                text, tag = split_category(" ".join(str(text).split())[:300])
                 if not text:
                     raise ValueError("what to add")
+                category = self._category(category or tag)
                 same = next((t for t in todos if not t["done"] and t["text"].lower() == text.lower()), None)
                 if same is not None:  # said twice (an agent repeating its follow-up): once on the list
                     return same
                 if len(todos) >= MAX_TODOS:
                     raise ValueError(f"{MAX_TODOS} items at most: clear the done ones")
                 item = {"id": self._id(), "text": text, "done": False, "source": source[:30], "at": int(time.time()),
-                        "session": session[:200]}
+                        "session": session[:200], "category": category}
                 todos.append(item)
                 self._changed()
                 return item
@@ -332,6 +372,8 @@ class Companion:
                 item["done"] = not item["done"]
             elif action == "edit" and " ".join(str(text).split()):
                 item["text"] = " ".join(str(text).split())[:300]
+            elif action == "category":  # "" takes it out of its category
+                item["category"] = self._category(category)
             elif action == "remove":
                 todos.remove(item)
             else:

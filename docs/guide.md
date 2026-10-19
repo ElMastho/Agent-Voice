@@ -184,6 +184,9 @@ Anything you dictate that sends itself (auto-send, *Talk* on a thread, *"Hey Cla
 ### "Look at this"
 *"Hey Claude, look at this and tell me why the build is red"* takes a picture of the window you're looking at (a browser, an error dialog, a chart) and sends it to your current thread with the question. Without a question (*"look at this"*), it's put in the thread's message box for you to finish. It works from the reply mic too, and in French (*"regarde ça"*). Pictures are saved to `~/.agent-voice/shots/` and passed by path.
 
+### Speaker and microphone
+Settings › **Devices**: click *Speaker* or *Microphone* for the list of what's plugged in, and pick one; *System default* (the default) follows your system's. The voice and the chimes play on the speaker you pick, and *Headphones only* goes by its kind. A device you picked that isn't plugged in falls back to the default. Each time the mic opens, one that sends no sound within a second is skipped for the default; if that sends nothing either, nothing waits on it and the notch tells you (at most every 10 minutes).
+
 ### Headphones only
 In an open office, turn on *Headphones only* (panel or tray): the voice then plays only through headphones or a headset. When the sound goes to the laptop's speakers or a monitor, replies come as a chime and a banner, and the notch shows *Speakers*. It follows your device: plug your headphones in and the voice is back, take them off and it stops mid-sentence. Choosing *Voice* while on speakers keeps it until you change device.
 

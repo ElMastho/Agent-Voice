@@ -7,7 +7,8 @@ import queue
 import threading
 
 import numpy as np
-import sounddevice as sd
+
+from agent_voice import devices
 
 log = logging.getLogger("agent_voice.stt")
 
@@ -21,13 +22,12 @@ def rms(block: np.ndarray) -> float:
 class Recorder:
     def __init__(self, on_level=None):
         self._frames: list[np.ndarray] = []
-        self._stream: sd.InputStream | None = None
+        self._stream = None
         self._on_level = on_level
 
     def start(self) -> None:
         self._frames = []
-        self._stream = sd.InputStream(samplerate=RATE, channels=1, dtype="float32", callback=self._cb)
-        self._stream.start()
+        self._stream = devices.open_input(self._cb, RATE, probe=0.6)  # None: no mic sends sound, nothing recorded
 
     def _cb(self, indata, frames, time, status):  # noqa: ARG002 - sounddevice signature
         self._frames.append(indata.copy())
@@ -36,8 +36,7 @@ class Recorder:
 
     def stop(self) -> np.ndarray:
         if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
+            devices.close(self._stream)
             self._stream = None
         if not self._frames:
             return np.zeros(0, dtype=np.float32)
@@ -121,9 +120,15 @@ def listen_for_speech(
     def cb(indata, frames, time_info, status):  # noqa: ARG001
         blocks.put(indata[:, 0].copy())
 
-    with sd.InputStream(samplerate=RATE, channels=1, dtype="float32", blocksize=block, callback=cb):
+    stream = devices.open_input(cb, RATE, blocksize=block)
+    if stream is None:  # no mic sends anything: nobody spoke, rather than waiting on it
+        return None
+    try:
         # Calibrate on ~300 ms of room noise.
-        calib = [blocks.get(timeout=2) for _ in range(10)]
+        try:
+            calib = [blocks.get(timeout=2) for _ in range(10)]
+        except queue.Empty:  # the mic stopped sending
+            return None
         floor = float(np.median([np.sqrt(np.mean(b**2)) for b in calib]))
         threshold = max(floor * 3.0, 0.008)
         preroll: list[np.ndarray] = list(calib[-10:])
@@ -156,4 +161,6 @@ def listen_for_speech(
             quiet = 0.0 if loud else quiet + 0.03
             if quiet >= silence or elapsed >= max_seconds:
                 return np.concatenate(recorded)
+    finally:
+        devices.close(stream)
     return None

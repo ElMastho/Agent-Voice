@@ -19,8 +19,8 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from agent_voice import (__version__, agenda, calls, claudeapp, companion, history, media, install, keys, launch, ntfy, outputs, quota,
-                         schedule, textclean, updater, usage, winfocus)
+from agent_voice import (__version__, agenda, calls, claudeapp, companion, devices, history, media, install, keys, launch, ntfy,
+                         outputs, quota, schedule, textclean, updater, usage, winfocus)
 from agent_voice.config import HOME, LOG_DIR, LOOPBACK, load_config, load_state, save_state
 from agent_voice.hooks import strip_summary
 from agent_voice.textclean import result_label
@@ -119,7 +119,7 @@ def _play_apart(audio, rate: int) -> None:
     try:
         import sounddevice as sd
 
-        with sd.OutputStream(samplerate=rate, channels=1, dtype="float32") as stream:
+        with sd.OutputStream(samplerate=rate, channels=1, dtype="float32", device=devices.output_device()) as stream:
             stream.write(audio.reshape(-1, 1))
     except Exception:
         log.debug("cue not played", exc_info=True)
@@ -566,6 +566,12 @@ class Daemon:
         # Headphones or speakers: on speakers (if you asked), chimes instead of the voice. You can still pick Voice.
         self._output = outputs.OutputWatch()
         self._speaker_override = False
+        # Which mic and speaker (Settings), "" for the system's. A mic that sends nothing is skipped, and said.
+        devices.mic, devices.speaker = self.mic, self.speaker_device
+        self._output.preferred = self.speaker_device
+        devices.on_silent = self._mic_silent
+        devices.safe_to_refresh = lambda: not self.speaker.busy
+        self._mic_silent_at = 0.0
         # Talking over the voice (barge-in): the mic listens while it speaks, in headphones (no echo to hear).
         # Every prompt and reply, searchable (a local SQLite file); None when `history.enabled` is off.
         hist = config.get("history", {})
@@ -741,6 +747,35 @@ class Daemon:
         if self.engine == "kokoro":
             self._apply_engine()
             self._confirm("This is the natural voice.")
+
+    @property
+    def mic(self) -> str:
+        """The microphone picked in Settings (its name), "" for the system's default."""
+        return str(self.state.get("mic") or "")
+
+    @property
+    def speaker_device(self) -> str:
+        """The speaker picked in Settings (its name), "" for the system's default."""
+        return str(self.state.get("speaker") or "")
+
+    def set_device(self, kind: str, name: str) -> None:
+        """kind "mic" or "speaker"; name "" for the system's default."""
+        self.state[kind] = name
+        save_state(self.state)
+        if kind == "mic":
+            devices.mic = name
+        else:
+            devices.speaker = self._output.preferred = name
+            self._check_output()  # headphones or speakers: the new device's
+        log.info("%s=%s", kind, name or "system default")
+
+    def _mic_silent(self) -> None:
+        """No mic sent any sound: say so on the notch, at most every 10 minutes (the wake word retries quietly)."""
+        if time.time() - self._mic_silent_at < 600:
+            return
+        self._mic_silent_at = time.time()
+        self._show_banner(tr("The microphone sends no sound. Check it isn't muted or held by another app, or pick "
+                             "another one in Settings."), "", "", kind="note", tag="mic")
 
     @property
     def headphones_only(self) -> bool:
@@ -2605,6 +2640,8 @@ class Daemon:
             log.info("music resumed after the call")
 
     def _check_output(self) -> None:
+        if self.speaker_device:
+            devices.output_device()  # Settings' speaker plugged in since the start: PortAudio learns of it now
         before = self._output.kind
         try:
             now = self._output.poll()
@@ -3448,6 +3485,8 @@ class Daemon:
             "focus": self.focus if self._holding() else "",
             "barge_in": self._barging,
             "headphones_only": self.headphones_only,
+            "mic": self.mic,
+            "speaker_device": self.speaker_device,
             "dnd_from": self.dnd_from,
             "speakers": self.on_speakers,
             "pending": {"id": self._pending["id"], "until": self._pending["until"]} if self._pending else None,
@@ -3695,6 +3734,9 @@ def _handler(daemon: Daemon):
                     return self._json(200, daemon.history_db.get(_int(query["id"][0])))
                 limit = min(100, max(1, _int(query.get("limit", ["30"])[0])))
                 return self._json(200, {"results": daemon.history_db.search(query.get("q", [""])[0], limit)})
+            if url.path == "/devices":  # what Settings' Devices menus list
+                return self._json(200, {"inputs": devices.names("input"), "outputs": devices.names("output"),
+                                        "mic": daemon.mic, "speaker": daemon.speaker_device})
             if url.path == "/thread":  # a thread's last reply in full, for the preview on hover
                 return self._json(200, daemon.thread_detail(parse_qs(url.query).get("session", [""])[0]))
             self._json(404, {"error": "not found"})
@@ -3906,6 +3948,12 @@ def _handler(daemon: Daemon):
                     daemon.tool_used(str(data.get("session") or ""), str(data.get("source") or ""),
                                      str(data.get("label") or ""))
                 return self._json(200, {"ok": True})
+            if self.path == "/device":  # the mic or speaker to use: a device's name, "" for the system's
+                kind, name = str(data.get("kind") or ""), str(data.get("name") or "")
+                if kind not in ("mic", "speaker") or len(name) > 300:
+                    return self._json(400, {"error": "kind must be mic or speaker"})
+                daemon.set_device(kind, name)
+                return self._json(200, {"mic": daemon.mic, "speaker": daemon.speaker_device})
             if self.path == "/output":
                 mode = str(data.get("mode") or "")
                 if mode not in ("voice", "chime", "silent"):

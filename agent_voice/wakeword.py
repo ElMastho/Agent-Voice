@@ -30,6 +30,8 @@ log = logging.getLogger("agent_voice.wakeword")
 
 RATE = 16000
 BLOCK = int(RATE * 0.03)  # 30 ms
+STALL = 3.0  # no block for this long: the mic stopped sending
+SILENT_RETRY = 30.0  # no mic sends sound: try again after this
 MODEL = "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
 MODEL_URL = f"https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/{MODEL}.tar.bz2"
 KWS_DIR = HOME / "kws"
@@ -101,7 +103,7 @@ class WakeListener:
         Fed whole utterances it costs ~2% of a core per second of speech; fed continuously, ONNX Runtime
         keeps a core busy between calls.
         """
-        import sounddevice as sd
+        from agent_voice import devices
 
         blocks: queue.Queue = queue.Queue()
 
@@ -110,12 +112,16 @@ class WakeListener:
 
         ring: collections.deque = collections.deque(maxlen=15)  # 0.45 s of run-up before the gate opens
         floor, utterance, quiet = None, None, 0.0
-        with sd.InputStream(samplerate=RATE, channels=1, dtype="float32", blocksize=BLOCK, callback=cb):
+        stream = devices.open_input(cb, RATE, blocksize=BLOCK)
+        if stream is None:  # no mic sends sound: try again in a while, not in a tight loop
+            cancel.wait(SILENT_RETRY)
+            return None
+        try:
             while not cancel.is_set():
                 try:
-                    b = blocks.get(timeout=0.5)
-                except queue.Empty:
-                    continue
+                    b = blocks.get(timeout=STALL)
+                except queue.Empty:  # the mic stopped sending: open it again (or the next one)
+                    return None
                 level = _rms(b)
                 floor = level if floor is None else floor
                 loud = level > max(floor * 2.5, 0.004)  # sensitive: a laptop mic, you may be a metre away
@@ -137,6 +143,8 @@ class WakeListener:
                         log.info("wake check: %.1f s of speech, keyword %s", len(audio) / RATE, "yes" if hit else "no")
                         if hit or len(audio) <= RATE * short_fallback:
                             return audio, hit
+        finally:
+            devices.close(stream)
         return None
 
     def heard_keyword(self, audio: np.ndarray) -> bool:

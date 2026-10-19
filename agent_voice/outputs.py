@@ -27,12 +27,13 @@ def kind_of(form_factor) -> str:
 
 
 class OutputWatch:
-    """The default playback device, and what kind it is."""
+    """The playback device (the one picked in Settings, else the default), and what kind it is."""
 
     def __init__(self):
         self._id = None
         self.kind = ""
         self.name = ""
+        self.preferred = ""  # Settings' speaker, by name: "" for the system's default
 
     def poll(self) -> str:
         if sys.platform.startswith("linux"):
@@ -54,7 +55,8 @@ class OutputWatch:
 
         comtypes.CoInitialize()
         enum = comtypes.CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, comtypes.CLSCTX_INPROC_SERVER)
-        dev = enum.GetDefaultAudioEndpoint(EDataFlow.eRender.value, ERole.eMultimedia.value)
+        dev = self._preferred(enum, AudioUtilities) or enum.GetDefaultAudioEndpoint(EDataFlow.eRender.value,
+                                                                                   ERole.eMultimedia.value)
         device_id = dev.GetId()
         if device_id != self._id:
             self._id = device_id
@@ -62,3 +64,21 @@ class OutputWatch:
             self.kind, self.name = kind_of(info.properties.get(FORM_FACTOR)), info.FriendlyName or ""
             log.info("sound output: %s (%s)", self.name, self.kind or "unknown kind")
         return self.kind
+
+    def _preferred(self, enum, utilities):
+        """Settings' speaker if it's plugged in (its id is checked first: reading every device's name is slower)."""
+        if not self.preferred:
+            return None
+        if self._id and self.name == self.preferred:
+            try:
+                dev = enum.GetDevice(self._id)
+                if dev.GetState() == 1:  # DEVICE_STATE_ACTIVE
+                    return dev
+            except Exception:
+                pass
+        found = enum.EnumAudioEndpoints(0, 1)  # playback, active
+        for i in range(found.GetCount()):
+            dev = found.Item(i)
+            if utilities.CreateDevice(dev).FriendlyName == self.preferred:
+                return dev
+        return None

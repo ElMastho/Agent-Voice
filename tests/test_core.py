@@ -98,7 +98,7 @@ def test_speech_waits_while_mic_is_held(monkeypatch):
     from agent_voice import tts
 
     played = []
-    monkeypatch.setattr(tts.sd, "play", lambda audio, rate: played.append(time.time()))
+    monkeypatch.setattr(tts.sd, "play", lambda audio, rate, device=None: played.append(time.time()))
     monkeypatch.setattr(tts.sd, "stop", lambda: None)
     monkeypatch.setattr(tts.sd, "get_stream", lambda: type("S", (), {"active": False})())
     sp = tts.Speaker({"voices": {"en": "x"}, "default_lang": "en", "speed": 1.0, "volume": 1.0, "max_chars": 0})
@@ -2162,7 +2162,7 @@ def test_every_string_has_its_french():
     # Shown where they're displayed (tr(variable)): the constants behind them.
     shown = [title for _c, title, sub in widget.PHASES.values()] + [sub for _c, _t, sub in widget.PHASES.values() if sub]
     shown += [label for label, options in widget.SETTING_ROWS.values()]
-    shown += [text for _l, options in widget.SETTING_ROWS.values() for _v, text in options if not text[0].isdigit()]
+    shown += [text for _l, options in widget.SETTING_ROWS.values() for _v, text in options if text and not text[0].isdigit()]
     shown += [section for section, _rows in widget.SETTINGS] + list(widget.SidePanel.LABELS.values())
     shown += list(widget.SidePanel.TITLES.values()) + [h for _c, h in widget.BANNER_KINDS.values() if h]
     shown += list(companion.PHASES.values()) + list(widget.QuickInput.HINTS.values())
@@ -2187,3 +2187,67 @@ def test_every_string_has_its_french():
     finally:
         i18n.set_language("en")
     assert i18n.tr("Settings") == "Settings" and i18n.plural(0, "{n} turn", "{n} turns") == "0 turns"
+
+
+def test_devices_match_portaudio_names_cut_at_31():
+    from agent_voice import devices
+
+    found = [{"name": "Microphone (UGREEN Camera 2K)", "max_input_channels": 1, "hostapi": 0},
+               {"name": "Haut-parleurs (HyperX Cloud Al", "max_input_channels": 0, "max_output_channels": 2,
+                "hostapi": 0},
+               {"name": "Microphone (HyperX Cloud Alpha ", "max_input_channels": 1, "hostapi": 0},
+               {"name": "Microphone (HyperX Cloud Alpha S Chat)", "max_input_channels": 1, "hostapi": 1}]
+    assert devices.match_index("Microphone (HyperX Cloud Alpha S Chat)", found, 0) == 2
+    assert devices.match_index("Microphone (HyperX Cloud Alpha S Chat)", found, 1) == 3
+    assert devices.match_index("Microphone (Other)", found, 0) is None
+    assert devices.match_index("Haut-parleurs (HyperX Cloud Alpha S Game)", found, 0, "output") == 1
+    assert devices.match_index("Haut-parleurs (HyperX Cloud Alpha S Game)", found, 0) is None
+
+
+def test_a_mic_that_sends_nothing_is_skipped(monkeypatch):
+    import sys
+    import types
+
+    import numpy as np
+
+    from agent_voice import devices
+
+    opened, closed, silent = [], [], []
+
+    class Stream:
+        def __init__(self, device, callback, **_kw):
+            self.device, self.callback = device, callback
+            opened.append(device)
+
+        def start(self):
+            # The headset (7) sends only zeros, the default real sound.
+            block = np.zeros((480, 1), np.float32) if self.device == 7 else np.full((480, 1), 0.01, np.float32)
+            self.callback(block, 480, None, None)
+
+        def abort(self):
+            closed.append(self.device)
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "sounddevice", types.SimpleNamespace(InputStream=Stream))
+    monkeypatch.setattr(devices, "candidates", lambda: [7, None])
+    monkeypatch.setattr(devices, "on_silent", lambda: silent.append(1))
+    got = []
+    stream = devices.open_input(lambda indata, *_a: got.append(indata), 16000, probe=0.05)
+    assert stream.device is None and opened == [7, None] and len(got) == 1 and not silent
+
+    monkeypatch.setattr(devices, "candidates", lambda: [7])
+    assert devices.open_input(lambda *_a: None, 16000, probe=0.05) is None and silent == [1]
+
+
+
+def test_device_rows_show_the_device_in_brackets():
+    from agent_voice import widget
+
+    assert widget._device_label("Microphone (HyperX Cloud Alpha S Chat)") == "HyperX Cloud Alpha S Chat"
+    assert widget._device_label("Odyssey G65B") == "Odyssey G65B"
+    assert widget._device_label("") == widget.tr("System default")
+    assert widget._device_label("Odyssey G65B (2- HD Audio Driver for Display Audio)") == "Odyssey G65B"
+    shown = widget._device_label("Speakers (Cirrus Logic XU (with APO Extensions))")
+    assert shown.startswith("Cirrus Logic XU (") and shown.endswith("…") and len(shown) == 30

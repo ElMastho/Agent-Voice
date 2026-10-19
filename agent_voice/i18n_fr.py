@@ -159,6 +159,16 @@ FR = {
     "Mode": "Mode",
     "Speakers too": "Haut-parleurs aussi",
     "Headphones only": "Casque uniquement",
+    "Microphone": "Micro",
+    "System default": "Par défaut (système)",
+    "Devices": "Appareils",
+    "Speaker": "Sortie",
+    "Where the voice and the chimes play: the system's default, or one device":
+        "Où jouent la voix et les carillons : la sortie par défaut du système, ou un appareil précis",
+    "The microphone it listens with: the system's default, or one device. If that one isn't plugged in or sends no sound, the default instead":
+        "Le micro qui écoute : celui par défaut du système, ou un appareil précis. S'il n'est pas branché ou n'envoie aucun son, celui par défaut",
+    "The microphone sends no sound. Check it isn't muted or held by another app, or pick another one in Settings.":
+        "Le micro n'envoie aucun son. Vérifiez qu'il n'est pas coupé ou pris par une autre appli, ou choisissez-en un autre dans les Réglages.",
     "Hey Claude": "Hey Claude",
     "Off": "Non",
     "On": "Oui",

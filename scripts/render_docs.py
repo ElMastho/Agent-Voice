@@ -17,6 +17,8 @@ import tempfile
 from pathlib import Path
 
 os.environ.setdefault("QT_SCALE_FACTOR", "2")  # crisp 2x renders
+# Your own ~/.agent-voice (the interface in French, a hidden notch) must never change a screenshot.
+os.environ["AGENT_VOICE_HOME"] = tempfile.mkdtemp(prefix="agent-voice-docs-")
 
 import numpy as np  # noqa: E402
 from PIL import Image, ImageDraw, ImageFont  # noqa: E402

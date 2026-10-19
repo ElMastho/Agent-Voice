@@ -57,6 +57,7 @@ THREAD_H = 36  # a thread row: its title and state, then the start of its last r
 VOICE_ONLY = {"read"}
 # The Settings sheet (⚙ on the open notch): how it behaves, by section. Each row is a segmented switch.
 SETTINGS = (("Language", ("ui_language", "language")), ("Speech", ("engine", "speed", "summary")), ("When it speaks", ("mode", "headphones")),
+            ("Devices", ("speaker", "mic")),
             ("Listening", ("wake", "handsfree", "approve")), ("Phone", ("phone",)), ("Look", ("theme",)))
 SETTING_ROWS = {
     "ui_language": ("Interface", (("en", "English"), ("fr", "Français"))),
@@ -66,6 +67,8 @@ SETTING_ROWS = {
     "summary": ("Replies", (("on", "Summary"), ("off", "In full"))),
     "mode": ("Mode", MODES),
     "headphones": ("Speakers", (("off", "Speakers too"), ("on", "Headphones only"))),
+    "speaker": ("Speaker", (("pick", ""),)),  # a device menu (DEVICE_ROWS), not a switch
+    "mic": ("Microphone", (("pick", ""),)),
     "wake": ("Hey Claude", (("off", "Off"), ("on", "On"))),
     "handsfree": ("Auto-send", (("off", "Off"), ("on", "On"))),
     "approve": ("Approvals", (("off", "Click only"), ("on", "Voice or click"))),
@@ -76,6 +79,11 @@ SETTING_ROWS = {
 SETTING_TOGGLES = {"summary": ("/summary", "summary"), "headphones": ("/headphones", "headphones_only"),
                    "wake": ("/wake", "wake"), "handsfree": ("/handsfree", "hands_free"),
                    "approve": ("/approvals", "approvals")}
+# Rows that open a menu of the devices plugged in: the daemon's state key for each.
+DEVICE_ROWS = {"speaker": "speaker_device", "mic": "mic"}
+# What Windows calls a kind of device, before its real name in brackets ("Microphone (HyperX …)").
+GENERIC_DEVICES = {"microphone", "microphones", "microphone array", "speakers", "haut-parleurs", "headphones",
+                   "headset", "headset earphone", "headset microphone", "casque", "écouteurs", "line in", "entrée ligne"}
 SET_ROW, SET_HEAD = 32, 20  # a settings row, a section's name
 # Agents the panel can connect (install.INSTALLERS has the same keys).
 AGENT_LABELS = (("claude", "Claude"), ("codex", "Codex"), ("gemini", "Gemini"), ("cursor", "Cursor"), ("cline", "Cline"),
@@ -590,6 +598,16 @@ class Poller(QObject):
                 return
             if not waiting or st is None:
                 time.sleep(self.interval)
+
+
+def _device_label(name: str) -> str:
+    """A device as its row shows it: "Microphone (HyperX Cloud Alpha S Chat)" as what's in brackets, shortened;
+    "Odyssey G65B (HD Audio Driver…)" as its name before them."""
+    if not name:
+        return tr("System default")
+    head, _, rest = name.partition(" (")
+    shown = rest[:-1] if rest.endswith(")") and head.lower() in GENERIC_DEVICES else head
+    return shown if len(shown) <= 30 else shown[:29] + "…"
 
 
 def _post(path: str, payload: dict | None = None) -> None:
@@ -3211,6 +3229,8 @@ class VoiceWidget(QWidget):
             return st.get("language") or "en"
         if name == "ui_language":
             return st.get("ui_language") or self._ui_lang
+        if name in DEVICE_ROWS:
+            return "pick"
         key = SETTING_TOGGLES[name][1]
         return "on" if st.get(key, name in ("summary", "approve")) else "off"  # summaries and approvals start on
 
@@ -3250,6 +3270,8 @@ class VoiceWidget(QWidget):
         elif name == "language":
             self.st["language"] = value
             _post("/language", {"language": value})
+        elif name in DEVICE_ROWS:
+            self._device_menu(name)
         elif name == "ui_language":
             if value != self._setting_value("ui_language"):
                 _post("/language", {"ui_language": value})  # the next status relaunches the widget in it
@@ -3257,6 +3279,27 @@ class VoiceWidget(QWidget):
             path, key = SETTING_TOGGLES[name]
             self.st[key] = value == "on"
             _post(path, {"mode": value})
+
+    def _device_menu(self, name: str) -> None:
+        """The devices plugged in, the system's default first: pick the one to use."""
+        from PySide6.QtGui import QAction, QCursor
+
+        listed = client.request("/devices", timeout=3.0) or {}
+        current = self.st.get(DEVICE_ROWS[name]) or ""
+        menu = QMenu(self)
+        menu.setStyleSheet(_qss(MENU_STYLE))
+        for device in ["", *listed.get("inputs" if name == "mic" else "outputs", [])]:
+            act = QAction(device or tr("System default"), menu)
+            act.setCheckable(True)
+            act.setChecked(device == current)
+            act.triggered.connect(lambda _on=False, d=device: self._use_device(name, d))
+            menu.addAction(act)
+        menu.exec(QCursor.pos())
+
+    def _use_device(self, name: str, device: str) -> None:
+        self.st[DEVICE_ROWS[name]] = device  # the row shows it now, not at the next poll
+        _post("/device", {"kind": name, "name": device})
+        self._kick()
 
     def _phone_h(self) -> float:
         if not (self.st.get("phone") or {}).get("enabled"):
@@ -3893,6 +3936,8 @@ class VoiceWidget(QWidget):
                 if fetching:  # "downloading 40%": the natural voice, the first time
                     texts = [tr("Natural · {pct}", pct=fetching.split()[-1]) if value == "kokoro" else tr(text)
                              for value, text in options]
+                if name in DEVICE_ROWS:
+                    texts = [_device_label(self.st.get(DEVICE_ROWS[name]) or "") + "  ⌄"]
                 self._paint_segmented(p, progress, order, item[2], tr(label), [f"{name}:{v}" for v, _t in options], texts,
                                       self._setting_pos(name))
                 order += 1
@@ -4429,6 +4474,9 @@ class VoiceWidget(QWidget):
             "summary": tr("Final answers as a one-sentence summary, or read in full"),
             "headphones": (tr("The voice only in headphones: through the speakers (an open office), chimes and the reply "
                            "as a banner instead. It switches by itself when you plug them in or take them off")),
+            "speaker": tr("Where the voice and the chimes play: the system's default, or one device"),
+            "mic": tr("The microphone it listens with: the system's default, or one device. If that one isn't plugged "
+                      "in or sends no sound, the default instead"),
             "wake": tr("Hey Claude: while idle, say “Hey Claude, …” to send a new prompt to your last thread"),
             "approve": tr("Permission requests read out: answer yes / no by voice, or click Allow / Deny"),
             "phone": (tr("Phone notifications (ntfy): replies, what needs you, limits and the recap on your phone while "

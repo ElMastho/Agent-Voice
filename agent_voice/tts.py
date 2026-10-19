@@ -10,8 +10,8 @@ import time
 import numpy as np
 import sounddevice as sd
 
+from agent_voice import devices, textclean
 from agent_voice import lang as langdet
-from agent_voice import textclean
 from agent_voice.config import VOICES_DIR
 
 log = logging.getLogger("agent_voice.tts")
@@ -196,7 +196,7 @@ class Speaker:
             self.current_text = sentence
             self._playing.set()
             try:
-                sd.play(audio, rate)
+                sd.play(audio, rate, device=devices.output_device())  # Settings' speaker, else the default
                 # Poll instead of sd.wait(): a broken audio driver must not freeze the speaker forever.
                 deadline = time.time() + len(audio) / rate + 2.0
                 while time.time() < deadline and sd.get_stream().active:

@@ -49,6 +49,7 @@ class TranscriptTitles:
     """
 
     RETRY = 10.0  # a transcript not written yet: look again this long after
+    CHUNK = 4_000_000  # read at most this much per call: a long transcript is caught up over a few polls
 
     def __init__(self, root: Path = PROJECTS_DIR):
         self.root = root
@@ -56,7 +57,7 @@ class TranscriptTitles:
         self._lock = threading.Lock()  # status requests run on several threads: each byte is read once
 
     def title(self, session: str) -> str:
-        if not session or "/" in session or "\\" in session:
+        if not session or any(c in session for c in "/\\*?[]"):  # a session id, never a path or a pattern
             return ""
         with self._lock:
             return self._title(session)
@@ -77,8 +78,10 @@ class TranscriptTitles:
             if size > seen["offset"]:
                 with seen["path"].open("rb") as f:
                     f.seek(seen["offset"])
-                    chunk = f.read(size - seen["offset"])
+                    chunk = f.read(min(size - seen["offset"], self.CHUNK))
                 end = chunk.rfind(b"\n") + 1  # a line still being written is read next time, whole
+                if not end and len(chunk) == self.CHUNK:
+                    end = len(chunk)  # one line longer than a chunk (a huge tool result): not a title, skipped
                 seen["offset"] += end
                 self._scan(seen, chunk[:end])
         except OSError:

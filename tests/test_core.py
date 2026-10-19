@@ -1968,3 +1968,20 @@ def test_agent_todos_focus_sessions_and_notes(daemon, monkeypatch):
         daemon.set_calendar("add", "not a link")
     assert daemon.set_calendar("add", "https://calendar.example/secret.ics") == ["https://calendar.example/secret.ics"]
     assert daemon.set_calendar("clear") == []
+
+
+def test_transcript_titles_read_in_chunks_and_refuse_patterns(tmp_path, monkeypatch):
+    import json as js
+
+    from agent_voice.claudeapp import TranscriptTitles
+
+    folder = tmp_path / "C--work"
+    folder.mkdir()
+    path = folder / "abc.jsonl"
+    filler = js.dumps({"type": "user", "message": "x" * 300}) + "\n"
+    path.write_text(filler * 40 + js.dumps({"type": "ai-title", "aiTitle": "Fix the login"}) + "\n", encoding="utf-8")
+    titles = TranscriptTitles(tmp_path)
+    monkeypatch.setattr(TranscriptTitles, "CHUNK", 4096)
+    seen = [titles.title("abc") for _ in range(6)]
+    assert seen[0] == "" and seen[-1] == "Fix the login"  # caught up over a few polls, never all at once
+    assert titles.title("*") == "" and titles.title("../abc") == ""

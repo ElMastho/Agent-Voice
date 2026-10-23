@@ -1892,6 +1892,30 @@ def test_now_playing_prefers_windows_media_sessions(monkeypatch):
     assert media._windows_now()["app"] == "YouTube"  # the window titles, as before
 
 
+
+def test_now_playing_forgets_closed_players(monkeypatch):
+    from agent_voice import media
+
+    assert media.session_process("Chrome._crx_cinhimbnkkghhklpknlkffjgod") == "chrome.exe"
+    assert media.session_process("MSEdge") == "msedge.exe" and media.session_process("308046B0AF4A39CB") == "firefox.exe"
+    assert media.session_process("Spotify.exe") == "spotify.exe" and media.session_process("C:\\Apps\\vlc.exe") == "vlc.exe"
+    assert media.session_process("SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify") == "spotify.exe"
+    assert media.session_process("SomePlayer!App") is None
+    # A paused browser session counts only while the browser has a window (closed, it runs in the background).
+    windows = [(10, "Inbox - Outlook - Microsoft Edge")]
+    monkeypatch.setattr(media, "_visible_windows", lambda: list(windows))
+    monkeypatch.setattr(media, "_process_name", lambda pid: {10: "msedge.exe", 20: "chrome.exe"}.get(pid, ""))
+    assert media.session_open("MSEdge", {})
+    assert not media.session_open("Chrome", {})
+    assert media.session_open("SomePlayer!App", {})  # unknown: trusted
+    # The window titles: a song whose window closed isn't brought back to a later page of the same site.
+    monkeypatch.setattr(media, "_sounding_pids", lambda: set())
+    media._LAST.clear()
+    windows[:] = [(20, "Lo-fi beats - YouTube - Google Chrome")]
+    assert media._windows_playing()["title"] == "Lo-fi beats"
+    windows[:] = []
+    assert media._windows_playing() is None and "YouTube" not in media._LAST
+
 def test_agenda_reads_ical_repeats_and_exceptions():
     from datetime import date, datetime
 

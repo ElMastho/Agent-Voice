@@ -78,18 +78,24 @@ def _session_playing() -> dict | None:
         manager = await Manager.request_async()
         current = manager.get_current_session()
         current_id = current.source_app_user_model_id if current else ""
-        best = None
+        ranked = []
         for session in manager.get_sessions():
-            playing = session.get_playback_info().playback_status == Status.PLAYING
-            rank = (playing, session.source_app_user_model_id == current_id)
-            if best is None or rank > best[0]:
-                best = (rank, session, playing)
-        if best is None:
-            return None
-        _rank, session, playing = best
-        props = await session.try_get_media_properties_async()
-        return {"app": app_name(session.source_app_user_model_id), "title": props.title or "",
-                "artist": props.artist or "", "playing": playing}
+            status = session.get_playback_info().playback_status
+            if status in (Status.CLOSED, Status.STOPPED):
+                continue  # nothing left to resume
+            playing = status == Status.PLAYING
+            ranked.append(((playing, session.source_app_user_model_id == current_id), session, playing))
+        ranked.sort(key=lambda r: r[0], reverse=True)
+        open_now: dict[str, set[str]] = {}
+        for _rank, session, playing in ranked:
+            # A paused session can outlive its app (a browser closed, still running in the background): what
+            # plays is real; what's paused only while its app is still open.
+            if not playing and not session_open(session.source_app_user_model_id, open_now):
+                continue
+            props = await session.try_get_media_properties_async()
+            return {"app": app_name(session.source_app_user_model_id), "title": props.title or "",
+                    "artist": props.artist or "", "playing": playing}
+        return None
 
     return asyncio.run(read())
 
@@ -107,11 +113,42 @@ def _windows_now() -> dict | None:
     return _windows_playing()
 
 
-def _windows_playing() -> dict | None:
+def session_process(app_id: str) -> str | None:
+    """A media session's app -> the process that plays it ('chrome.exe' for a Chrome tab or the YouTube Music
+    web app); None when it isn't one we know."""
+    low = app_id.lower()
+    if low.endswith(".exe"):
+        return low.rsplit("\\", 1)[-1]
+    if "_crx_" in low:  # an installed web app: its browser plays it
+        low = low.split("_crx_")[0]
+    name = app_name(low)
+    if name == "Spotify":
+        return "spotify.exe"
+    return next((exe for exe, shown in BROWSERS.items() if shown == name), None)
+
+
+def session_open(app_id: str, open_now: dict[str, set[str]]) -> bool:
+    """The app behind a paused media session is still open: a browser with a window (closed, Edge and Chrome
+    keep running in the background), any other player running (Spotify in the tray). Unknown apps are trusted.
+    `open_now` caches what's open for one look ("windows", "running")."""
+    exe = session_process(app_id)
+    if exe is None:
+        return True
+    if exe in BROWSERS:
+        if "windows" not in open_now:
+            open_now["windows"] = {_process_name(pid).lower() for pid, _title in _visible_windows()}
+        return exe in open_now["windows"]
+    if "running" not in open_now:
+        import psutil
+
+        open_now["running"] = {(p.info["name"] or "").lower() for p in psutil.process_iter(["name"])}
+    return exe in open_now["running"]
+
+
+def _visible_windows() -> list[tuple[int, str]]:
+    """(pid, title) of every visible window that has a title."""
     import ctypes
     from ctypes import wintypes
-
-    import psutil
 
     user32 = ctypes.WinDLL("user32")
     proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -119,8 +156,6 @@ def _windows_playing() -> dict | None:
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
     found: list[tuple[int, str]] = []
-    if len(_NAMES) > 2000:
-        _NAMES.clear()
 
     def collect(hwnd, _lparam):
         if not user32.IsWindowVisible(hwnd):
@@ -134,17 +169,32 @@ def _windows_playing() -> dict | None:
         return True
 
     user32.EnumWindows(proc(collect), 0)
+    return found
+
+
+def _process_name(pid: int) -> str:
+    if pid not in _NAMES:
+        if len(_NAMES) > 2000:
+            _NAMES.clear()
+        try:
+            import psutil
+
+            _NAMES[pid] = psutil.Process(pid).name()
+        except Exception:
+            _NAMES[pid] = ""
+    return _NAMES[pid]
+
+
+def _windows_playing() -> dict | None:
+    found = _visible_windows()
     sounding: set[int] | None = None  # asked only once a player is found (the audio sessions cost the most)
     best = None
+    seen: set[str] = set()
     for pid, title in found:
-        if pid not in _NAMES:
-            try:
-                _NAMES[pid] = psutil.Process(pid).name()
-            except Exception:
-                _NAMES[pid] = ""
-        item = parse_title(_NAMES[pid], title)
+        item = parse_title(_process_name(pid), title)
         if item is None:
             continue
+        seen.add(item["app"])
         if sounding is None and item["title"]:
             sounding = _sounding_pids()
         item["playing"] = bool(item["title"]) and _pid_family(pid, sounding or set())
@@ -156,6 +206,8 @@ def _windows_playing() -> dict | None:
         rank = (item["playing"], item["app"] == "Spotify", bool(item["title"]))
         if best is None or rank > best[0]:
             best = (rank, item)
+    for app in set(_LAST) - seen:  # its window closed: its song is gone with it
+        del _LAST[app]
     return best[1] if best else None
 
 

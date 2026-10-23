@@ -95,7 +95,7 @@ AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI"
 NEED_ROWS, NEED_H = 3, 28  # "needs you" rows at the top of the panel
 # Banner kinds: the accent around it and its header.
 BANNER_KINDS = {"you": ("#10E0A0", ""), "pending": ("#10E0A0", ""), "needs": ("#FBBF24", ""), "catchup": ("#8B7CFF", "While you were away"),
-                "recap": ("#8B7CFF", "Today"), "brief": ("#8B7CFF", "Your day"), "timer": ("#FBBF24", "Timer done"), "reminder": ("#8B7CFF", "Reminder"),
+                "recap": ("#8B7CFF", "Today"), "brief": ("#8B7CFF", "Your day"), "meeting": ("#A99BFF", "Meeting"), "timer": ("#FBBF24", "Timer done"), "reminder": ("#8B7CFF", "Reminder"),
                 "pomodoro": ("#F87171", "Pomodoro")}
 GUIDE_URL = "https://github.com/ElMastho/Agent-Voice/blob/main/docs/guide.md"
 COMPACT = 56  # compact mode: just the orb
@@ -618,7 +618,7 @@ def _post(path: str, payload: dict | None = None) -> None:
 # The banner's buttons: (icon, label).
 BANNER_BUTTONS = {"type": ("keyboard", "Reply"), "talk": ("mic", "Talk"), "send": ("send", "Send now"),
                   "edit": ("keyboard", "Edit"), "cancel": ("stop", "Cancel"), "snooze": ("clock", "+5 min"),
-                  "ok": ("check", "Done")}
+                  "ok": ("check", "Done"), "join": ("calendar", "Join")}
 # How long a notification stays (Chimes), and how long the read-along text stays once the voice ends.
 SHOW_FOR, LINGER = 10.0, 5.0
 
@@ -669,6 +669,8 @@ class Banner(QWidget):
         self.until = 1e12 if hold else time.time() + min(30.0, SHOW_FOR + max(0, words - 12) * 0.5)  # more if long
         if item.get("kind") in ("timer", "reminder"):  # yours: it stays until you say so (or a minute)
             self.until = time.time() + 60.0
+        if item.get("kind") == "meeting":  # until you join, snooze or close it (or five minutes)
+            self.until = time.time() + 300.0
         if item.get("kind") == "pending":  # about to be sent: as long as it waits (what happens next replaces it)
             self.until = float(item.get("until") or time.time()) + 2.0
         if not self.isVisible():
@@ -687,7 +689,7 @@ class Banner(QWidget):
         return bool(item.get("session")) and item.get("kind") not in ("you", "catchup", "note", "recap")
 
     def _buttons_shown(self) -> bool:
-        return self._can_reply() or (self.item or {}).get("kind") in ("pending", "timer", "reminder")
+        return self._can_reply() or (self.item or {}).get("kind") in ("pending", "timer", "reminder", "meeting")
 
     def _close_rect(self) -> QRectF:
         """The ✕ in the top right corner: easier than a swipe."""
@@ -701,6 +703,11 @@ class Banner(QWidget):
         y, h, right = self.height() - 34, 22, self.width() - 16
         if (self.item or {}).get("kind") in ("timer", "reminder"):  # a timer ended, a reminder: snooze, or done
             return {"ok": QRectF(right - 70, y, 70, h), "snooze": QRectF(right - 70 - 8 - 82, y, 82, h)}
+        if (self.item or {}).get("kind") == "meeting":  # about to start: join it (its video link), or later
+            out = {"snooze": QRectF(right - 82, y, 82, h)}
+            if (self.item.get("meeting") or {}).get("join"):
+                out["join"] = QRectF(right - 82 - 8 - 72, y, 72, h)
+            return out
         if (self.item or {}).get("kind") == "pending":
             out = {}
             for key, w in (("cancel", 74), ("edit", 62), ("send", 90)):
@@ -831,6 +838,8 @@ class Banner(QWidget):
             tag = tr("in {n} s · say “wait” or “cancel”", n=self._left())
         elif kind in ("timer", "reminder"):
             tag = _when_text(float(self.item.get("at") or time.time()))
+        elif kind == "meeting":
+            tag = _when_text(float((self.item.get("meeting") or {}).get("start") or time.time()))
         p.drawText(QRectF(0, 10, self.width() - 40, 20), Qt.AlignRight | Qt.AlignVCenter, tag)
         close = self._close_rect()
         if self._hot == "close":
@@ -906,6 +915,16 @@ class Banner(QWidget):
                 self.on_close()
         elif clicked:
             button = self._button_at(e.position())
+            if self.item.get("kind") == "meeting":
+                start = (self.item.get("meeting") or {}).get("start", 0)
+                if button == "join":
+                    _post("/calendar", {"action": "join", "start": start})
+                elif button == "snooze":
+                    _post("/calendar", {"action": "snooze", "start": start, "seconds": 300})
+                elif not button:  # the banner itself: the agenda, where the meeting is
+                    return
+                self.dismiss()
+                return
             if self.item.get("kind") in ("timer", "reminder"):
                 snooze = self.item.get("snooze") or {}
                 if button == "snooze" and snooze.get("kind") == "timer":

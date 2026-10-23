@@ -2373,3 +2373,47 @@ def test_usage_forecast(daemon):
                                             (now - 1200, 30.0, int((now + 3 * 3600) // 600))]
     full = daemon._forecast("codex", "five_hour", {"pct": 40, "resets": now + 3 * 3600}, now)
     assert full and abs(full - (now + 60 / 20 * 3000)) < 400
+
+
+def test_meeting_alert_joins_or_snoozes(daemon, monkeypatch):
+    import time as t
+    import webbrowser
+
+    opened = []
+    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url))
+    now = t.time()
+    daemon.agenda = [{"title": "Design review", "location": "", "join": "https://us02web.zoom.us/j/1",
+                      "start": now + 100, "end": now + 1900, "all_day": False}]
+    daemon.banner = None
+    daemon._check_meetings(now - 120)  # 3 min 40 s before: not yet
+    assert daemon.banner is None
+    daemon._check_meetings(now)  # within 2 minutes of it
+    banner = daemon.banner
+    assert banner["kind"] == "meeting" and banner["text"] == "Design review starts in 2 min."
+    assert banner["meeting"] == {"start": int(now + 100), "join": True}
+    daemon.banner = None
+    daemon._check_meetings(now + 10)
+    assert daemon.banner is None  # once
+    assert daemon.snooze_meeting(now + 100, 300)
+    daemon._check_meetings(now + 200)
+    assert daemon.banner is None  # snoozed for 5 minutes
+    daemon._check_meetings(now + 310)
+    assert daemon.banner["text"] == "Design review started 3 min ago."  # again, once it's on
+    assert daemon.join_meeting(now + 100) == "Design review" and opened == ["https://us02web.zoom.us/j/1"]
+    daemon.banner = None
+    daemon._check_meetings(now + 500)
+    assert daemon.banner is None  # joined: never again
+    # Already in a call (you've joined from the app): no alert; without a video link: no Join.
+    daemon.agenda = [{"title": "1:1", "location": "Room 3", "join": "", "start": now + 60, "end": now + 900,
+                      "all_day": False}]
+    daemon.in_call = "Teams"
+    daemon._check_meetings(now)
+    assert daemon.banner is None
+    daemon.in_call = ""
+    daemon._check_meetings(now)
+    assert daemon.banner["text"] == "1:1 starts in 1 min. Room 3" and daemon.banner["meeting"]["join"] is False
+    daemon.config["calendar"]["alert_minutes"] = -1
+    daemon.agenda[0]["start"] += 1
+    daemon.banner = None
+    daemon._check_meetings(now)
+    assert daemon.banner is None  # turned off

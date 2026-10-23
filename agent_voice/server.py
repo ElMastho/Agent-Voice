@@ -605,6 +605,8 @@ class Daemon:
         self.agenda: list[dict] = []  # today's meetings (calendar links you added, Outlook while it's open)
         self._agenda_error = ""
         self._agenda_wake = threading.Event()
+        self._meeting_alerted: set[str] = set()  # the meetings already announced (title|start)
+        self._meeting_snooze: dict[str, float] = {}  # snoozed: announced again at that time
         if start_threads:
             threading.Thread(target=self._job_loop, name="jobs", daemon=True).start()
             threading.Thread(target=self._listen_monitor, name="listen", daemon=True).start()
@@ -1710,6 +1712,62 @@ class Daemon:
                 log.exception("today's meetings unavailable")
             self._agenda_wake.wait(300)
 
+    def _check_meetings(self, now: float) -> None:
+        """A meeting about to start (`calendar.alert_minutes` before): its banner, with Join when it has a video
+        link and +5 min. Once per meeting, and again when snoozed; not while you're already in a call."""
+        lead = float(self.config.get("calendar", {}).get("alert_minutes", 2))
+        if lead < 0 or self.in_call:
+            return
+        for e in self.agenda:
+            if e["all_day"] or now >= e["end"]:
+                continue
+            key = _meeting_key(e)
+            again = self._meeting_snooze.get(key)
+            due = now >= again if again else (key not in self._meeting_alerted
+                                              and e["start"] - lead * 60 <= now < e["start"] + 300)
+            if due:
+                self._meeting_snooze.pop(key, None)
+                self._meeting_alerted.add(key)
+                self._meeting_due(e, now)
+
+    def _meeting_due(self, e: dict, now: float) -> None:
+        """'Design review starts in 2 min.' Shown even in Do not disturb (silently), like your reminders."""
+        import math
+
+        soon, sl = e["start"] - now, self.language
+        if soon > 30:
+            n = max(1, math.ceil(soon / 60))
+            text = tr("{title} starts in {n} min.", title=e["title"], n=n)
+            said = tr("{title} starts in {n} minutes.", in_lang=sl, title=e["title"], n=n)
+        elif soon > -60:
+            text = tr("{title} starts now.", title=e["title"])
+            said = tr("{title} starts now.", in_lang=sl, title=e["title"])
+        else:
+            n = math.floor(-soon / 60)
+            text = tr("{title} started {n} min ago.", title=e["title"], n=n)
+            said = tr("{title} started {n} minutes ago.", in_lang=sl, title=e["title"], n=n)
+        if e.get("location") and not agenda.join_link(e["location"]):
+            text += f" {e['location']}"
+        join = bool(agenda.join_link(e.get("join") or ""))
+        log.info("meeting alert: %r (join link: %s)", e["title"][:60], join)
+        self._show_banner(text, "", "", kind="meeting", tag="meeting",
+                          extra={"meeting": {"start": int(e["start"]), "join": join}, "snooze": {"seconds": 300}})
+        self._push("scheduled", tr("Meeting"), text)
+        if self.muted:
+            return
+        self.play_chime("attention")
+        if not self.chime:
+            self._wake_cancel.set()
+            self.speaker.speak(said, sl)
+
+    def snooze_meeting(self, start: float, seconds: float = 300) -> bool:
+        """+5 min on a meeting's banner: told again then (even once it has started, until it ends)."""
+        meeting = next((e for e in self.agenda if int(e["start"]) == int(start) and not e["all_day"]), None)
+        if meeting is None:
+            return False
+        self._meeting_snooze[_meeting_key(meeting)] = time.time() + max(60.0, min(3600.0, float(seconds)))
+        return True
+
     def _agenda_status(self) -> dict:
         return {"events": self.agenda[:12], "sources": len(self.calendars()), "error": self._agenda_error}
 
@@ -1730,6 +1788,9 @@ class Daemon:
         link = agenda.join_link(meeting["join"]) if meeting else ""
         if not link:
             return ""
+        key = _meeting_key(meeting)
+        self._meeting_alerted.add(key)  # joined: no alert for it any more, snoozed or not
+        self._meeting_snooze.pop(key, None)
         log.info("joining the meeting %r", meeting["title"][:60])
         webbrowser.open(link)
         return meeting["title"]
@@ -1957,6 +2018,7 @@ class Daemon:
                 self._check_resumes(now)
                 self._check_schedules(now)
                 self._check_recap(now)
+                self._check_meetings(now)
             except Exception:
                 log.exception("away check failed")
 
@@ -2512,7 +2574,7 @@ class Daemon:
 
         Do not disturb: only what you do yourself shows (and your own timers, silently); the rest waits for the
         catch-up when you're back."""
-        if self.muted and kind not in ("you", "pending", "timer", "reminder", "pomodoro"):
+        if self.muted and kind not in ("you", "pending", "timer", "reminder", "pomodoro", "meeting"):
             return
         title = self._title(session, source) if session or source else ""
         self.banner = {"id": (self.banner or {}).get("id", 0) + 1, "text": textclean.clean(text)[:800],
@@ -3840,6 +3902,10 @@ def _clock(at: float, window: str) -> str:
     return when.strftime("%H:%M") if window == "five_hour" and at - time.time() < 20 * 3600 else day_time(when)
 
 
+def _meeting_key(e: dict) -> str:
+    return f"{e['title']}|{int(e['start'])}"
+
+
 def status_tag(st: dict) -> str:
     """What the widget shows, as a short tag: it changes when something visible changes.
 
@@ -3956,6 +4022,9 @@ def _handler(daemon: Daemon):
                     return self._json(200, {"ok": True})
                 if self.path == "/media":
                     return self._json(200, {"ok": daemon.media_control(action)})
+                if self.path == "/calendar" and action == "snooze":  # the meeting's banner: +5 min
+                    done = daemon.snooze_meeting(float(data.get("start") or 0), float(data.get("seconds") or 300))
+                    return self._json(200 if done else 404, {"ok": done})
                 if self.path == "/calendar" and action == "join":  # the meeting's Teams / Zoom / Meet link
                     title = daemon.join_meeting(float(data.get("start") or 0))
                     return self._json(200 if title else 404, {"title": title} if title else {"error": "no meeting to join"})

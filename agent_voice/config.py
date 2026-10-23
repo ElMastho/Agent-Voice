@@ -135,7 +135,8 @@ DEFAULTS: dict = {
     "pomodoro": {"focus": 25, "short": 5, "long": 15, "every": 4, "hold": True},
     # Today's meetings in the companion (calendar links are added from it). quiet_in_meetings: replies wait during a
     # meeting, as in a call, and are told after it.
-    "calendar": {"quiet_in_meetings": False},
+    # alert_minutes: a meeting's banner (Join, +5 min) this long before it starts; a negative number turns it off.
+    "calendar": {"quiet_in_meetings": False, "alert_minutes": 2},
     # Out of quota: once the limit resets, send this to the thread so it picks up where it stopped (auto: without
     # asking; off: only after "resume when it resets" or a click on Resume).
     "resume": {"auto": True, "message": "Continue."},

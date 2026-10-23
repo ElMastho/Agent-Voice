@@ -915,3 +915,20 @@ def test_saved_cards_follow_the_agenda(app):
     w.set_side_widget("companion", "activity", False)  # saved with the cards it knows: hidden stays hidden
     w._restore_position()
     assert w.side_widgets["companion"] == ["agenda", "usage"]
+
+
+def test_meeting_banner_joins_or_snoozes(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    b = widget.Banner()
+    item = {"id": 4, "text": "Design review starts in 2 min.", "kind": "meeting", "tag": "meeting", "at": 0,
+            "meeting": {"start": 1_800_000_000, "join": True}, "snooze": {"seconds": 300}}
+    b.present(item, 420)
+    assert set(b._buttons()) == {"join", "snooze"} and b.until > widget.time.time() + 250
+    QTest.mouseClick(b, Qt.LeftButton, Qt.NoModifier, b._buttons()["join"].center().toPoint())
+    assert posted == [("/calendar", {"action": "join", "start": 1_800_000_000})] and b.until == 0.0
+    b.present({**item, "id": 5}, 420)
+    QTest.mouseClick(b, Qt.LeftButton, Qt.NoModifier, b._buttons()["snooze"].center().toPoint())
+    assert posted[1] == ("/calendar", {"action": "snooze", "start": 1_800_000_000, "seconds": 300})
+    b.present({**item, "id": 6, "meeting": {"start": 1_800_000_000, "join": False}}, 420)
+    assert set(b._buttons()) == {"snooze"}  # no video link: nothing to join

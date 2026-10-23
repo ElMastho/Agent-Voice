@@ -652,4 +652,11 @@ FR = {
     "the meeting": "la réunion",
     "No meeting to join right now.": "Aucune réunion à rejoindre pour l'instant.",
     "at this pace, full around {time}": "à ce rythme, plein vers {time}",
+    # a meeting about to start
+    "Meeting": "Réunion",
+    "{title} starts in {n} min.": "{title} commence dans {n} min.",
+    "{title} starts in {n} minutes.": "{title} commence dans {n} minutes.",
+    "{title} starts now.": "{title} commence maintenant.",
+    "{title} started {n} min ago.": "{title} a commencé il y a {n} min.",
+    "{title} started {n} minutes ago.": "{title} a commencé il y a {n} minutes.",
 }

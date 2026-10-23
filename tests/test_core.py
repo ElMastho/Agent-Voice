@@ -117,7 +117,7 @@ def test_speech_waits_while_mic_is_held(monkeypatch):
 
 
 def test_chime_is_soft_and_short():
-    from agent_voice.server import chime_audio
+    from agent_voice.daemon.sounds import chime_audio
 
     for kind in ("done", "attention"):
         audio, rate = chime_audio(kind, volume=0.35)
@@ -163,7 +163,7 @@ def test_cline_hooks(monkeypatch):
 
 
 def test_spoken_answers_pick_an_option():
-    from agent_voice.server import match_option
+    from agent_voice.daemon.phrases import match_option
 
     options = ["Thin strip (Recommended)", "Small pill", "Fully hidden"]
     assert match_option("the second one", options) == 1
@@ -266,7 +266,7 @@ def test_claude_code_session_title_from_its_transcript(tmp_path):
 
 
 def test_permission_answers_and_wake_phrases():
-    from agent_voice.server import match_yes_no, strip_wake
+    from agent_voice.daemon.phrases import match_yes_no, strip_wake
 
     assert match_yes_no("yes go ahead") is True
     assert match_yes_no("oui vas-y") is True
@@ -333,17 +333,17 @@ class FakeSpeaker:
 
 
 @pytest.fixture
-def daemon(monkeypatch, tmp_path):
-    from agent_voice import config, server
+def daemon(patch_daemon, monkeypatch, tmp_path):
+    from agent_voice import claudeapp, config, history, server, winfocus
 
-    monkeypatch.setattr(server, "Speaker", FakeSpeaker)
-    monkeypatch.setattr(server.history, "PATH", tmp_path / "history.db")  # never your real history
-    monkeypatch.setattr(server, "load_state", lambda: {})
-    monkeypatch.setattr(server, "save_state", lambda state: None)
+    patch_daemon("Speaker", FakeSpeaker)
+    monkeypatch.setattr(history, "PATH", tmp_path / "history.db")  # never your real history
+    patch_daemon("load_state", lambda: {})
+    patch_daemon("save_state", lambda state: None)
     monkeypatch.setattr(server.install, "agent_states", lambda: {})
     monkeypatch.setattr(server.install, "usage_line_state", lambda: "off")
-    monkeypatch.setattr(server.claudeapp, "session_title", lambda session: "")
-    monkeypatch.setattr(server.winfocus, "is_window", lambda hwnd: True)
+    monkeypatch.setattr(claudeapp, "session_title", lambda session: "")
+    monkeypatch.setattr(winfocus, "is_window", lambda hwnd: True)
     d = server.Daemon(config.load_config(), start_threads=False)
     d.config["take_back"]["seconds"] = 0  # sent at once, unless a test is about the take-back
     d.config["brief"]["enabled"] = False  # the morning brief depends on the hour: only where a test asks for it
@@ -426,7 +426,7 @@ def test_calls_switch_to_chimes_until_you_ask_for_the_voice(daemon):
 
 
 def test_voice_commands():
-    from agent_voice.server import match_command
+    from agent_voice.daemon.phrases import match_command
 
     assert match_command("Repeat that.") == "repeat"
     assert match_command("Répète.") == "repeat"
@@ -463,7 +463,7 @@ def test_what_you_said_shows_as_yours(daemon):
 
 
 def test_call_watch_switches_to_chimes_and_back(daemon, monkeypatch):
-    from agent_voice import server
+    from agent_voice import calls, media, server, winfocus
 
     apps = [["C:#Program Files#Zoom#bin#Zoom.exe"], ["C:#Program Files#Zoom#bin#Zoom.exe"], [], None]
 
@@ -474,10 +474,10 @@ def test_call_watch_switches_to_chimes_and_back(daemon, monkeypatch):
         return nxt
 
     seen = []
-    monkeypatch.setattr(server.calls, "apps_using_mic", fake_apps)
+    monkeypatch.setattr(calls, "apps_using_mic", fake_apps)
     monkeypatch.setattr(daemon, "_check_output", lambda: None)  # not about headphones (and no real pactl)
-    monkeypatch.setattr(server.winfocus, "busy_state", lambda: "")  # not about your screen (an app full screen)
-    monkeypatch.setattr(server.media, "now_playing", lambda: None)  # no player open (never the real media keys)
+    monkeypatch.setattr(winfocus, "busy_state", lambda: "")  # not about your screen (an app full screen)
+    monkeypatch.setattr(media, "now_playing", lambda: None)  # no player open (never the real media keys)
     monkeypatch.setattr(server.time, "sleep", lambda s: seen.append((daemon.in_call, daemon.chime)))
     with pytest.raises(SystemExit):
         daemon._call_watch()
@@ -486,7 +486,7 @@ def test_call_watch_switches_to_chimes_and_back(daemon, monkeypatch):
 
 
 def test_a_call_pauses_the_music_and_plays_it_again_after(daemon, monkeypatch):
-    from agent_voice import server
+    from agent_voice import media
 
     song = {"app": "Spotify", "title": "Get Lucky", "artist": "Daft Punk", "playing": True}
     pressed = []
@@ -496,8 +496,8 @@ def test_a_call_pauses_the_music_and_plays_it_again_after(daemon, monkeypatch):
         song["playing"] = not song["playing"]
         return True
 
-    monkeypatch.setattr(server.media, "now_playing", lambda: dict(song))
-    monkeypatch.setattr(server.media, "control", toggle)
+    monkeypatch.setattr(media, "now_playing", lambda: dict(song))
+    monkeypatch.setattr(media, "control", toggle)
     monkeypatch.setattr(daemon, "media_control", toggle)  # not the 0.6 s refresh timer
     daemon._pause_for_call()
     assert pressed == ["toggle"] and not song["playing"]
@@ -540,11 +540,11 @@ def test_waiting_for_input_joins_needs_until_the_agent_moves_on(daemon):
 
 
 def test_messages_go_to_the_conversation_named(daemon, monkeypatch):
-    from agent_voice import server
+    from agent_voice.daemon import phrases
 
-    assert server.parse_route("Tell Codex to run the tests.") == ("Codex", "Run the tests.")
-    assert server.parse_route("dis à codex de lancer les tests") == ("codex", "Lancer les tests")
-    assert server.parse_route("I told him to stop") is None
+    assert phrases.parse_route("Tell Codex to run the tests.") == ("Codex", "Run the tests.")
+    assert phrases.parse_route("dis à codex de lancer les tests") == ("codex", "Lancer les tests")
+    assert phrases.parse_route("I told him to stop") is None
     daemon.threads.update({"c": {"source": "codex", "last": 2}, "a": {"source": "claude", "last": 1}})
     daemon._session_hwnd["c"] = 42
     pasted = []
@@ -597,7 +597,7 @@ def test_turn_result_and_context_from_the_transcript():
 
 
 def test_turn_result_shows_in_the_notch(daemon):
-    from agent_voice.server import result_label
+    from agent_voice.textclean import result_label
 
     daemon.speak("Fixed.", source="claude", final=True, session="a", result={"files": 2, "tests": "passed"})
     st = daemon.status()
@@ -958,7 +958,7 @@ def test_connecting_an_agent_says_how_it_went(daemon, monkeypatch):
 
 
 def test_new_thread_phrases():
-    from agent_voice.server import parse_new_thread
+    from agent_voice.daemon.phrases import parse_new_thread
 
     assert parse_new_thread("New thread: fix the login bug") == ("", "Fix the login bug")
     assert parse_new_thread("start a new conversation with Codex to add a health check") == ("codex", "Add a health check")
@@ -978,11 +978,11 @@ def test_new_session_button_in_the_desktop_app():
 
 
 def test_new_thread_goes_to_the_app_or_a_terminal(daemon, monkeypatch, tmp_path):
-    from agent_voice import launch, server
+    from agent_voice import claudeapp, launch
 
     started = []
-    monkeypatch.setattr(server.claudeapp, "new_session", lambda hwnd, text, folder: started.append(("app", hwnd, text, folder)) or True)
-    monkeypatch.setattr(server.claudeapp, "is_desktop_app", lambda hwnd: hwnd == 7)
+    monkeypatch.setattr(claudeapp, "new_session", lambda hwnd, text, folder: started.append(("app", hwnd, text, folder)) or True)
+    monkeypatch.setattr(claudeapp, "is_desktop_app", lambda hwnd: hwnd == 7)
     monkeypatch.setattr(launch, "open_terminal", lambda agent, prompt, cwd: started.append(("tab", agent, prompt, cwd)))
     monkeypatch.setattr(launch, "targets", lambda app: (["claude-app"] if app else []) + ["claude"])
     daemon._session_hwnd["a"] = 7
@@ -1049,13 +1049,13 @@ def test_out_of_quota_resumes_when_the_limit_resets(daemon, monkeypatch):
 
 
 def test_resume_can_be_asked_for_when_auto_is_off(daemon):
-    from agent_voice import server
+    from agent_voice.daemon import phrases
 
     daemon.config["resume"] = {"auto": False, "message": "Continue."}
     daemon.limit_hit("c", "codex", "You've hit your usage limit. Try again at 3:45 PM.")
     assert not daemon._limited["c"]["resume"] and "Resume" in daemon.banner["text"]
-    assert server.match_resume("resume when it resets") and server.match_resume("reprends quand la limite est levée")
-    assert not server.match_resume("resume the work on the login page")
+    assert phrases.match_resume("resume when it resets") and phrases.match_resume("reprends quand la limite est levée")
+    assert not phrases.match_resume("resume the work on the login page")
     assert daemon.set_resume() and daemon._limited["c"]["resume"]  # the latest one out of quota
 
 
@@ -1113,10 +1113,10 @@ def test_focus_holds_replies_and_catches_up(daemon):
 def test_daily_recap(daemon, monkeypatch):
     import time as t
 
-    from agent_voice import server
+    from agent_voice.daemon import phrases
 
-    assert server.match_recap("Daily recap.") and server.match_recap("what did I do today?")
-    assert not server.match_recap("recap the changes to the login page")
+    assert phrases.match_recap("Daily recap.") and phrases.match_recap("what did I do today?")
+    assert not phrases.match_recap("recap the changes to the login page")
     assert daemon.recap_text()[0] == "Nothing yet today."
     daemon.speak("Voice summary: the tests pass.", source="claude", final=True, session="a")
     daemon.speak("Fixed the parser.", source="codex", final=True, session="c")
@@ -1135,8 +1135,9 @@ def test_daily_recap(daemon, monkeypatch):
     assert daemon.status()["day"]["turns"] == 2 and sum(daemon.status()["day"]["hours"]) == 2
 
 
-def test_shortcuts_and_handoff(daemon, monkeypatch):
-    from agent_voice import server
+def test_shortcuts_and_handoff(patch_daemon, daemon, monkeypatch):
+    from agent_voice import winfocus
+    from agent_voice.daemon import phrases
 
     pasted = []
     monkeypatch.setattr(daemon, "_paste", lambda text, hwnd=0, submit=False, session="": pasted.append((text, submit)))
@@ -1144,18 +1145,18 @@ def test_shortcuts_and_handoff(daemon, monkeypatch):
     daemon._session_hwnd["c"] = 42
     daemon.send_text("c", "commit this")
     assert pasted[-1] == ("Commit the current changes with a clear, short commit message.", True)
-    assert server.parse_handoff("Send this to Codex and ask it to explain it.") == ("Codex", "Explain it.")
-    assert server.parse_handoff("give the screenshot to the notch redesign") == ("the notch redesign", "")
-    assert server.parse_handoff("envoie ça à Codex") == ("Codex", "")
-    assert server.parse_handoff("send the tests to Codex") is None
+    assert phrases.parse_handoff("Send this to Codex and ask it to explain it.") == ("Codex", "Explain it.")
+    assert phrases.parse_handoff("give the screenshot to the notch redesign") == ("the notch redesign", "")
+    assert phrases.parse_handoff("envoie ça à Codex") == ("Codex", "")
+    assert phrases.parse_handoff("send the tests to Codex") is None
     monkeypatch.setattr(daemon, "_copy_selection", lambda: ("def broken(): pass", ""))
     daemon.handoff("codex", "", "en")
     assert pasted[-1] == ("def broken(): pass ", False)  # in its box, waiting for your question
     daemon.handoff("codex", "review this", "en")
     assert pasted[-1][1] and pasted[-1][0].startswith("Review the changes") and pasted[-1][0].endswith("pass")
     monkeypatch.setattr(daemon, "_copy_selection", lambda: ("", ""))
-    monkeypatch.setattr(server.winfocus, "clipboard_png", lambda: b"\x89PNG fake")
-    monkeypatch.setattr(server, "HOME", daemon_home := __import__("pathlib").Path(__import__("tempfile").mkdtemp()))
+    monkeypatch.setattr(winfocus, "clipboard_png", lambda: b"\x89PNG fake")
+    patch_daemon("HOME", daemon_home := __import__("pathlib").Path(__import__("tempfile").mkdtemp()))
     daemon.handoff("codex", "what's wrong here", "en")
     shot = pasted[-1][0].split("\n\n")[1]
     assert shot.endswith(".png") and (daemon_home / "shots").exists()
@@ -1239,13 +1240,13 @@ def test_claude_usage_from_transcripts(tmp_path):
     assert week.estimate("seven_day", now)["resets"] == int(now - 3600 + 7 * 86400)  # weekly: the same schedule
 
 
-def test_limits_from_the_usage_folder_and_claude_refresh(daemon, monkeypatch, tmp_path):
+def test_limits_from_the_usage_folder_and_claude_refresh(patch_daemon, daemon, monkeypatch, tmp_path):
     import json
     import subprocess
 
-    from agent_voice import launch, server
+    from agent_voice import launch
 
-    monkeypatch.setattr(server, "HOME", tmp_path)
+    patch_daemon("HOME", tmp_path)
     (tmp_path / "usage").mkdir()
     (tmp_path / "usage" / "mytool.json").write_text(json.dumps(
         {"agent": "mytool", "five_hour": {"pct": 42, "resets": 4102444800}}), encoding="utf-8")
@@ -1280,18 +1281,18 @@ def test_ntfy_messages_and_batching():
 
 
 def test_phone_notifications_only_when_on_and_away(daemon, monkeypatch):
-    from agent_voice import server
+    from agent_voice import winfocus
 
     pushed = []
     monkeypatch.setattr(daemon.notifier, "push", lambda kind, title, text="": pushed.append((kind, title, text)))
-    monkeypatch.setattr(server.winfocus, "idle_seconds", lambda: 0.0)
+    monkeypatch.setattr(winfocus, "idle_seconds", lambda: 0.0)
     daemon.speak("Voice summary: shipped.", source="claude", final=True, session="a")
     assert pushed == [] and daemon.status()["phone"] == {"enabled": False}  # off: nothing, ever
     status = daemon.set_phone(True)
     assert status["enabled"] and status["url"].startswith("https://ntfy.sh/agent-voice-")
     daemon.speak("Voice summary: shipped again.", source="claude", final=True, session="a")
     assert pushed == []  # you're at the PC
-    monkeypatch.setattr(server.winfocus, "idle_seconds", lambda: 600.0)
+    monkeypatch.setattr(winfocus, "idle_seconds", lambda: 600.0)
     daemon.speak("Voice summary: shipped once more.", source="claude", final=True, session="a")
     daemon.request_permission("c", "Bash", "deploy", source="codex")
     assert pushed == [("done", "Claude Code", "shipped once more."), ("permission", "Codex", "Wants to deploy.")]
@@ -1304,7 +1305,7 @@ def test_phone_notifications_only_when_on_and_away(daemon, monkeypatch):
 def test_scheduled_prompts(daemon, monkeypatch):
     import time as t
 
-    from agent_voice import server
+    from agent_voice import launch
 
     sent, started = [], []
     monkeypatch.setattr(daemon, "_send_to", lambda session, message, lang: sent.append((session, message)))
@@ -1332,7 +1333,7 @@ def test_scheduled_prompts(daemon, monkeypatch):
     assert daemon.schedule_said("in 20 minutes, new thread with codex: add logging", "en", "")
     assert daemon._schedules[-1]["new"] == {"target": "codex", "cwd": ""}
     assert not daemon.schedule_said("run the tests", "en", "")
-    assert one["id"] == 1 and server.launch.LABELS["claude-app"] == "Claude app"
+    assert one["id"] == 1 and launch.LABELS["claude-app"] == "Claude app"
 
 
 def test_schedule_times():
@@ -1359,15 +1360,15 @@ def test_schedule_times():
 def test_cues_and_chimes_are_soft():
     import numpy as np
 
-    from agent_voice import server
+    from agent_voice.daemon import sounds
 
     for kind in ("done", "attention"):
-        audio, rate = server.chime_audio(kind, 0.35)
+        audio, rate = sounds.chime_audio(kind, 0.35)
         assert abs(float(np.abs(audio).max()) - 0.35) < 1e-3 and abs(float(audio[-1])) < 1e-3  # no click at the end
         spectrum = np.abs(np.fft.rfft(audio))
         freqs = np.fft.rfftfreq(len(audio), 1 / rate)
         assert spectrum[freqs > 2500].sum() < 0.02 * spectrum.sum()  # nothing shrill
-    cue, _ = server.tone_audio(((700.0, 0.0),), 0.16, decay=14.0, tail=0.18)
+    cue, _ = sounds.tone_audio(((700.0, 0.0),), 0.16, decay=14.0, tail=0.18)
     assert len(cue) < 0.25 * 44100 and float(np.abs(cue).max()) <= 0.161
 
 
@@ -1458,14 +1459,14 @@ def test_screenshot_conversion_handles_24_and_32_bits():
 
 
 def test_take_back_phrases_and_look_at_this():
-    from agent_voice import server
+    from agent_voice.daemon import phrases
 
-    assert server.match_take_back("Wait!") == "hold" and server.match_take_back("No, cancel that.") == "cancel"
-    assert server.match_take_back("Send it now") == "send" and server.match_take_back("annule") == "cancel"
-    assert server.match_take_back("wait until the tests pass") is None  # a sentence is more of the message
-    assert server.parse_look("Look at this and tell me why it's red.") == "Tell me why it's red."
-    assert server.parse_look("look at this") == "" and server.parse_look("Regarde ça, c'est cassé") == "C'est cassé"
-    assert server.parse_look("look at the tests") is None
+    assert phrases.match_take_back("Wait!") == "hold" and phrases.match_take_back("No, cancel that.") == "cancel"
+    assert phrases.match_take_back("Send it now") == "send" and phrases.match_take_back("annule") == "cancel"
+    assert phrases.match_take_back("wait until the tests pass") is None  # a sentence is more of the message
+    assert phrases.parse_look("Look at this and tell me why it's red.") == "Tell me why it's red."
+    assert phrases.parse_look("look at this") == "" and phrases.parse_look("Regarde ça, c'est cassé") == "C'est cassé"
+    assert phrases.parse_look("look at the tests") is None
 
 
 def _taking_back(daemon, monkeypatch, seconds=0.3):
@@ -1522,22 +1523,22 @@ def test_voice_only_in_headphones(daemon):
     assert outputs.kind_of(3) == "headphones" and outputs.kind_of(1) == "speakers" and outputs.kind_of(8) == ""
 
 
-def test_look_at_this_sends_a_picture_of_the_window(daemon, monkeypatch, tmp_path):
-    from agent_voice import server
+def test_look_at_this_sends_a_picture_of_the_window(patch_daemon, daemon, monkeypatch, tmp_path):
+    from agent_voice import winfocus
 
     pasted = []
     monkeypatch.setattr(daemon, "_paste", lambda text, hwnd=0, submit=False, session="": pasted.append((text, submit)))
-    monkeypatch.setattr(server, "HOME", tmp_path)
-    monkeypatch.setattr(server.winfocus, "foreground", lambda: 5)
-    monkeypatch.setattr(server.winfocus, "title", lambda hwnd: "Chrome")
-    monkeypatch.setattr(server.winfocus, "window_png", lambda hwnd: b"\x89PNG fake")
+    patch_daemon("HOME", tmp_path)
+    monkeypatch.setattr(winfocus, "foreground", lambda: 5)
+    monkeypatch.setattr(winfocus, "title", lambda hwnd: "Chrome")
+    monkeypatch.setattr(winfocus, "window_png", lambda hwnd: b"\x89PNG fake")
     daemon.threads["a"] = {"source": "claude", "last": 1}
     daemon.look_at("a", "Why is the button grey?", "en")
     text, sent = pasted[-1]
     assert sent and text.startswith("Why is the button grey?\n\n") and text.endswith(".png")
     daemon.look_at("a", "", "en")
     assert pasted[-1][1] is False and pasted[-1][0].endswith(".png ")  # waits in its box for your question
-    monkeypatch.setattr(server.winfocus, "window_png", lambda hwnd: b"")
+    monkeypatch.setattr(winfocus, "window_png", lambda hwnd: b"")
     daemon.look_at("a", "", "en")
     assert "Couldn't take a picture" in daemon.banner["text"]
 
@@ -1579,9 +1580,10 @@ def test_the_natural_voice_kokoro(daemon, monkeypatch, tmp_path):
 
 
 def test_talking_over_the_voice_stops_it(daemon, monkeypatch):
-    from agent_voice import server, stt
+    from agent_voice import stt
+    from agent_voice.daemon import phrases
 
-    assert server.match_interrupt("No, wait!") and server.match_interrupt("arrête") and not server.match_interrupt(
+    assert phrases.match_interrupt("No, wait!") and phrases.match_interrupt("arrête") and not phrases.match_interrupt(
         "no I meant the other file")
     daemon.transcriber = type("T", (), {"transcribe": lambda self, audio: (said[0], "en")})()
     daemon._output.kind = "speakers"
@@ -1753,8 +1755,8 @@ def test_todo_categories_and_sections():
     assert todo_sections(box.status()["todos"])[1][1] == [("", [box._find("todos", pr["id"])])]
 
 
-def test_companion_said_and_due(daemon, monkeypatch):
-    monkeypatch.setattr(server_module(), "_beep", lambda freq: None)
+def test_companion_said_and_due(patch_daemon, daemon, monkeypatch):
+    patch_daemon("_beep", lambda freq: None)
     assert daemon.companion_said("Timer 10 minutes for the pasta", "en")
     assert daemon.companion_said("Add call the bank to my list", "en")
     assert not daemon.companion_said("Run the tests again", "en")
@@ -1768,14 +1770,14 @@ def test_companion_said_and_due(daemon, monkeypatch):
     daemon._companion_due("reminder", {"id": 9, "text": "Stand-up", "at": 100}, now=100)
     assert daemon.banner["kind"] == "reminder" and daemon.chimes == ["attention"]  # shown, silently
     # The companion's mic: not a command, so it joins the to-do list
-    daemon._handle_heard("Water the plants", "en", server_module().COMPANION, 0, None, None, False)
+    daemon._handle_heard("Water the plants", "en", _phrases().COMPANION, 0, None, None, False)
     assert daemon.status()["companion"]["todos"][-1]["text"] == "Water the plants"
 
 
-def server_module():
-    from agent_voice import server
+def _phrases():
+    from agent_voice.daemon import phrases
 
-    return server
+    return phrases
 
 
 def test_companion_endpoints_and_mcp_todo(daemon, monkeypatch):
@@ -1825,8 +1827,7 @@ def test_companion_endpoints_and_mcp_todo(daemon, monkeypatch):
         httpd.server_close()
 
 
-def test_pomodoro_cycles_focus_and_breaks(daemon, monkeypatch):
-    from agent_voice import server
+def test_pomodoro_cycles_focus_and_breaks(patch_daemon, daemon, monkeypatch):
     from agent_voice.companion import Companion, parse_command
 
     box = Companion(None, lambda data: None, {"focus": 25, "short": 5, "long": 15, "every": 2})
@@ -1848,7 +1849,7 @@ def test_pomodoro_cycles_focus_and_breaks(daemon, monkeypatch):
     assert parse_command("Start a pomodoro", 0) == {"kind": "pomodoro", "action": "start"}
     assert parse_command("Arrête le pomodoro", 0) == {"kind": "pomodoro", "action": "stop"}
     # The daemon: the phase that ended, said; the next one has started
-    monkeypatch.setattr(server, "_beep", lambda freq: None)
+    patch_daemon("_beep", lambda freq: None)
     assert daemon.companion_said("start the pomodoro", "en")
     pomo = daemon.status()["companion"]["pomodoro"]
     assert pomo["phase"] == "focus" and pomo["focus_length"] == 1500
@@ -1986,10 +1987,10 @@ def test_agenda_reads_outlook_items_without_indexing():
     assert "/" not in query
 
 
-def test_agent_todos_focus_sessions_and_notes(daemon, monkeypatch):
+def test_agent_todos_focus_sessions_and_notes(patch_daemon, daemon, monkeypatch):
     from agent_voice import server
 
-    monkeypatch.setattr(server, "_beep", lambda freq: None)
+    patch_daemon("_beep", lambda freq: None)
     daemon.speak("All migrated.\n\nTo-do for you: run the migration on staging\nVoice summary: done.",
                  source="claude", final=True, session="a")
     daemon.speak("**To-do for you:** run the migration on staging", source="claude", final=True, session="a")
@@ -2303,10 +2304,10 @@ def test_join_a_meeting(daemon, monkeypatch):
     import time as t
     import webbrowser
 
-    from agent_voice import server
+    from agent_voice.daemon import phrases
 
-    assert server.match_join("Join my meeting.") and server.match_join("rejoins la réunion")
-    assert not server.match_join("join the two lists in utils.py")
+    assert phrases.match_join("Join my meeting.") and phrases.match_join("rejoins la réunion")
+    assert not phrases.match_join("join the two lists in utils.py")
     opened = []
     monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url))
     now = t.time()
@@ -2328,10 +2329,10 @@ def test_join_a_meeting(daemon, monkeypatch):
 def test_morning_brief(daemon, monkeypatch):
     import time as t
 
-    from agent_voice import server
+    from agent_voice.daemon import phrases
 
-    assert server.match_brief("Morning brief.") and server.match_brief("What's my day?")
-    assert server.match_brief("c'est quoi ma journée ?") and not server.match_brief("brief Codex on the bug")
+    assert phrases.match_brief("Morning brief.") and phrases.match_brief("What's my day?")
+    assert phrases.match_brief("c'est quoi ma journée ?") and not phrases.match_brief("brief Codex on the bug")
     assert daemon.brief_text() == ("", "")  # nothing to tell: no banner by itself
     now = t.time()
     daemon.state["day"] = {"date": "2026-01-01", "hours": [0] * 24,
@@ -2417,3 +2418,26 @@ def test_meeting_alert_joins_or_snoozes(daemon, monkeypatch):
     daemon.banner = None
     daemon._check_meetings(now)
     assert daemon.banner is None  # turned off
+
+
+def test_whisper_loads_offline_once_downloaded(monkeypatch):
+    """A downloaded model never reaches the network again; only a missing one is fetched."""
+    import sys
+    import types
+
+    from agent_voice import stt
+
+    calls = []
+
+    class FakeModel:
+        def __init__(self, name, device, compute_type, local_files_only=False):
+            calls.append(local_files_only)
+            if local_files_only and name == "missing":
+                raise OSError("not in the cache")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=FakeModel))
+    stt.Transcriber({"stt": {"model": "small", "compute_type": "int8"}})._load()
+    assert calls == [True]
+    calls.clear()
+    stt.Transcriber({"stt": {"model": "missing", "compute_type": "int8"}})._load()
+    assert calls == [True, False]

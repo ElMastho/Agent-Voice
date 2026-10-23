@@ -59,7 +59,14 @@ class Transcriber:
                 from faster_whisper import WhisperModel
 
                 log.info("loading whisper model %s", self.cfg["model"])
-                self._model = WhisperModel(self.cfg["model"], device="cpu", compute_type=self.cfg["compute_type"])
+                args = (self.cfg["model"],)
+                kwargs = {"device": "cpu", "compute_type": self.cfg["compute_type"]}
+                try:
+                    # Once downloaded, offline: otherwise every start asks Hugging Face for the latest revision.
+                    self._model = WhisperModel(*args, **kwargs, local_files_only=True)
+                except Exception:
+                    log.info("whisper model %s not downloaded yet: fetching it", self.cfg["model"])
+                    self._model = WhisperModel(*args, **kwargs)
             return self._model
 
     def warm_up(self) -> None:

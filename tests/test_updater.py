@@ -146,6 +146,7 @@ def test_result_file_is_read_once(tmp_path, monkeypatch):
 
 def test_daemon_says_how_to_update(monkeypatch):
     from agent_voice import server
+    from agent_voice.daemon import updates
 
     d = server.Daemon.__new__(server.Daemon)
     d.banner, d._release, d.state = None, {}, {}
@@ -156,11 +157,11 @@ def test_daemon_says_how_to_update(monkeypatch):
     monkeypatch.setattr(updater, "git_update", lambda repo: pulls.append(repo) or why[0])
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: spawned.append(a))
     why = ["you have local changes in the agent-voice folder"]
-    d.update = {"version": "0.6.0", "url": server.RELEASES_PAGE, "how": "git", "state": ""}
+    d.update = {"version": "0.6.0", "url": updates.RELEASES_PAGE, "how": "git", "state": ""}
     d.install_update()
     assert "git pull" in d.banner["text"] and d.banner["kind"] == "note" and not spawned  # how to, by hand
     why[0] = ""
-    d.update = {"version": "0.6.0", "url": server.RELEASES_PAGE, "how": "git", "state": ""}
+    d.update = {"version": "0.6.0", "url": updates.RELEASES_PAGE, "how": "git", "state": ""}
     d.install_update()
     assert "Updated to version 0.6.0" in d.banner["text"] and d.update["state"] == "installing"
     assert pulls == [Path("repo"), Path("repo")] and spawned and "restart" in spawned[0][0]
@@ -171,12 +172,13 @@ def test_daemon_says_how_to_update(monkeypatch):
 
 def test_failed_download_changes_nothing(monkeypatch):
     from agent_voice import server
+    from agent_voice.daemon import updates
 
     d = server.Daemon.__new__(server.Daemon)
     d.state = {}
     d.banner, d._release = None, {"asset": {"browser_download_url": "x", "size": 1}}
     d._title = lambda session, source: ""
-    d.update = {"version": "0.6.0", "url": server.RELEASES_PAGE, "how": "auto", "state": ""}
+    d.update = {"version": "0.6.0", "url": updates.RELEASES_PAGE, "how": "auto", "state": ""}
 
     def offline(asset, progress=None):
         raise OSError("offline")
@@ -188,12 +190,12 @@ def test_failed_download_changes_nothing(monkeypatch):
     assert not launched and d.update["state"] == "" and "Nothing was changed" in d.banner["text"]
 
 
-def test_check_for_updates_now(monkeypatch, tmp_path):
-    from agent_voice import config, server
+def test_check_for_updates_now(patch_daemon, monkeypatch, tmp_path):
+    from agent_voice import config, history, server
 
-    monkeypatch.setattr(server, "load_state", lambda: {})
-    monkeypatch.setattr(server, "save_state", lambda state: None)
-    monkeypatch.setattr(server.history, "PATH", tmp_path / "history.db")
+    patch_daemon("load_state", lambda: {})
+    patch_daemon("save_state", lambda state: None)
+    monkeypatch.setattr(history, "PATH", tmp_path / "history.db")
     d = server.Daemon(config.load_config(), start_threads=False)
     installs = []
     monkeypatch.setattr(d, "install_update", lambda: installs.append(d.update["version"]))

@@ -8,7 +8,7 @@ A Windows-first Python app (macOS and Linux in beta) with three cooperating proc
 
 | Process | Entry point | Role |
 |---|---|---|
-| **Daemon** | `agent-voice serve` → `agent_voice/server.py` | Owns the models, audio, global hotkeys and a local HTTP API on `127.0.0.1:59125` |
+| **Daemon** | `agent-voice serve` → `agent_voice/server.py` + `agent_voice/daemon/` | Owns the models, audio, global hotkeys and a local HTTP API on `127.0.0.1:59125` |
 | **Hook** (short-lived, per event) | `agent-voice hook <agent>` → `agent_voice/hooks.py` | Called by Claude Code / Codex / Gemini CLI / Cursor; extracts the reply text and POSTs it to the daemon |
 | **Widget + tray** | `agent-voice widget` → `agent_voice/widget.py` | PySide6 UI (the notch by default, or a floating bar); polls `/status` while animating, long-polls it at rest, and calls daemon endpoints |
 | **MCP server** (per app session) | `agent-voice mcp` → `agent_voice/mcp.py` | Started by MCP apps (Antigravity, Claude Desktop, Windsurf, VS Code, and Codex/Gemini/Cursor alongside their hooks): `speak`, `notify`, `ask_user`, `set_status` over stdio |
@@ -23,7 +23,13 @@ The daemon launches the widget on start (`config.widget.enabled`). A Windows Sta
 agent_voice/
   cli.py        argparse entry point (all subcommands)
   config.py     defaults + ~/.agent-voice/{config,state}.json
-  server.py     Daemon class (speak queue, auto-listen, push-to-talk, hotkeys) + HTTP handler
+  server.py     the HTTP API (`_allowed`, routes), the single-instance lock, serve()
+  daemon/       the Daemon, one mixin per part, all sharing one state (set up in core.Daemon.__init__):
+                core (worker, /status) · settings (switches, modes, _say) · speech (replies) · needs (approvals,
+                questions) · listening (reply mic, barge-in, take-back) · threads (windows, _paste) · agents
+                (connect, new thread) · handoff · limits · phone · schedules · tools (Utils) · day (music,
+                meetings, brief, recap) · presence (away, calls) · sound (ducking) · desktop_apps · updates ·
+                wake · hotkeys; plus phrases (what you say, parsed), sounds (cues, chimes), common
   tts.py        Speaker: Piper (or Kokoro) synth thread -> playback thread, sentence by sentence
   history.py    every prompt and reply in a local SQLite FTS5 file, searched from the notch's History box
   companion.py  Utils' state: Pomodoro, timers, stopwatch, to-do, reminders, notes (state.json); their voice phrases
@@ -85,7 +91,7 @@ The daemon and widget run as `pythonw` in the background. **Code changes need a 
 5. **Local API stays locked down.** `_allowed()` in `server.py` rejects any `Origin` header, a `Host` other than `127.0.0.1:<port>`/`localhost:<port>`, non-JSON POSTs, and bodies over 1 MB. Every new endpoint goes through it; never bind to anything but `127.0.0.1` (`serve()` ignores any other `host` in the config: `config.LOOPBACK`). The browser extension never calls the API: it goes through the native host, which only our extension id may start (`allowed_origins`, pinned by the manifest's `key`) and which only accepts the sites in `native_host.SITES`.
 6. **The widget never steals focus.** It uses `WS_EX_NOACTIVATE` + `Qt.WindowDoesNotAcceptFocus`; dictation pastes into the user's agent window and depends on this.
 7. **The widget is a view.** State lives in the daemon (`/status`). The widget only keeps its own position/visibility (`~/.agent-voice/widget.json`; not `state.json`, which the daemon rewrites wholesale).
-8. **Nothing leaves the machine.** No network calls except model downloads (Piper voices, Whisper weights, the wake-word model, Kokoro's files checked against pinned SHA-256 sums in `kokoro.FILES`) on first use, the optional release check (`update_check`, daily), calendar links the user adds (`agenda.fetch`, every 15 min, only links in `state.json`'s `calendars`), phone notifications once the user turns them on (`ntfy.py`: only through `Daemon._push`, gated by `_ntfy_settings()` returning None while off; `ntfy.content` decides how much text), and the release zip when the user clicks *Update* (`updater.py`: the exact asset, size/checksum/CRC verified before anything is swapped; the swap rolls back on failure). `apps.py` reads only the listed apps' notifications (the filter is in the SQL query) and is off by default.
+8. **Nothing leaves the machine.** No network calls except model downloads (Piper voices, Whisper weights (then loaded with `local_files_only`: no revision check at each start), the wake-word model, Kokoro's files checked against pinned SHA-256 sums in `kokoro.FILES`) on first use, the optional release check (`update_check`, daily), calendar links the user adds (`agenda.fetch`, every 15 min, only links in `state.json`'s `calendars`), phone notifications once the user turns them on (`ntfy.py`: only through `Daemon._push`, gated by `_ntfy_settings()` returning None while off; `ntfy.content` decides how much text), and the release zip when the user clicks *Update* (`updater.py`: the exact asset, size/checksum/CRC verified before anything is swapped; the swap rolls back on failure). `apps.py` reads only the listed apps' notifications (the filter is in the SQL query) and is off by default.
 9. **Battery first.** ONNX Runtime sessions we create never busy-wait (Piper's and Kokoro's both go through `tts._quiet_session`: `allow_spinning=0`, 2 threads; the default spinning cost ~20x the CPU per sentence). Feed models whole chunks, not 30 ms blocks. The wake word runs a volume gate first and the keyword spotter only on finished utterances.
 10. **The widget doesn't redraw at rest.** `_tick` drops to 4 Hz and skips `update()` once `_is_still()` (the one exception: the working light glides at 15 fps while the notch is down, `_glow_moving()`; the ready rim is still); status polling slows to 0.6 s. Any new animation must be covered by `_is_still()`, or the widget redraws at 30 fps forever. At rest the widget long-polls `/status?wait=<tag>` (one request per change, or every 20 s): keep `server.status_tag` blind to values that change without anything visible changing (mic level, seconds).
 
@@ -120,6 +126,7 @@ The daemon and widget run as `pythonw` in the background. **Code changes need a 
 - **Never resize the notch every frame**: resizing a see-through window re-uploads all of it (the jerky opening). The notch's window is a canvas sized once for where an animation is going and trimmed when it settles; the island is drawn at `_vw` x `_vis_h()` inside it, and `visual_rect()` is where it is on screen.
 - **Sounds never go through `sounddevice.play()` outside `tts.py`**: it shares one global stream with the voice, so a cue there would cut the speech off. Cues and chimes use `_play_apart` (a stream of their own), built by `tone_audio` (no harmonics above the note, eased in and out). Never `winsound.Beep`.
 - **Ducking restores what it lowered**: `Ducker` saves the original volumes to `state.json` (`ducked`) before fading, and the next start puts them back.
+- **The daemon is one object in parts** (`agent_voice/daemon/`): a new method goes in the part it belongs to, and any state it needs is set up in `core.Daemon.__init__`. Each part imports its own names, so a test patches `save_state`, `_beep`, `HOME`... with the `patch_daemon` fixture (every part at once), never on one module.
 - **Tests never touch `~/.agent-voice`**: `tests/conftest.py` points `AGENT_VOICE_HOME` at a temporary folder before anything is imported. Keep it first.
 - **Replies carry `full`** (hooks -> `/speak`): the whole reply when what's read out is only its summary. The preview and the history use it; never speak it.
 - **Barge-in listens only in headphones** (`_barge_ok`): through speakers the mic hears the voice and stops it. It needs 300 ms of sound (`start_blocks=10`) to cut in, and hands what you said to `_handle_heard`, the same path as the reply mic.

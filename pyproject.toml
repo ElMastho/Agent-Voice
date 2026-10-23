@@ -42,7 +42,7 @@ dev = ["pytest", "pillow"]
 agent-voice = "agent_voice.cli:main"
 
 [tool.setuptools]
-packages = ["agent_voice"]
+packages = ["agent_voice", "agent_voice.daemon"]
 
 [tool.setuptools.package-data]
 agent_voice = ["browser/*"]

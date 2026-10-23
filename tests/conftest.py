@@ -19,6 +19,26 @@ def never_run_claude(monkeypatch):
     monkeypatch.setattr(install, "claude_mcp", lambda remove=False: "to-do list (test)")
 
 
+@pytest.fixture
+def patch_daemon(monkeypatch):
+    """Patch a name the daemon's parts import (save_state, _beep, HOME...) in every part that has it: each module of
+    agent_voice/daemon/ holds its own reference."""
+    import importlib
+    import pkgutil
+
+    from agent_voice import daemon
+
+    parts = [importlib.import_module(f"agent_voice.daemon.{m.name}") for m in pkgutil.iter_modules(daemon.__path__)]
+
+    def patch(name, value):
+        found = [part for part in parts if hasattr(part, name)]
+        assert found, f"no part of the daemon has {name}"
+        for part in found:
+            monkeypatch.setattr(part, name, value)
+
+    return patch
+
+
 def pytest_sessionfinish(session, exitstatus):
     session.config.agent_voice_status = int(exitstatus)
 

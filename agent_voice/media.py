@@ -13,6 +13,8 @@ import logging
 import re
 import subprocess
 import sys
+import threading
+import time
 
 log = logging.getLogger("agent_voice.media")
 
@@ -97,7 +99,41 @@ def _session_playing() -> dict | None:
                     "artist": props.artist or "", "playing": playing}
         return None
 
-    return asyncio.run(read())
+    return _within(lambda: asyncio.run(read()))
+
+
+SESSION_WAIT = 2.0  # s: Windows' media service answers in a few ms, or (wedged) never
+RETRY_STUCK = 60.0  # s before asking a service that didn't answer again
+_stuck: list[tuple[float, threading.Thread]] = []  # looks it never answered (they can't be cancelled)
+
+
+def _within(look):
+    """`look()` on a thread of its own, for SESSION_WAIT at most: a wedged media service once froze the player on
+    a closed video (the request never returns, and cancelling it doesn't stop it). None meanwhile: the window
+    titles say what plays."""
+    _stuck[:] = [(at, t) for at, t in _stuck if t.is_alive()]
+    if _stuck and (time.time() - _stuck[-1][0] < RETRY_STUCK or len(_stuck) >= 3):
+        return None
+    out: list = []
+
+    def run():
+        try:
+            out.append((True, look()))
+        except Exception as e:
+            out.append((False, e))
+
+    thread = threading.Thread(target=run, name="media-session", daemon=True)
+    thread.start()
+    thread.join(SESSION_WAIT)
+    if not out:
+        if not _stuck:
+            log.warning("Windows' media sessions don't answer: reading the players' windows instead")
+        _stuck.append((time.time(), thread))
+        return None
+    ok, value = out[0]
+    if not ok:
+        raise value
+    return value
 
 
 def _windows_now() -> dict | None:

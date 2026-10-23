@@ -1918,6 +1918,35 @@ def test_now_playing_forgets_closed_players(monkeypatch):
     windows[:] = []
     assert media._windows_playing() is None and "YouTube" not in media._LAST
 
+
+def test_media_session_that_never_answers_doesnt_freeze_the_player(monkeypatch):
+    import threading
+
+    from agent_voice import media
+
+    monkeypatch.setattr(media, "SESSION_WAIT", 0.05)
+    monkeypatch.setattr(media, "_stuck", [])
+    wedged = threading.Event()
+    calls = []
+
+    def hang():
+        calls.append(1)
+        wedged.wait(5)
+        return {"app": "YouTube", "title": "A closed video"}
+
+    try:
+        assert media._within(hang) is None  # gave up: the window titles say what plays
+        assert media._within(hang) is None and len(calls) == 1  # not asked again while it's still stuck
+    finally:
+        wedged.set()
+    media._stuck[0][1].join(2)  # it answered at last: asked again
+    assert media._within(lambda: {"title": "ok"}) == {"title": "ok"}
+    try:
+        media._within(lambda: 1 / 0)
+        raise AssertionError("an error inside is still raised")
+    except ZeroDivisionError:
+        pass
+
 def test_agenda_reads_ical_repeats_and_exceptions():
     from datetime import date, datetime
 

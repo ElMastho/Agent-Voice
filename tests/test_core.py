@@ -346,6 +346,7 @@ def daemon(monkeypatch, tmp_path):
     monkeypatch.setattr(server.winfocus, "is_window", lambda hwnd: True)
     d = server.Daemon(config.load_config(), start_threads=False)
     d.config["take_back"]["seconds"] = 0  # sent at once, unless a test is about the take-back
+    d.config["brief"]["enabled"] = False  # the morning brief depends on the hour: only where a test asks for it
     d.chimes = []
     monkeypatch.setattr(d, "play_chime", lambda kind: d.muted or d.chimes.append(kind))  # silent, like the real one
     return d

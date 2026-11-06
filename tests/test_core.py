@@ -2415,24 +2415,38 @@ def test_meeting_alert_joins_or_snoozes(daemon, monkeypatch):
     daemon.agenda = [{"title": "Design review", "location": "", "join": "https://us02web.zoom.us/j/1",
                       "start": now + 100, "end": now + 1900, "all_day": False}]
     daemon.banner = None
-    daemon._check_meetings(now - 120)  # 3 min 40 s before: not yet
+    daemon._check_meetings(now - 900)  # 16 min 40 s before: not yet
     assert daemon.banner is None
-    daemon._check_meetings(now)  # within 2 minutes of it
+    daemon._check_meetings(now - 800)  # within 15 minutes of it, as Outlook
     banner = daemon.banner
-    assert banner["kind"] == "meeting" and banner["text"] == "Design review starts in 2 min."
-    assert banner["meeting"] == {"start": int(now + 100), "join": True}
+    assert banner["kind"] == "meeting" and banner["text"] == "Design review starts in 15 min."
+    assert banner["meeting"] == {"start": int(now + 100), "end": int(now + 1900), "join": True}
     daemon.banner = None
-    daemon._check_meetings(now + 10)
+    daemon._check_meetings(now - 700)
     assert daemon.banner is None  # once
-    assert daemon.snooze_meeting(now + 100, 300)
+    daemon._check_meetings(now + 100)  # left alone: told again as it starts
+    assert daemon.banner["text"] == "Design review starts now."
+    daemon.banner = None
+    daemon._check_meetings(now + 110)
+    assert daemon.banner is None
+    assert daemon.snooze_meeting(now + 100, at=now + 400)  # Snooze: 5 min after its start
+    assert not daemon.snooze_meeting(now + 100, at=now + 2000)  # not past its end
     daemon._check_meetings(now + 200)
     assert daemon.banner is None  # snoozed for 5 minutes
-    daemon._check_meetings(now + 310)
-    assert daemon.banner["text"] == "Design review started 3 min ago."  # again, once it's on
+    daemon._check_meetings(now + 410)
+    assert daemon.banner["text"] == "Design review started 5 min ago."  # again, once it's on
     assert daemon.join_meeting(now + 100) == "Design review" and opened == ["https://us02web.zoom.us/j/1"]
     daemon.banner = None
     daemon._check_meetings(now + 500)
     assert daemon.banner is None  # joined: never again
+    # Dismissed: not even at its start.
+    daemon.agenda = [{"title": "Retro", "location": "", "join": "", "start": now + 600, "end": now + 1800,
+                      "all_day": False}]
+    daemon._check_meetings(now)
+    assert daemon.banner["text"] == "Retro starts in 10 min." and daemon.dismiss_meeting(now + 600)
+    daemon.banner = None
+    daemon._check_meetings(now + 600)
+    assert daemon.banner is None
     # Already in a call (you've joined from the app): no alert; without a video link: no Join.
     daemon.agenda = [{"title": "1:1", "location": "Room 3", "join": "", "start": now + 60, "end": now + 900,
                       "all_day": False}]
@@ -2470,3 +2484,31 @@ def test_whisper_loads_offline_once_downloaded(monkeypatch):
     calls.clear()
     stt.Transcriber({"stt": {"model": "missing", "compute_type": "int8"}})._load()
     assert calls == [True, False]
+
+
+def test_scheduled_prompt_edited_or_sent_now(daemon, monkeypatch):
+    import time as t
+
+    sent = []
+    monkeypatch.setattr(daemon, "_send_to", lambda session, text, lang: sent.append((session, text)))
+    daemon.threads["c"] = {"source": "codex", "last": 1}
+    at = t.time() + 3600
+    item = daemon.add_schedule("run the tests", at, session="c")
+    assert "It's in your Agenda" in daemon.banner["text"]
+    assert daemon.edit_schedule(item["id"], prompt="run the tests twice", at=at + 600)["at"] == int(at + 600)
+    assert daemon._schedules_status()[0]["prompt"] == "run the tests twice"
+    assert daemon.edit_schedule(999, prompt="x") is None
+    try:
+        daemon.edit_schedule(item["id"], prompt="  ")
+        raise AssertionError("an empty prompt was saved")
+    except ValueError:
+        pass
+    assert daemon.send_schedule_now(item["id"], prompt="run the tests now")
+    assert daemon._schedules == []  # a one-off: gone from the Agenda
+    daemon.jobs.get_nowait()()
+    assert sent == [("c", "run the tests now")]
+    weekly = daemon.add_schedule("weekly report", at, session="c", repeat="daily")
+    assert daemon.send_schedule_now(weekly["id"])
+    assert [s["id"] for s in daemon._schedules] == [weekly["id"]]  # repeating: its next times stay
+    daemon.jobs.get_nowait()()
+    assert sent[-1] == ("c", "weekly report")

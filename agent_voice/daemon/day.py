@@ -86,9 +86,10 @@ class DayMixin:
             self._agenda_wake.wait(300)
 
     def _check_meetings(self, now: float) -> None:
-        """A meeting about to start (`calendar.alert_minutes` before): its banner, with Join when it has a video
-        link and +5 min. Once per meeting, and again when snoozed; not while you're already in a call."""
-        lead = float(self.config.get("calendar", {}).get("alert_minutes", 2))
+        """A meeting about to start (`calendar.alert_minutes` before, 15 by default, as Outlook): its banner, with Join
+        when it has a video link, Snooze and Dismiss. Once per meeting, and again when snoozed (at its start if left
+        alone); not while you're already in a call."""
+        lead = float(self.config.get("calendar", {}).get("alert_minutes", 15))
         if lead < 0 or self.in_call:
             return
         for e in self.agenda:
@@ -104,7 +105,7 @@ class DayMixin:
                 self._meeting_due(e, now)
 
     def _meeting_due(self, e: dict, now: float) -> None:
-        """'Design review starts in 2 min.' Shown even in Do not disturb (silently), like your reminders."""
+        """'Design review starts in 15 min.' Shown even in Do not disturb (silently), like your reminders."""
         import math
 
         soon, sl = e["start"] - now, self.language
@@ -123,8 +124,10 @@ class DayMixin:
             text += f" {e['location']}"
         join = bool(agenda.join_link(e.get("join") or ""))
         log.info("meeting alert: %r (join link: %s)", e["title"][:60], join)
+        if soon > 60:  # left alone (not dismissed, snoozed or joined), it's told again as it starts, as in Outlook
+            self._meeting_snooze[_meeting_key(e)] = e["start"]
         self._show_banner(text, "", "", kind="meeting", tag="meeting",
-                          extra={"meeting": {"start": int(e["start"]), "join": join}, "snooze": {"seconds": 300}})
+                          extra={"meeting": {"start": int(e["start"]), "end": int(e["end"]), "join": join}})
         self._push("scheduled", tr("Meeting"), text)
         if self.muted:
             return
@@ -133,12 +136,28 @@ class DayMixin:
             self._wake_cancel.set()
             self.speaker.speak(said, sl)
 
-    def snooze_meeting(self, start: float, seconds: float = 300) -> bool:
-        """+5 min on a meeting's banner: told again then (even once it has started, until it ends)."""
-        meeting = next((e for e in self.agenda if int(e["start"]) == int(start) and not e["all_day"]), None)
+    def _meeting_at(self, start: float) -> dict | None:
+        return next((e for e in self.agenda if int(e["start"]) == int(start) and not e["all_day"]), None)
+
+    def snooze_meeting(self, start: float, seconds: float = 300, at: float = 0) -> bool:
+        """Snooze on a meeting's banner: told again `at` (5 min before, at its start, 5 min after...) or in `seconds`,
+        even once it has started, until it ends."""
+        meeting, now = self._meeting_at(start), time.time()
         if meeting is None:
             return False
-        self._meeting_snooze[_meeting_key(meeting)] = time.time() + max(60.0, min(3600.0, float(seconds)))
+        when = max(now + 30.0, float(at)) if at else now + max(60.0, min(3600.0, float(seconds)))
+        if when >= meeting["end"]:
+            return False
+        self._meeting_snooze[_meeting_key(meeting)] = when
+        return True
+
+    def dismiss_meeting(self, start: float) -> bool:
+        """Dismiss on a meeting's banner: not told about it again."""
+        meeting = self._meeting_at(start)
+        if meeting is None:
+            return False
+        self._meeting_alerted.add(_meeting_key(meeting))
+        self._meeting_snooze.pop(_meeting_key(meeting), None)
         return True
 
     def _agenda_status(self) -> dict:

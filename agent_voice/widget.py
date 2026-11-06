@@ -402,6 +402,22 @@ def _when_text(at: float, far: str = "%a") -> str:
     return when.strftime("%H:%M") if soon else when.strftime(far.replace("%a", day_name(when)))
 
 
+def _schedule_when(at: float) -> str:
+    """A scheduled prompt's time as the reply box's When field shows it: '14:00', 'tomorrow 09:00', or further
+    away 'Thu 15:45' (kept as it is unless you change it)."""
+    from datetime import date, datetime, timedelta
+
+    from agent_voice import i18n
+
+    when = datetime.fromtimestamp(at)
+    clock = when.strftime("%H:%M")
+    if when.date() == date.today():
+        return clock
+    if when.date() == date.today() + timedelta(days=1):
+        return f"{'demain' if i18n.LANG == 'fr' else 'tomorrow'} {clock}"
+    return f"{day_name(when)} {clock}"
+
+
 def _focus_words(focus: str) -> str:
     """Why replies are held, in the interface's language: 'call (Teams)', 'presenting', 'meeting'..."""
     if focus.startswith("call (") and focus.endswith(")"):
@@ -618,7 +634,19 @@ def _post(path: str, payload: dict | None = None) -> None:
 # The banner's buttons: (icon, label).
 BANNER_BUTTONS = {"type": ("keyboard", "Reply"), "talk": ("mic", "Talk"), "send": ("send", "Send now"),
                   "edit": ("keyboard", "Edit"), "cancel": ("stop", "Cancel"), "snooze": ("clock", "+5 min"),
-                  "ok": ("check", "Done"), "join": ("calendar", "Join")}
+                  "ok": ("check", "Done"), "join": ("calendar", "Join"), "later": ("clock", "Snooze"),
+                  "dismiss": ("check", "Dismiss")}
+# A meeting's Snooze, as Outlook's: told again this many minutes from its start (only the times still ahead).
+MEETING_SNOOZES = ((-10, "{n} min before"), (-5, "{n} min before"), (0, "At start"), (5, "{n} min after"),
+                   (10, "{n} min after"), (15, "{n} min after"), (30, "{n} min after"))
+
+
+def _meeting_snoozes(start: float, end: float, now: float | None = None) -> list[tuple[str, float]]:
+    """The Snooze choices for a meeting: (label, when), the ones before its end and at least 30 s away; long into
+    it, a few minutes from now instead."""
+    now = time.time() if now is None else now
+    out = [(tr(label, n=abs(m)), start + m * 60) for m, label in MEETING_SNOOZES if now + 30 < start + m * 60 < end]
+    return out or [(tr("In {n} min", n=m), now + m * 60) for m in (5, 10, 15) if now + m * 60 < end]
 # How long a notification stays (Chimes), and how long the read-along text stays once the voice ends.
 SHOW_FOR, LINGER = 10.0, 5.0
 
@@ -646,6 +674,7 @@ class Banner(QWidget):
         self._press: QPointF | None = None
         self._hover = False
         self._hot: str | None = None  # the button under the mouse
+        self.picking = False  # a meeting's Snooze opened: its choices in place of the buttons
         self.on_reply = None  # opens the reply box (set by the widget)
         self.on_close = None  # closed by hand (✕ or swipe): a notch that was tucked goes straight back up
         self._topmost_at = 0.0
@@ -662,14 +691,14 @@ class Banner(QWidget):
 
     def present(self, item: dict, width: int, hold: bool = False) -> None:
         """Show `item`; `hold` keeps it until release() (read along: as long as the voice plays)."""
-        self.item, self.drag, self.holding = item, 0.0, hold
+        self.item, self.drag, self.holding, self.picking = item, 0.0, hold, False
         self.LINES = 9 if item.get("kind") in ("recap", "catchup") else Banner.LINES  # a summary needs the room
         self._layout(width)
         words = len(item.get("text", "").split())
         self.until = 1e12 if hold else time.time() + min(30.0, SHOW_FOR + max(0, words - 12) * 0.5)  # more if long
         if item.get("kind") in ("timer", "reminder"):  # yours: it stays until you say so (or a minute)
             self.until = time.time() + 60.0
-        if item.get("kind") == "meeting":  # until you join, snooze or close it (or five minutes)
+        if item.get("kind") == "meeting":  # until you join, snooze or dismiss it (or five minutes)
             self.until = time.time() + 300.0
         if item.get("kind") == "pending":  # about to be sent: as long as it waits (what happens next replaces it)
             self.until = float(item.get("until") or time.time()) + 2.0
@@ -703,10 +732,15 @@ class Banner(QWidget):
         y, h, right = self.height() - 34, 22, self.width() - 16
         if (self.item or {}).get("kind") in ("timer", "reminder"):  # a timer ended, a reminder: snooze, or done
             return {"ok": QRectF(right - 70, y, 70, h), "snooze": QRectF(right - 70 - 8 - 82, y, 82, h)}
-        if (self.item or {}).get("kind") == "meeting":  # about to start: join it (its video link), or later
-            out = {"snooze": QRectF(right - 82, y, 82, h)}
-            if (self.item.get("meeting") or {}).get("join"):
-                out["join"] = QRectF(right - 82 - 8 - 72, y, 72, h)
+        if (self.item or {}).get("kind") == "meeting":  # about to start: join it (its video link), snooze or dismiss it
+            if self.picking:
+                return self._snooze_chips(y, h)
+            out, fm = {}, QFontMetrics(self.f_head)
+            for key in ("dismiss", "later", "join"):  # as wide as their words (French's are longer)
+                if key != "join" or (self.item.get("meeting") or {}).get("join"):
+                    w = max(62, fm.horizontalAdvance(tr(BANNER_BUTTONS[key][1])) + 36)
+                    out[key] = QRectF(right - w, y, w, h)
+                    right -= w + 8
             return out
         if (self.item or {}).get("kind") == "pending":
             out = {}
@@ -715,6 +749,27 @@ class Banner(QWidget):
                 right -= w + 8
             return out
         return {"talk": QRectF(right - 62, y, 62, h), "type": QRectF(right - 62 - 8 - 70, y, 70, h)}
+
+    def _snooze_choices(self) -> list[tuple[str, float]]:
+        meeting = (self.item or {}).get("meeting") or {}
+        start = float(meeting.get("start") or 0)
+        return _meeting_snoozes(start, float(meeting.get("end") or start + 3600))
+
+    def _snooze_chips(self, y: float, h: float) -> dict[str, QRectF]:
+        """The Snooze choices, in time order, as many as fit on the row ("at:<when>" -> its chip)."""
+        fm, room = QFontMetrics(self.f_head), self.width() - 32
+        chips: list[tuple[str, float]] = []
+        for label, when in self._snooze_choices():
+            w = fm.horizontalAdvance(label) + 22
+            if sum(c[1] for c in chips) + 8 * len(chips) + w > room:
+                break
+            chips.append((f"at:{int(when)}", w))
+        x = self.width() - 16 - sum(c[1] for c in chips) - 8 * max(0, len(chips) - 1)
+        out = {}
+        for key, w in chips:
+            out[key] = QRectF(x, y, w, h)
+            x += w + 8
+        return out
 
     def _wrap(self, text: str, fm: QFontMetrics, width: float) -> list[str]:
         lines, line = [], ""
@@ -861,8 +916,13 @@ class Banner(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(_ink(48 if hot else 22))
             p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
-            p.setFont(self.f_icon)
             p.setPen(_ink(235))
+            if key.startswith("at:"):  # a meeting's Snooze choice: its label alone
+                p.setFont(self.f_head)
+                label = dict((f"at:{int(w)}", t) for t, w in self._snooze_choices()).get(key, "")
+                p.drawText(rect, Qt.AlignCenter, label)
+                continue
+            p.setFont(self.f_icon)
             icon, label = BANNER_BUTTONS[key]
             label = tr(label)
             if key == "snooze":
@@ -910,6 +970,8 @@ class Banner(QWidget):
         swiped = self.drag < -18 or abs(moved.x()) > 60
         clicked = abs(moved.x()) + abs(moved.y()) < 5 and self.item
         if swiped or (clicked and self._button_at(e.position()) == "close"):
+            if self.item and self.item.get("kind") == "meeting":  # closed by hand: dismissed, as its Dismiss
+                _post("/calendar", {"action": "dismiss", "start": (self.item.get("meeting") or {}).get("start", 0)})
             self.dismiss()
             if self.on_close:
                 self.on_close()
@@ -919,8 +981,14 @@ class Banner(QWidget):
                 start = (self.item.get("meeting") or {}).get("start", 0)
                 if button == "join":
                     _post("/calendar", {"action": "join", "start": start})
-                elif button == "snooze":
-                    _post("/calendar", {"action": "snooze", "start": start, "seconds": 300})
+                elif button == "later":  # Snooze: its choices in place of the buttons
+                    self.picking, self.until = True, max(self.until, time.time() + 60.0)
+                    self.update()
+                    return
+                elif button and button.startswith("at:"):
+                    _post("/calendar", {"action": "snooze", "start": start, "at": int(button[3:])})
+                elif button == "dismiss":
+                    _post("/calendar", {"action": "dismiss", "start": start})
                 elif not button:  # the banner itself: the agenda, where the meeting is
                     return
                 self.dismiss()
@@ -1120,9 +1188,50 @@ class ReplyBox(QWidget):
             f"#talk, #pick{{font-family:'{ICON_FONT}','{FONT_TEXT}';}}"))
         self.hint.setStyleSheet(_qss("color:rgba(255,255,255,90);"))
 
+    def _plain(self) -> None:
+        """Back from editing a scheduled prompt: the box sends, as usual."""
+        self.editing = None
+        self.when.setPlaceholderText(tr("Send now, or at 14:00 / in 30 min"))
+        self.hint.setText(tr("Enter to send · Shift+Enter for a new line · Esc to close"))
+
+    def open_schedule(self, item: dict, anchor: QRectF, width: int) -> None:
+        """A prompt from the Agenda: fix its words or its time (Enter saves), or empty the time to send it now."""
+        self.editing = dict(item)
+        self.session = f"schedule:{item['id']}"  # opened for a thread later, the box starts empty
+        self.title.setText(tr("Scheduled for {title}", title=item.get("title") or tr("the conversation")))
+        self.options.hide()
+        self.folder_row.hide()
+        self.edit.setPlainText(item.get("prompt") or "")
+        self._when_shown = _schedule_when(float(item["at"]))
+        self.when.setText(self._when_shown)
+        self.when.setStyleSheet("")
+        self.when.setPlaceholderText(tr("Empty: send it now"))
+        self.hint.setText(tr("Enter to save · empty the time to send it now · Esc to close"))
+        self._show(anchor, width, 132)
+
+    def _save_schedule(self, text: str) -> None:
+        from agent_voice.schedule import parse_when
+
+        item, when = self.editing, self.when.text().strip()
+        if not when:
+            self.hide()
+            _post("/schedule_now", {"id": item["id"], "prompt": text})
+        else:
+            at = item["at"] if when == self._when_shown else parse_when(when, time.time())
+            if not at:  # not a time we understand: say so, keep everything
+                self.when.setStyleSheet("background:rgba(248,113,113,60);")
+                self.when.setFocus()
+                return
+            self.hide()
+            _post("/schedule_edit", {"id": item["id"], "prompt": text, "at": at})
+        self.edit.clear()
+        self.when.clear()
+        self._plain()
+
     def open(self, item: dict, anchor: QRectF, width: int) -> None:
         if item.get("session") != self.session:
             self.edit.clear()  # a draft belongs to its conversation
+        self._plain()
         self.session = item.get("session", "")
         self.title.setText(tr("Reply to {title}", title=item.get('title') or tr('the conversation')))
         self.options.hide()
@@ -1135,6 +1244,7 @@ class ReplyBox(QWidget):
         if self.session != NEW:
             self.edit.clear()
             self.folder.setText(default.get("cwd", ""))
+        self._plain()
         self.recent = [c for c in default.get("recent") or [] if c]
         self.session = NEW
         self.title.setText(tr("New thread"))
@@ -1219,6 +1329,9 @@ class ReplyBox(QWidget):
 
         text = self.edit.toPlainText().strip()
         if not text:
+            return
+        if getattr(self, "editing", None) is not None:
+            self._save_schedule(text)
             return
         when = self.when.text().strip()
         if when:
@@ -2154,18 +2267,30 @@ class SidePanel(QWidget):
                 when = _day_time(at) + (" ↻" if item.get("repeat") else "")
                 text, icon = f"{item['title']}: {item['prompt']}", "send"
                 key, row = f"pdel:{item['id']}", f"prow:{item['id']}"
+                if self._fresh(item["id"], p, now) and p is not None:  # just scheduled: where it went, lit
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(_tone(QColor(139, 124, 255, 60)))
+                    p.drawRoundedRect(QRectF(rect.x() + 4, y, rect.width() - 8, 22), 7, 7)
             self._text(p, QRectF(rect.x() + 14, y, 64, 22), when, self.f_text, 240 if now_on else 110 if past else 220,
                        color="" if past else "#A99BFF")
             self._text(p, QRectF(rect.x() + 80, y, 16, 22), ICONS[icon], self.f_icon, 90 if past else 140, Qt.AlignCenter)
-            self._text(p, QRectF(rect.x() + 100, y, rect.width() - (166 if key.startswith("join:") else 130), 22),
+            hovered = kind == "prompt" and self.hot in (key, row, f"psend:{item['id']}")
+            self._text(p, QRectF(rect.x() + 100, y, rect.width() - (166 if key.startswith("join:") else 214 if hovered
+                                                                   else 130), 22),
                        text, self.f_text, 110 if past else 235 if now_on else 215)
             if key.startswith("join:"):
                 self._chip(p, hits[key], tr("Join"), key, 60 if now_on else 30)
             elif key:
                 hits[key] = QRectF(rect.right() - 26, y + 2, 18, 18)
                 hits[row] = QRectF(rect.x() + 4, y, rect.width() - 34, 22)
-                if self.hot in (key, row):
+                send = f"psend:{item['id']}" if kind == "prompt" else ""
+                if send:  # on hover: Send now, beside the ×; the row itself opens it to edit
+                    hits[send] = QRectF(rect.right() - 108, y + 2, 78, 18)
+                    hits[row] = QRectF(rect.x() + 4, y, rect.width() - 114, 22)
+                if self.hot in (key, row, send):
                     self._text(p, hits[key], ICONS["close"], self.f_icon, 200 if self.hot == key else 110, Qt.AlignCenter)
+                    if send:
+                        self._chip(p, hits[send], tr("Send now"), send, 40)
             y += 24
         half = (rect.width() - 8) / 2
         self._add_row(p, hits, QRectF(rect.x() + 4, y, half, 22), "rem_add", tr("Reminder"))
@@ -2236,7 +2361,7 @@ class SidePanel(QWidget):
         hot = self._key_at(e.position())
         if hot != self.hot:
             self.hot = hot
-            self.setCursor(Qt.PointingHandCursor if hot and not hot.startswith(("trow:", "rrow:", "nrow:", "prow:"))
+            self.setCursor(Qt.PointingHandCursor if hot and not hot.startswith(("trow:", "rrow:", "nrow:"))
                            or (hot or "").startswith("trow:") and self._todo_session(hot) else Qt.ArrowCursor)
             self.update()
 
@@ -2352,10 +2477,25 @@ class SidePanel(QWidget):
             _post("/todo", {"action": "clear_agents"})
         elif kind == "rdel":
             _post("/reminder", {"action": "remove", "id": item_id})
-        elif kind == "pdel":  # a scheduled prompt: it won't be sent
-            _post("/schedule_cancel", {"id": item_id})
+        elif kind in ("pdel", "psend"):  # a scheduled prompt: dropped, or sent now
+            _post("/schedule_cancel" if kind == "pdel" else "/schedule_now", {"id": item_id})
             self.owner.st["schedules"] = [x for x in self.owner.st.get("schedules") or [] if x.get("id") != item_id]
             self.refresh()
+        elif kind == "prow":  # its words or its time, in the reply box
+            self.owner.edit_schedule(item_id)
+
+    def _fresh(self, item_id: int, p, now: float) -> bool:
+        """A prompt scheduled a moment ago: lit for 10 s from when you first see it here, then a single repaint."""
+        fresh = self.owner.fresh_schedules
+        if item_id not in fresh:
+            return False
+        if not fresh[item_id] and p is not None and self.isVisible():
+            fresh[item_id] = now + 10
+            QTimer.singleShot(10_500, self.refresh)
+        if fresh[item_id] and fresh[item_id] <= now:
+            del fresh[item_id]
+            return False
+        return bool(fresh[item_id])
 
     def choose_widgets(self) -> None:
         """Which cards show, in their usual order (kept in widget.json)."""
@@ -2519,6 +2659,9 @@ class VoiceWidget(QWidget):
         self.notch = False
         self.banner = Banner()
         self.reply_box = ReplyBox()
+        self._schedule_ids: set | None = None  # the scheduled prompts seen so far (None: none yet)
+        self.fresh_schedules: dict[int, float] = {}  # just scheduled: lit in the Agenda until then (0: not seen yet)
+        self._agenda_ping = 0.0  # when one was scheduled with the Companion closed: its arrow is lit
         self.history_box = HistoryBox()
         self.preview = Preview()
         # The side panels beside the open panel: open or not, and their cards (kept in widget.json).
@@ -2832,6 +2975,13 @@ class VoiceWidget(QWidget):
             self._shown_digest, self._painted_still = digest, False
             self._kick()
         self.st = st or {}
+        ids = {s.get("id") for s in self.st.get("schedules") or []}
+        if self._schedule_ids is not None and ids - self._schedule_ids:
+            self.fresh_schedules.update({i: 0.0 for i in ids - self._schedule_ids})
+            if not self.side_open["companion"]:
+                self._agenda_ping = time.time()
+                QTimer.singleShot(121_000, self._kick)  # the arrow's light goes out by itself
+        self._schedule_ids = ids
         if changed:
             for side in (*self.sides.values(), self.full):
                 side.refresh()
@@ -4850,7 +5000,14 @@ class VoiceWidget(QWidget):
             side.input.hide()
 
     # -- the side panels: Utils on the right, the Companion on the left -------------------------------------
+    def edit_schedule(self, item_id: int) -> None:
+        item = next((s for s in self._schedules() if s.get("id") == item_id), None)
+        if item:
+            self.reply_box.open_schedule(item, QRectF(self.visual_rect()), int(self.pw))
+
     def toggle_side(self, name: str) -> None:
+        if name == "companion":
+            self._agenda_ping = 0.0
         self.side_open[name] = not self.side_open[name]
         if self.side_open[name] and not self.expanded:
             self.toggle_expanded()
@@ -4924,8 +5081,14 @@ class VoiceWidget(QWidget):
                 p.fillPath(path.united(square), _body())
             ht = self.hover_t.get(f"tab:{name}", 0.0)
             is_open = self.side_open[name]
+            if name == "companion" and not is_open and time.time() - self._agenda_ping < 120:
+                ht = 1.0  # a prompt was just scheduled: its arrow lit, in the agenda's colour, until you look
+                p.setPen(QPen(_tone(QColor(139, 124, 255, 220)), 1.6))
+                p.setBrush(_tone(QColor(139, 124, 255, 50)))
+                p.drawRoundedRect(tab.adjusted(1, 1, -1, -1), 7, 7)
+                is_open = None
             p.setFont(self.f_icon_small)
-            p.setPen(_tone(QColor(169, 155, 255, int(170 + 85 * ht))) if is_open else
+            p.setPen(_tone(QColor(169, 155, 255, int(170 + 85 * ht))) if is_open or is_open is None else
                      _ink(int(150 + 105 * ht)))
             pointing = ("left" if is_open else "right") if right else ("right" if is_open else "left")
             p.drawText(tab.adjusted(1 if right else -1, 0, 0, 0), Qt.AlignCenter, ICONS[pointing])

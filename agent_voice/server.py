@@ -204,8 +204,12 @@ def _handler(daemon: Daemon):
                     return self._json(200, {"ok": True})
                 if self.path == "/media":
                     return self._json(200, {"ok": daemon.media_control(action)})
-                if self.path == "/calendar" and action == "snooze":  # the meeting's banner: +5 min
-                    done = daemon.snooze_meeting(float(data.get("start") or 0), float(data.get("seconds") or 300))
+                if self.path == "/calendar" and action == "snooze":  # the meeting's banner: Snooze (at a time, or for)
+                    done = daemon.snooze_meeting(float(data.get("start") or 0), float(data.get("seconds") or 300),
+                                                 float(data.get("at") or 0))
+                    return self._json(200 if done else 404, {"ok": done})
+                if self.path == "/calendar" and action == "dismiss":  # the meeting's banner: Dismiss
+                    done = daemon.dismiss_meeting(float(data.get("start") or 0))
                     return self._json(200 if done else 404, {"ok": done})
                 if self.path == "/calendar" and action == "join":  # the meeting's Teams / Zoom / Meet link
                     title = daemon.join_meeting(float(data.get("start") or 0))
@@ -343,6 +347,23 @@ def _handler(daemon: Daemon):
                 return self._json(200, item)
             if self.path == "/schedule_cancel":
                 return self._json(200, {"ok": daemon.cancel_schedule(_int(data.get("id")))})
+            if self.path == "/schedule_now":  # the Agenda's ➤: now instead of later
+                prompt = data.get("prompt")
+                ok = daemon.send_schedule_now(_int(data.get("id")), str(prompt) if isinstance(prompt, str) else None)
+                return self._json(200 if ok else 404, {"ok": ok})
+            if self.path == "/schedule_edit":  # the Agenda: its words or its time
+                at = data.get("at")
+                if not isinstance(at, (int, float)) and data.get("when"):
+                    at = schedule.parse_when(str(data["when"]), time.time())
+                    if not at:
+                        return self._json(400, {"error": "when? (14:00, 2pm, in 20 minutes, tomorrow at 9)"})
+                prompt = data.get("prompt")
+                try:
+                    item = daemon.edit_schedule(_int(data.get("id")), str(prompt) if isinstance(prompt, str) else None,
+                                                float(at) if isinstance(at, (int, float)) else None)
+                except ValueError as exc:
+                    return self._json(400, {"error": str(exc)})
+                return self._json(200, item) if item else self._json(404, {"error": "no such scheduled prompt"})
             if self.path == "/recap":
                 daemon.recap(spoken=bool(data.get("speak", True)))
                 return self._json(200, {"text": daemon.recap_text()[0]})

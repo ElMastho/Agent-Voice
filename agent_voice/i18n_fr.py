@@ -276,6 +276,12 @@ FR = {
     "Edit": "Modifier",
     "+5 min": "+5 min",
     "+{n} min": "+{n} min",
+    "Snooze": "Répéter",
+    "Dismiss": "Ignorer",
+    "{n} min before": "{n} min avant",
+    "{n} min after": "{n} min après",
+    "At start": "Au début",
+    "In {n} min": "Dans {n} min",
     "in {n} s · say “wait” or “cancel”": "dans {n} s · dites « attends » ou « annule »",
     "While you were away": "Pendant votre absence",
     "Today": "Aujourd'hui",
@@ -652,6 +658,13 @@ FR = {
     "the meeting": "la réunion",
     "No meeting to join right now.": "Aucune réunion à rejoindre pour l'instant.",
     "at this pace, full around {time}": "à ce rythme, plein vers {time}",
+    # editing a scheduled prompt from the Agenda
+    "It's in your Agenda: click it there to edit it or send it now.":
+        "Elle est dans votre Agenda : cliquez dessus pour la modifier ou l'envoyer tout de suite.",
+    "Scheduled for {title}": "Programmé pour {title}",
+    "Empty: send it now": "Vide : envoyer tout de suite",
+    "Enter to save · empty the time to send it now · Esc to close":
+        "Entrée pour enregistrer · videz l'heure pour l'envoyer tout de suite · Échap pour fermer",
     # a meeting about to start
     "Meeting": "Réunion",
     "{title} starts in {n} min.": "{title} commence dans {n} min.",

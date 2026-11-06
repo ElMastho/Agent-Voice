@@ -34,9 +34,38 @@ class SchedulesMixin:
         log.info("scheduled #%d for %s: %s", item["id"], _clock(at, "seven_day"), title)
         self._show_banner(tr("At {when}", when=_clock(at, 'seven_day'))
                           + (f" ({tr(item['repeat'])})" if item["repeat"] else "")
-                          + tr(", {title} gets: {prompt}", title=title, prompt=prompt[:160]), "", "", kind="note",
-                          tag="scheduled")
+                          + tr(", {title} gets: {prompt}", title=title, prompt=prompt[:160])
+                          + " " + tr("It's in your Agenda: click it there to edit it or send it now."), "", "",
+                          kind="note", tag="scheduled")
         return item
+
+    def edit_schedule(self, item_id: int, prompt: str | None = None, at: float | None = None) -> dict | None:
+        """From the Agenda: new words, a new time, or both."""
+        item = next((s for s in self._schedules if s["id"] == item_id), None)
+        if item is None:
+            return None
+        if prompt is not None:
+            if not prompt.strip():
+                raise ValueError("a prompt")
+            item["prompt"] = prompt.strip()[:4000]
+        if at:
+            item["at"] = int(at)
+        self._save_schedules()
+        log.info("scheduled #%d changed: %s", item_id, _clock(item["at"], "seven_day"))
+        return item
+
+    def send_schedule_now(self, item_id: int, prompt: str | None = None) -> bool:
+        """'Send now' in the Agenda: sent at once (with your last edits); a repeating one keeps its next times."""
+        item = next((s for s in self._schedules if s["id"] == item_id), None)
+        if item is None:
+            return False
+        run = {**item, "prompt": (prompt or "").strip()[:4000] or item["prompt"]}
+        if not item.get("repeat"):
+            self._schedules.remove(item)
+            self._save_schedules()
+        log.info("scheduled #%d sent now", item_id)
+        self.jobs.put(lambda: self._run_schedule(run))
+        return True
 
     def cancel_schedule(self, item_id: int) -> bool:
         before = len(self._schedules)

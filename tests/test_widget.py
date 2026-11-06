@@ -921,14 +921,67 @@ def test_meeting_banner_joins_or_snoozes(app, monkeypatch):
     posted = []
     monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
     b = widget.Banner()
-    item = {"id": 4, "text": "Design review starts in 2 min.", "kind": "meeting", "tag": "meeting", "at": 0,
-            "meeting": {"start": 1_800_000_000, "join": True}, "snooze": {"seconds": 300}}
+    start = int(widget.time.time()) + 15 * 60
+    item = {"id": 4, "text": "Design review starts in 15 min.", "kind": "meeting", "tag": "meeting", "at": 0,
+            "meeting": {"start": start, "end": start + 1800, "join": True}}
     b.present(item, 420)
-    assert set(b._buttons()) == {"join", "snooze"} and b.until > widget.time.time() + 250
+    assert set(b._buttons()) == {"join", "later", "dismiss"} and b.until > widget.time.time() + 250
     QTest.mouseClick(b, Qt.LeftButton, Qt.NoModifier, b._buttons()["join"].center().toPoint())
-    assert posted == [("/calendar", {"action": "join", "start": 1_800_000_000})] and b.until == 0.0
+    assert posted == [("/calendar", {"action": "join", "start": start})] and b.until == 0.0
     b.present({**item, "id": 5}, 420)
-    QTest.mouseClick(b, Qt.LeftButton, Qt.NoModifier, b._buttons()["snooze"].center().toPoint())
-    assert posted[1] == ("/calendar", {"action": "snooze", "start": 1_800_000_000, "seconds": 300})
-    b.present({**item, "id": 6, "meeting": {"start": 1_800_000_000, "join": False}}, 420)
-    assert set(b._buttons()) == {"snooze"}  # no video link: nothing to join
+    QTest.mouseClick(b, Qt.LeftButton, Qt.NoModifier, b._buttons()["later"].center().toPoint())
+    assert b.picking and len(posted) == 1  # Snooze opens its choices, in time order, as many as fit
+    chips = list(b._buttons())
+    assert chips[:2] == [f"at:{start - 600}", f"at:{start - 300}"] and len(chips) < len(widget.MEETING_SNOOZES)
+    assert all(r.right() <= b.width() - 15 and r.left() >= 15 for r in b._buttons().values())
+    b.grab()  # paints its choices
+    QTest.mouseClick(b, Qt.LeftButton, Qt.NoModifier, b._buttons()[f"at:{start - 300}"].center().toPoint())
+    assert posted[1] == ("/calendar", {"action": "snooze", "start": start, "at": start - 300}) and b.until == 0.0
+    b.present({**item, "id": 6}, 420)
+    assert not b.picking
+    QTest.mouseClick(b, Qt.LeftButton, Qt.NoModifier, b._buttons()["dismiss"].center().toPoint())
+    assert posted[2] == ("/calendar", {"action": "dismiss", "start": start})
+    b.present({**item, "id": 7, "meeting": {**item["meeting"], "join": False}}, 420)
+    assert set(b._buttons()) == {"later", "dismiss"}  # no video link: nothing to join
+    # Snoozed into it: what's still ahead; long into it, a few minutes from now.
+    labels = [t for t, _ in widget._meeting_snoozes(start, start + 1800, now=start + 60)]
+    assert labels == ["5 min after", "10 min after", "15 min after"]
+    assert [t for t, _ in widget._meeting_snoozes(start, start + 3600, now=start + 2400)] == [
+        "In 5 min", "In 10 min", "In 15 min"]
+
+
+def test_scheduled_prompt_edited_from_the_agenda(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    at = widget.time.time() + 3600
+    item = {"id": 7, "at": at, "title": "Codex", "prompt": "run the tests", "repeat": ""}
+    w = _widget({"phase": "idle", "threads": [], "companion": COMPANION, "schedules": []})
+    w._on_status({**w.st, "schedules": []})
+    w._on_status({**w.st, "schedules": [item]})  # just scheduled, the Companion closed: its arrow lit
+    assert w.fresh_schedules == {7: 0.0} and w._agenda_ping
+    w._reveal, w.side_open["companion"] = 1.0, False
+    w.toggle_side("companion")
+    assert not w._agenda_ping  # opened: seen
+    w.show()
+    side = w.sides["companion"]
+    side.step(w.visual_rect(), True)
+    side.grab()  # a real paint
+    assert w.fresh_schedules[7] > widget.time.time()  # lit now that it shows, for a few seconds
+    edited = []
+    monkeypatch.setattr(w.reply_box, "_show", lambda anchor, width, height: edited.append(height))
+    QTest.mouseClick(side, Qt.LeftButton, Qt.NoModifier, side.hits["prow:7"].center().toPoint())
+    box = w.reply_box
+    assert edited and box.edit.toPlainText() == "run the tests" and box.when.text() == widget._schedule_when(at)
+    box.edit.setPlainText("run the tests twice")
+    box.send()  # the time as it was: kept
+    assert posted[-1] == ("/schedule_edit", {"id": 7, "prompt": "run the tests twice", "at": at})
+    box.open_schedule(item, widget.QRectF(w.visual_rect()), 400)
+    box.when.clear()
+    box.send()  # no time: now
+    assert posted[-1] == ("/schedule_now", {"id": 7, "prompt": "run the tests"})
+    assert box.editing is None and "Send now" in box.when.placeholderText()
+    side.hot = "prow:7"
+    side.repaint()
+    QTest.mouseClick(side, Qt.LeftButton, Qt.NoModifier, side.hits["psend:7"].center().toPoint())
+    assert posted[-1] == ("/schedule_now", {"id": 7})
+    w.hide()

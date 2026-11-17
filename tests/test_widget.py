@@ -6,7 +6,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtCore = pytest.importorskip("PySide6.QtCore")
-from PySide6.QtCore import QPoint, Qt  # noqa: E402
+from PySide6.QtCore import QPoint, QPointF, Qt  # noqa: E402
 from PySide6.QtGui import QColor  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
@@ -153,6 +153,29 @@ def test_tuck_hides_until_something_new(app):
     w._on_status({**w.st, "phase": "idle"})  # the news has passed: back up to the line
     w._place_notch()
     assert w._tucked is not None and not w._retuck
+
+
+def test_tucked_notch_stays_on_its_screen(app):
+    """Tucked, the notch's window stays hung from the top edge (a screen stacked above must not see it)."""
+    w = _widget({"phase": "idle", "threads": []})
+    w.expanded = False
+    top = QApplication.primaryScreen().geometry().top()
+    w._reveal, w._reveal_v, w._reveal_until = 1.0, 0.0, 1e12
+    for _ in range(200):
+        w._follow_size()
+        w._place_notch()
+        assert w.y() == top
+    down = w.visual_rect()
+    w.tuck()
+    for _ in range(400):
+        w._follow_size()
+        w._place_notch()
+        assert w.y() == top and w.geometry().top() >= top  # never above its screen, even while sliding up
+    assert w._reveal == 0.0
+    assert w.height() == widget.NOTCH_PEEK  # tucked: only the peek is left, nothing else to see or hover
+    assert w.visual_rect().bottom() == top + widget.NOTCH_PEEK - 1  # the island slid up inside it
+    assert w.visual_rect().height() == down.height()
+    assert w._to_layout(QPointF(w.width() / 2, 1)).y() == 1 + w._lift  # clicks land where it is drawn
 
 
 def test_closing_the_banner_tucks_the_notch_again(app, monkeypatch):

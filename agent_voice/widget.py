@@ -2719,6 +2719,7 @@ class VoiceWidget(QWidget):
         self._dragged = False
         self._opacity = 1.0
         self._hovering = False
+        self._lift = 0  # notch: how far the island is drawn above its canvas's top (slid up under the screen's edge)
         self._drop: dict | None = None  # files being dragged over: where they'd go
         self.setAcceptDrops(True)
 
@@ -2845,7 +2846,7 @@ class VoiceWidget(QWidget):
         """Notch: window coordinates -> notch-row coordinates (the island is centred while it widens)."""
         if not self.island:
             return pos
-        return QPointF(pos.x() - (self.width() - self.nw) / 2, pos.y())
+        return QPointF(pos.x() - (self.width() - self.nw) / 2, pos.y() + self._lift)
 
     def _target_size(self) -> tuple[int, int]:
         if self._is_compact():
@@ -2871,7 +2872,7 @@ class VoiceWidget(QWidget):
         if not self.notch:
             return self.geometry()
         vw = int(round(self._vw))
-        return QRect(self.x() + (self.width() - vw) // 2, self.y(), vw, int(self._vis_h()))
+        return QRect(self.x() + (self.width() - vw) // 2, self.y() - self._lift, vw, int(self._vis_h()))
 
     def _follow_size(self) -> None:
         """Glide towards the size the content needs (panel opening, a question arriving...)."""
@@ -2889,7 +2890,11 @@ class VoiceWidget(QWidget):
             self.resize(w, int(round(self._h)))
 
     def _place_notch(self) -> None:
-        """Top centre of the primary screen, sliding down when wanted and back up when not."""
+        """Top centre of the primary screen, sliding down when wanted and back up when not.
+
+        The window never leaves its screen: it stays hung from the top edge and the island slides up inside it
+        (drawn `_lift` pixels higher, clipped by the window). A window moved above the top edge would show on a
+        screen stacked above this one (and macOS shows a window spanning two screens on one of them only)."""
         now = time.time()
         busy = (self.phase in ("speaking", "waiting", "recording", "transcribing") or bool(self._activity())
                 or bool(self._drop) or self._strip_busy())  # a timer running, a song playing: down, to see it
@@ -2898,6 +2903,8 @@ class VoiceWidget(QWidget):
             self._tucked = None  # something new happened: show it
             self._retuck = True  # ...then back up to the line once it has passed
         hovering = self._hovering and not self._tuck_hover
+        if hovering and self._lift and QCursor.pos().y() >= self.y() + int(self._vis_h()) - self._lift:
+            hovering = False  # under the island as it slides up: the canvas's see-through part, not the notch
         if (self._retuck and not (hovering or self.expanded or self.pressed or self._drop or self._question()
                                   or self.banner.item or self._news()[0])):
             self._tucked, self._retuck = self._news(), False
@@ -2927,11 +2934,13 @@ class VoiceWidget(QWidget):
         # grown once for where an animation is going, trimmed once it has settled (never resized every frame).
         end_h = self._target_size()[1]
         settled = abs(vh - end_h) < 0.6 and abs(self._nw - target_w) < 0.5
+        self._lift = int(round((vh - NOTCH_PEEK) * (1 - down)))
         cw = self._canvas_w()
-        ch = int(vh) if settled else max(self.height(), int(max(vh, end_h)) + 2)
-        hidden = geo.top() - vh + NOTCH_PEEK
-        x = geo.center().x() - cw // 2
-        y = int(round(hidden + (geo.top() - hidden) * down))
+        if settled and self._reveal in (0.0, 1.0):
+            ch = max(NOTCH_PEEK, int(vh) - self._lift)  # tucked: only the peek's few pixels, nothing else to hover
+        else:
+            ch = max(self.height(), int(max(vh, end_h)) + 2)
+        x, y = geo.center().x() - cw // 2, geo.top()
         if (cw, ch) != (self.width(), self.height()):
             self.setGeometry(x, y, cw, ch)
         elif (x, y) != (self.x(), self.y()):
@@ -3093,7 +3102,7 @@ class VoiceWidget(QWidget):
         for name, side in self.sides.items():
             tab = self._tab_rect(name)
             busy = side.step(self.visual_rect(), self._side_wanted(name), self._dt,
-                             self.y() + tab.center().y() if tab is not None else None) or busy
+                             self.y() - self._lift + tab.center().y() if tab is not None else None) or busy
         self._sides_busy = busy
         if self._folding and not any(side.isVisible() for side in self.sides.values()):  # gone: now the panel
             self._folding = False
@@ -3569,11 +3578,12 @@ class VoiceWidget(QWidget):
         w, h = self.width(), self.height()
         if self.notch:  # drawn at its own size, centred in the canvas
             w, h = round(self._vw), self._vis_h()
-            p.translate((self.width() - w) / 2, 0)
+            p.translate((self.width() - w) / 2, -self._lift)
         path = self._body_path(w, h)
         p.setClipPath(path)
         if LIGHT:
-            self.glass.paint(p, path, self.pos() + QPoint(int((self.width() - w) / 2) if self.notch else 0, 0))
+            self.glass.paint(p, path, self.pos() + (QPoint(int((self.width() - w) / 2), -self._lift) if self.notch
+                                                    else QPoint(0, 0)))
         else:
             p.fillPath(path, _body())  # pure black, like a hardware notch
         if self._is_compact():
@@ -4924,7 +4934,7 @@ class VoiceWidget(QWidget):
             self.compact = False
             self._reveal, self._reveal_until = 1.0, time.time() + NOTCH_HIDE_DELAY
         else:
-            self._reveal, self._reveal_v = 1.0, 0.0  # floating: always fully shown
+            self._reveal, self._reveal_v, self._lift = 1.0, 0.0, 0  # floating: always fully shown
             if self._bar_pos:
                 self.move(*self._bar_pos)
         self._apply_size()
@@ -5069,14 +5079,15 @@ class VoiceWidget(QWidget):
             right = name == "utils"
             p.save()
             p.resetTransform()  # paintEvent moved it to the drawn island; the tab is placed from the canvas
-            p.translate((self.width() - self.nw) / 2, 0)
+            p.translate((self.width() - self.nw) / 2, -self._lift)
             p.setOpacity(_smooth((self._reveal - 0.9) / 0.1) if self._reveal < 1 else 1.0)
             path = QPainterPath()
             path.addRoundedRect(tab, 8, 8)
             square = QPainterPath()  # flush with the island: rounded on the outside only
             square.addRect(QRectF(tab.x() if right else tab.right() - 8, tab.y(), 8, tab.height()))
             if LIGHT:
-                self.glass.paint(p, path.united(square), self.pos() + QPoint(int((self.width() - self.nw) / 2), 0))
+                self.glass.paint(p, path.united(square),
+                                 self.pos() + QPoint(int((self.width() - self.nw) / 2), -self._lift))
             else:
                 p.fillPath(path.united(square), _body())
             ht = self.hover_t.get(f"tab:{name}", 0.0)

@@ -23,6 +23,7 @@ from PySide6.QtGui import (
     QPixmap,
     QColor,
     QConicalGradient,
+    QCursor,
     QFont,
     QImage,
     QLinearGradient,
@@ -2717,6 +2718,7 @@ class VoiceWidget(QWidget):
         self.f_kpi = _font(FONT_TEXT, 12)
         self.f_kpi.setWeight(QFont.DemiBold)
         self._dragged = False
+        self._drag_from: QPointF | None = None  # set by a press: a move before any click must not fail
         self._opacity = 1.0
         self._hovering = False
         self._lift = 0  # notch: how far the island is drawn above its canvas's top (slid up under the screen's edge)

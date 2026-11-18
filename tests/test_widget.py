@@ -7,7 +7,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtCore = pytest.importorskip("PySide6.QtCore")
 from PySide6.QtCore import QPoint, QPointF, Qt  # noqa: E402
-from PySide6.QtGui import QColor  # noqa: E402
+from PySide6.QtGui import QColor, QCursor  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -176,6 +176,15 @@ def test_tucked_notch_stays_on_its_screen(app):
     assert w.visual_rect().bottom() == top + widget.NOTCH_PEEK - 1  # the island slid up inside it
     assert w.visual_rect().height() == down.height()
     assert w._to_layout(QPointF(w.width() / 2, 1)).y() == 1 + w._lift  # clicks land where it is drawn
+    # Hovering its line brings it down again (and a move before any click doesn't fail).
+    QCursor.setPos(w.x() + w.width() // 2, top)
+    w._tuck_hover = False
+    w.enterEvent(None)
+    QTest.mouseMove(w, QPoint(w.width() // 2, 1))
+    for _ in range(60):
+        w._last_tick -= widget.FRAME
+        w._tick()
+    assert w._reveal > 0.9 and w._lift == 0 and w.y() == top
 
 
 def test_closing_the_banner_tucks_the_notch_again(app, monkeypatch):

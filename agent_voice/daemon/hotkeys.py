@@ -29,6 +29,7 @@ class HotkeysMixin:
             "new_thread": lambda: setattr(self, "new_thread_opens", self.new_thread_opens + 1),
             "hands_free": lambda: self.set_hands_free(not self.hands_free),
             "mute": lambda: self.set_muted(not self.muted),
+            "mic_off": lambda: self.set_mic_off(not self.mic_off),
             "chime": lambda: self.set_chime(not self.chime),
             "read_selection": lambda: threading.Thread(target=self._read_selection, daemon=True).start(),
             "push_to_talk": self._ptt_pressed if self.transcriber is not None else None,
@@ -90,13 +91,18 @@ class HotkeysMixin:
             self.speaker.stop()  # you talk, the agent shuts up
             self.speaker.hold()  # ...and stays quiet until you're done
             self.cancel_listen()
-            rec = Recorder(on_level=self._set_level)
-            rec.start()
-            self._mic_phase = "recording"
-            _beep(660)
-            # Safety net: a lost "release" (widget closed mid-press) must not record forever.
-            self._ptt_release.wait(timeout=600)
-            audio = rec.stop()
+            lifted = self._lift_mic()  # mic off for every app: open it for agent-voice while the key is held
+            try:
+                rec = Recorder(on_level=self._set_level)
+                rec.start()
+                self._mic_phase = "recording"
+                _beep(660)
+                # Safety net: a lost "release" (widget closed mid-press) must not record forever.
+                self._ptt_release.wait(timeout=600)
+                audio = rec.stop()
+            finally:
+                if lifted:
+                    self._lower_mic()
             _beep(520)
             self._mic_phase = "transcribing"
             text, lang = self.transcriber.transcribe(audio)

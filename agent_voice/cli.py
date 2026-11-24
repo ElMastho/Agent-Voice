@@ -67,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("mute", help="mute / unmute (default: toggle)")
     p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "on", "off"])
     sub.add_parser("unmute", help="unmute")
+    p = sub.add_parser("mic", help="every microphone off for every app (a call too), or back on (default: toggle)")
+    p.add_argument("mode", nargs="?", default="toggle", choices=["toggle", "off", "on"])
     p = sub.add_parser("speed", help="voice speed as a multiplier, e.g. 1.5 (no value: show it)")
     p.add_argument("value", nargs="?", type=float)
     p = sub.add_parser("summary", help="final answers as a one-sentence summary, or in full (default: toggle)")
@@ -269,6 +271,31 @@ def main(argv: list[str] | None = None) -> int:
         result = client.request("/new_thread", {"text": " ".join(args.prompt), "target": args.agent, "cwd": args.cwd})
         print("not running" if result is None else "starting a new thread")
         return 0 if result else 1
+    if args.cmd == "mic":
+        # "mic off" turns the switch on: /mic's switch is "mic_off".
+        mode = {"off": "on", "on": "off"}.get(args.mode, "toggle")
+        result = client.request("/mic", {"mode": mode})
+        if result is None:
+            # Daemon down: switch the mics directly, and leave the state the next start will find.
+            from agent_voice import micmute
+            from agent_voice.config import load_state, save_state
+
+            state = load_state()
+            off = (not state.get("mic_off")) if mode == "toggle" else mode == "on"
+
+            def save(ours: dict) -> None:
+                state["mic_off_ours"] = ours
+
+            mm = micmute.MicMute(state.get("mic_off_ours"), on_save=save)
+            if not mm.available():
+                print("turning the microphone off isn't available on this system")
+                return 1
+            mm.off() if off else mm.on()
+            state["mic_off"] = off
+            save_state(state)
+            result = {"mic_off": off}
+        print("microphone off for every app" if result.get("mic_off") else "microphone on")
+        return 0
     if args.cmd in ("mute", "unmute"):
         mode = "off" if args.cmd == "unmute" else args.mode
         result = client.request("/mute", {"mode": mode})

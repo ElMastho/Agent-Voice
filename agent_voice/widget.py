@@ -184,7 +184,9 @@ ICONS = {
     "full": "\ue740",
     "unfull": "\ue73f",
     "settings": "\ue713",
+    "micoff": "\uec54",
 }
+MIC_OFF = "#F87171"  # the mic off for every app: its button, and the tucked notch's line
 
 if sys.platform != "win32":
     ICONS.update({"phone": "☏", "clock": "◷", "folder": "▤", "headphones": "∩"})
@@ -193,7 +195,7 @@ if sys.platform != "win32":
                   "shield": "✓", "down": "⌄", "up": "⌃", "replay": "↻", "open": "↗", "help": "?", "keyboard": "⌨", "tuck": "–"})
     ICONS.update({"more": "⋯", "play": "▶", "pause": "❚❚", "close": "✕", "stopwatch": "◔", "left": "‹", "right": "›"})
     ICONS.update({"note": "✎", "paste": "⧉", "usage": "▤", "music": "♪", "calendar": "▦", "prev": "⏮", "next": "⏭"})
-    ICONS.update({"full": "⤢", "unfull": "⤡", "settings": "⚙"})
+    ICONS.update({"full": "⤢", "unfull": "⤡", "settings": "⚙", "micoff": "⊘"})
 
 # phase -> (accent colour, title, subtitle)
 PHASES = {
@@ -3245,8 +3247,11 @@ class VoiceWidget(QWidget):
         out["chevron"] = QRectF(self.nw - NOTCH_EAR - 36, (NOTCH_H - 26) / 2, 26, 26)
         if self.notch:
             out["tuck"] = QRectF(self.nw - NOTCH_EAR - 96, (NOTCH_H - 24) / 2, 24, 24)
+        if self._mic_shown():
+            out["micbtn"] = QRectF(self.nw - NOTCH_EAR - (124 if self.notch else 96), (NOTCH_H - 24) / 2, 24, 24)
         if self._gear_shown():
-            out["settings"] = QRectF(self.nw - NOTCH_EAR - (124 if self.notch else 96), (NOTCH_H - 24) / 2, 24, 24)
+            left = (124 if self.notch else 96) + (28 if self._mic_shown() else 0)
+            out["settings"] = QRectF(self.nw - NOTCH_EAR - left, (NOTCH_H - 24) / 2, 24, 24)
         out.update(self._pill_rects())
         for name in SIDE_CARDS:
             tab = self._tab_rect(name)
@@ -3278,7 +3283,13 @@ class VoiceWidget(QWidget):
 
     def _chips_right(self) -> float:
         """Where the info chips end, left of the buttons ("tuck" in notch mode, ⚙ while the panel is open)."""
-        return self.nw - NOTCH_EAR - (104 if self.notch else 78) - (28 if self._gear_shown() else 0)
+        return (self.nw - NOTCH_EAR - (104 if self.notch else 78) - (28 if self._gear_shown() else 0)
+                - (28 if self._mic_shown() else 0))
+
+    def _mic_shown(self) -> bool:
+        """The mic button (every microphone off for every app, or back on) sits in the notch row while the service
+        runs: a mic without a mute button gets one always in sight."""
+        return self.island and self.phase != "offline" and "mic_off" in self.st
 
     def _gear_shown(self) -> bool:
         """⚙ (the Settings sheet) sits in the notch row while the panel is open."""
@@ -3657,13 +3668,21 @@ class VoiceWidget(QWidget):
             return False
         if self._reveal > 0.3:
             return bool(self._activity() or self._music_glow())
-        return self._peek_color() is not None
+        return self._peek_color() is not None and not self._peek_still()
+
+    def _peek_still(self) -> bool:
+        """The tucked line is only there for the mic being off: a still red line, no gliding (battery)."""
+        return bool(self.st.get("mic_off")) and self._peek_color() == QColor(MIC_OFF) and not (
+            self.phase in ("speaking", "recording", "waiting", "transcribing") or self._activity()
+            or self._music_glow())
 
     def _peek_color(self) -> QColor | None:
         """Tucked away, what's running shows on the line still in sight: the voice or the mic, an agent at work,
         a song, a Pomodoro or a timer. None when nothing runs (and in Do not disturb: the notch stays quiet)."""
-        if not self.notch or self._output() == "silent":
+        if not self.notch:
             return None
+        if self._output() == "silent":  # Do not disturb keeps the notch quiet, but never hides a mic that's off
+            return QColor(MIC_OFF) if self.st.get("mic_off") else None
         act = self._activity()
         clocks = (self.st.get("companion") or {})
         pomo = clocks.get("pomodoro") or {}
@@ -3677,6 +3696,8 @@ class VoiceWidget(QWidget):
             color = QColor(SidePanel.BREAK if pomo.get("phase") != "focus" else SidePanel.TOMATO)
         elif any(t.get("end") for t in clocks.get("timers") or []):
             color = QColor("#FBBF24")
+        elif self.st.get("mic_off"):
+            color = QColor(MIC_OFF)
         else:
             return None
         return color.darker(135) if LIGHT else color
@@ -3692,6 +3713,8 @@ class VoiceWidget(QWidget):
         fade = _smooth(1 - self._reveal / 0.3)
         band = QRectF(NOTCH_EAR, h - NOTCH_PEEK - 1, w - 2 * NOTCH_EAR, NOTCH_PEEK + 1)
         pos = ((time.time() - self.t0) * 0.35) % 1.0  # once along it every ~3 s: calm, never a flicker
+        if self._peek_still():
+            pos = 0.5  # the mic off: a still line
         grad = QLinearGradient(band.topLeft(), band.topRight())
         for at, alpha in ((0.0, 110), (max(0.0, pos - 0.18), 110), (pos, 255), (min(1.0, pos + 0.18), 110),
                           (1.0, 110)):
@@ -3884,6 +3907,8 @@ class VoiceWidget(QWidget):
             q = self._question()
             if q:
                 line = q["question"]
+            elif self.phase in ("idle", "muted") and st.get("mic_off"):
+                line = tr("Mic off: no app hears you")
             elif self.phase == "idle" and st.get("last_heard"):
                 line = tr("You: “{text}”", text=st['last_heard'])
             elif self.phase == "idle":
@@ -3959,6 +3984,8 @@ class VoiceWidget(QWidget):
         buttons.append(("chevron", ICONS["up" if self.expanded else "down"]))
         if self.notch:
             buttons.append(("tuck", ICONS["tuck"]))
+        if "micbtn" in rects:
+            buttons.append(("micbtn", ICONS["micoff" if self.st.get("mic_off") else "mic"]))
         if "settings" in rects:
             buttons.append(("settings", ICONS["settings"]))
         for key, icon in buttons:
@@ -3966,6 +3993,15 @@ class VoiceWidget(QWidget):
             ht = self.hover_t.get(key, 0.0)
             base = 16 if key == "primary" or key == "settings" and self.settings else 0
             p.setPen(Qt.NoPen)
+            if key == "micbtn" and self.st.get("mic_off"):  # off: a red disc, seen at a glance
+                red = QColor(MIC_OFF)
+                red.setAlpha(int(200 + 55 * ht))
+                p.setBrush(red)
+                p.drawEllipse(rect)
+                p.setFont(self.f_icon_small)
+                p.setPen(QColor("#FFFFFF"))
+                p.drawText(rect, Qt.AlignCenter, icon)
+                continue
             p.setBrush(_ink(int(base + 26 * ht + (24 if self.pressed == key else 0))))
             p.drawEllipse(rect)
             p.setFont(self.f_icon_small)
@@ -4583,6 +4619,11 @@ class VoiceWidget(QWidget):
             return tr("Open Utils")
         if key == "tuck":
             return tr("Tuck away until something new happens")
+        if key == "micbtn":
+            hk = _hotkey_label(self.hotkeys.get("mic_off", ""))
+            return (tr("Your microphone is off for every app: click to turn it back on ({key})", key=hk)
+                    if self.st.get("mic_off") else
+                    tr("Turn your microphone off for every app, a call included ({key})", key=hk))
         if key == "history":
             return tr("Search every conversation: what you asked and what each agent answered (kept on this PC)")
         if key == "newthread":
@@ -4735,6 +4776,11 @@ class VoiceWidget(QWidget):
             self._save_position()
         elif key == "tuck":
             self.tuck()
+        elif key == "micbtn":
+            off = not self.st.get("mic_off")
+            self.st["mic_off"] = off  # at once: the next status confirms it
+            self._painted_still = False
+            _post("/mic", {"mode": "on" if off else "off"})
         elif key == "history":
             self.open_history()
         elif key == "newthread":
@@ -5313,14 +5359,20 @@ class Tray(QSystemTrayIcon):
 
     def refresh(self, force: bool = False) -> None:
         phase = self.w.phase
-        if phase == self._shown_phase and not force:
+        mic_off = bool(self.w.st.get("mic_off"))
+        if (phase, mic_off) == self._shown_phase and not force:
             return
-        self._shown_phase = phase
-        color = QColor(PHASES.get(phase, PHASES["idle"])[0])
-        self.setIcon(orb_icon(color, ICONS[self.GLYPHS.get(phase, "mic")]))
+        self._shown_phase = (phase, mic_off)
+        if mic_off and phase in ("idle", "muted"):  # the mic off for every app: the tray says so too
+            self.setIcon(orb_icon(QColor(MIC_OFF), ICONS["micoff"]))
+        else:
+            color = QColor(PHASES.get(phase, PHASES["idle"])[0])
+            self.setIcon(orb_icon(color, ICONS[self.GLYPHS.get(phase, "mic")]))
         title = tr(PHASES.get(phase, PHASES["idle"])[1])
         lang = self.w.st.get("speaking_lang", "")
         extra = tr(" · auto-send") if self.w.st.get("hands_free") else ""
+        if self.w.st.get("mic_off"):
+            extra += tr(" · mic off")
         if self.w.st.get("chime"):
             extra += tr(" · chime mode")
         self.setToolTip(f"agent-voice · {title}{f' ({lang.upper()})' if lang else ''}{extra}")
@@ -5375,6 +5427,8 @@ class Tray(QSystemTrayIcon):
         add(tr("Auto-send replies"), lambda: _post("/handsfree", {"mode": "toggle"}), online,
             bool(st.get("hands_free")), hk.get("hands_free", ""))
         add(tr("Do not disturb"), lambda: _post("/mute", {"mode": "toggle"}), online, bool(st.get("muted")), hk.get("mute", ""))
+        add(tr("Microphone off (every app)"), lambda: _post("/mic", {"mode": "toggle"}), online,
+            bool(st.get("mic_off")), hk.get("mic_off", ""))
         add(tr("Chime mode (sounds only)"), lambda: _post("/chime", {"mode": "toggle"}), online,
             bool(st.get("chime")), hk.get("chime", ""))
         add(tr("Summarize answers"), lambda: _post("/summary", {"mode": "toggle"}), online, bool(st.get("summary", True)))

@@ -2512,3 +2512,67 @@ def test_scheduled_prompt_edited_or_sent_now(daemon, monkeypatch):
     assert [s["id"] for s in daemon._schedules] == [weekly["id"]]  # repeating: its next times stay
     daemon.jobs.get_nowait()()
     assert sent[-1] == ("c", "weekly report")
+
+
+class _FakeMics:
+    """Two mics, the second already muted by you; `set` records every change."""
+
+    def __init__(self):
+        self.state = {"usb": False, "webcam": True}
+        self.calls = []
+
+    def mics(self):
+        return dict(self.state)
+
+    def set(self, key, off, restore=None):
+        self.calls.append((key, off))
+        self.state[key] = off
+
+
+def test_mic_off_mutes_every_mic_and_gives_back_only_its_own():
+    from agent_voice import micmute
+
+    fake, saved = _FakeMics(), []
+    mm = micmute.MicMute(impl=fake, on_save=saved.append)
+    assert mm.off() == 2 and fake.state == {"usb": True, "webcam": True}
+    assert list(mm.ours) == ["usb"] and saved[-1] == {"usb": None}  # saved: a crash can't lose it
+    fake.state["headset"] = False  # plugged in while it's off
+    mm.enforce()
+    assert fake.state["headset"] is True
+    mm.lift()  # push-to-talk: agent-voice hears you, for that moment
+    assert fake.state["usb"] is False and fake.state["webcam"] is True
+    mm.enforce()  # the watcher doesn't close it under your finger
+    assert fake.state["usb"] is False
+    mm.lower()
+    assert fake.state["usb"] is True
+    mm.on()
+    assert fake.state == {"usb": False, "webcam": True, "headset": False}  # the webcam was yours: still muted
+    assert saved[-1] == {}
+    # The next start picks up what a crash left off.
+    again = micmute.MicMute({"usb": None}, impl=fake)
+    fake.state["usb"] = True
+    again.on()
+    assert fake.state["usb"] is False
+
+
+def test_mic_off_switch_quiets_our_own_listening(daemon, monkeypatch):
+    from agent_voice import micmute
+
+    fake = _FakeMics()
+    daemon._micmute = micmute.MicMute(impl=fake)
+    daemon.set_mic_off(True)
+    assert daemon.mic_off and daemon.status()["mic_off"] and fake.state["usb"] is True
+    assert not daemon._barge_ok()
+    daemon._mic_silent()
+    assert not daemon.banner  # off on purpose: not "the microphone sends no sound"
+    # Talk now opens it for that one reply, then closes it again.
+    heard = []
+    monkeypatch.setattr("agent_voice.stt.listen_for_speech",
+                        lambda *a, **k: heard.append(fake.state["usb"]) or None)
+    daemon._lift_next = True
+    daemon._auto_listen()
+    assert heard == [False] and fake.state["usb"] is True
+    daemon._auto_listen()  # on its own (after a reply): the mic stays off, nothing opens
+    assert heard == [False]
+    daemon.set_mic_off(False)
+    assert not daemon.mic_off and fake.state["usb"] is False

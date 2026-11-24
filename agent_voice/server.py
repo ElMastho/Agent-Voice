@@ -102,7 +102,8 @@ def status_tag(st: dict) -> str:
 
 # On/off switches: the endpoint -> the daemon's property (set with set_<name>).
 TOGGLES = {"/summary": "summary", "/handsfree": "hands_free", "/chime": "chime", "/approvals": "approvals",
-           "/apps": "desktop_apps", "/wake": "wake", "/mute": "muted", "/headphones": "headphones_only"}
+           "/apps": "desktop_apps", "/wake": "wake", "/mute": "muted", "/headphones": "headphones_only",
+           "/mic": "mic_off"}
 
 
 def _background(target, *args, **kwargs) -> None:

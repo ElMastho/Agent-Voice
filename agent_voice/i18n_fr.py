@@ -672,4 +672,10 @@ FR = {
     "{title} starts now.": "{title} commence maintenant.",
     "{title} started {n} min ago.": "{title} a commencé il y a {n} min.",
     "{title} started {n} minutes ago.": "{title} a commencé il y a {n} minutes.",
+    "Turning the microphone off isn't available on this system.": "Couper le micro n'est pas possible sur ce système.",
+    "Your microphone is off for every app: click to turn it back on ({key})": "Votre micro est coupé pour toutes les applis : cliquez pour le rallumer ({key})",
+    "Turn your microphone off for every app, a call included ({key})": "Couper votre micro pour toutes les applis, appel compris ({key})",
+    "Microphone off (every app)": "Micro coupé (toutes les applis)",
+    " · mic off": " · micro coupé",
+    "Mic off: no app hears you": "Micro coupé : aucune appli ne vous entend",
 }

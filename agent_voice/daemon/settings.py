@@ -178,8 +178,8 @@ class SettingsMixin:
 
     def _mic_silent(self) -> None:
         """No mic sent any sound: say so on the notch, at most every 10 minutes (the wake word retries quietly)."""
-        if time.time() - self._mic_silent_at < 600:
-            return
+        if time.time() - self._mic_silent_at < 600 or self.mic_off:
+            return  # turned off on purpose: nothing to report
         self._mic_silent_at = time.time()
         self._show_banner(tr("The microphone sends no sound. Check it isn't muted or held by another app, or pick "
                              "another one in Settings."), "", "", kind="note", tag="mic")

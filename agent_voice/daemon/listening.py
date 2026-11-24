@@ -136,6 +136,7 @@ class ListeningMixin:
             self._force_submit = True  # you picked the thread: send it, there's no prompt in front of you
             if session != NEW_THREAD:
                 self._new_pending = {}
+        self._lift_next = True  # you asked to talk: with the mic off for every app, it opens for this reply only
         threading.Thread(target=self._auto_listen, daemon=True).start()
 
     def _set_level(self, value: float) -> None:
@@ -171,6 +172,8 @@ class ListeningMixin:
                     self._play_next_thread()
                 continue
             queue_idle = None
+            if self._listen_armed and self.mic_off:
+                self._listen_armed = False  # the mic is off: no reply window opening on silence
             if not self._listen_armed or self._ptt_active or self.muted:
                 idle_since = None
                 continue
@@ -192,11 +195,17 @@ class ListeningMixin:
         question = self.question
         permission = self.permission
         force_submit, self._force_submit = self._force_submit, False
+        lift, self._lift_next = self._lift_next, False
         self._wake_cancel.set()
         self._listen_cancel.clear()
         self._listening = True
         self._mic_phase = "waiting"
         self.speaker.hold()
+        if self.mic_off and not lift:
+            self._listening, self._mic_phase = False, ""
+            self.speaker.release()
+            return
+        lifted = lift and self._lift_mic()
         try:
             _beep(700)
             time.sleep(0.15)  # don't record our own beep
@@ -222,6 +231,8 @@ class ListeningMixin:
         except Exception:
             log.exception("auto-listen failed")
         finally:
+            if lifted:
+                self._lower_mic()
             self._listening = False
             self.speaker.release()
             self._mic_phase = ""
@@ -281,7 +292,7 @@ class ListeningMixin:
         cfg = self.config.get("barge_in", {})
         if not cfg.get("enabled", True) or self.transcriber is None or self.quiet:
             return False
-        if self._listening or self._ptt_active:
+        if self._listening or self._ptt_active or self.mic_off:
             return False
         return self._output.kind == "headphones" or bool(cfg.get("speakers", False))
 

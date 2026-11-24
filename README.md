@@ -224,6 +224,8 @@ While the Pomodoro, a timer or the stopwatch runs, the notch stays down with a *
 
 **Do not disturb** (`Ctrl+Alt+M`) is for a meeting: no voice, no sound, no banner, and the notch stays tucked at the top even while agents work; hover it to look. What happens meanwhile is kept (approvals and questions wait in *Needs you*; phone notifications, if on, still reach you). One button on the notch, where the mic usually is, turns it off and puts you back in Voice or Chimes, as you were, with a *While you were away* catch-up.
 
+**Mic off** is the mute button your microphone doesn't have: the 🎙 button in the notch's row (`Ctrl+Alt+O`, the tray, or `agent-voice mic off` / `mic on`) mutes **every microphone at the system level**, so no app hears you, Zoom or Teams included, even unmuted there. The button turns red, the notch's second line says *Mic off*, and tucked away the notch keeps a still red line. On Windows it's each microphone's own mute (the one in the Sound settings); on Linux each source's (`pactl`); on macOS the input volume goes to 0 and back. A mic plugged in while it's off is muted too, and it stays off across restarts. Only the mics it muted are turned back on. While it's off agent-voice doesn't listen either (no reply mic after answers, no *Hey Claude*, no barge-in), except when you ask: **Hold to talk** and **Talk now** open it for that moment only (anything else using the mic then hears you too).
+
 In **Chimes** (a soft sound), nothing talks, not even a setting change. Each finished reply drops down as a banner for about 10 seconds (longer for long replies): hover to keep it, swipe it up to dismiss it, click it to open the conversation. **Reply** opens a box under the notch to type your answer (Enter sends it to that conversation, wherever its window is); **Talk** opens the mic for it. Both are on the read-along banner too. While **another app holds the mic** (Teams, Zoom, Meet...), presenting or full screen, agent-voice holds replies (approvals still come through) and catches you up afterwards ([Focus](#every-agent-at-a-glance)); `focus.calls: "chimes"` gives chimes in calls instead, and picking *Voice* overrides it until it ends. Every sound is a soft tone on a stream of its own, so a cue never cuts the voice off.
 
 ### Every action, one click away
@@ -289,6 +291,7 @@ Right-click the notch → *Float the widget again*: the same black island, round
 | `Ctrl+Alt+H` | **Auto-send** on/off |
 | `Ctrl+Alt+C` | **Chimes** on/off |
 | `Ctrl+Alt+M` | **Do not disturb** on/off |
+| `Ctrl+Alt+O` | **Mic off** for every app (a call included), or back on |
 | `Ctrl+Alt+R` | **Read** the selected text aloud |
 | `Ctrl+Alt+W` | **Show / hide** the notch |
 | `Ctrl+Alt+N` | **New thread**: type or say its first prompt |

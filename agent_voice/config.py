@@ -47,6 +47,8 @@ DEFAULTS: dict = {
         # Hands-free mode: everything you say is sent automatically (Enter pressed for you).
         "hands_free": "ctrl+alt+h",
         "mute": "ctrl+alt+m",
+        # Mic off: every microphone muted for every app (a call too), on again; the notch's mic button does the same.
+        "mic_off": "ctrl+alt+o",
         # Chime mode: no voice, no mic, just a soft sound when the agent is done or needs you.
         "chime": "ctrl+alt+c",
         "read_selection": "ctrl+alt+r",

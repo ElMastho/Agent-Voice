@@ -49,7 +49,7 @@ class WakeMixin:
         listener = None
         while True:
             time.sleep(0.3)
-            if not self.wake or self.muted or self.chime or self.transcriber is None:
+            if not self.wake or self.muted or self.chime or self.mic_off or self.transcriber is None:
                 continue
             # Approvals waiting don't stop it: "Hey Claude, approve Codex" answers them once the reply mic closed.
             if (self.speaker.busy or self._listening or self._listen_armed or self._ptt_active

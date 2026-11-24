@@ -16,6 +16,7 @@ from agent_voice.daemon.handoff import HandoffMixin
 from agent_voice.daemon.hotkeys import HotkeysMixin
 from agent_voice.daemon.limits import LimitsMixin
 from agent_voice.daemon.listening import ListeningMixin
+from agent_voice.daemon.mic import MicMixin
 from agent_voice.daemon.needs import NeedsMixin
 from agent_voice.daemon.phone import PhoneMixin
 from agent_voice.daemon.presence import PresenceMixin
@@ -35,7 +36,7 @@ log = logging.getLogger("agent_voice.server")
 
 class Daemon(SettingsMixin, SpeechMixin, NeedsMixin, ListeningMixin, ThreadsMixin, AgentsMixin, HandoffMixin,
              LimitsMixin, PhoneMixin, SchedulesMixin, ToolsMixin, DayMixin, PresenceMixin, SoundMixin, DesktopAppsMixin,
-             UpdatesMixin, WakeMixin, HotkeysMixin):
+             UpdatesMixin, WakeMixin, HotkeysMixin, MicMixin):
     """The service. One object, so every part sees the same state; each part is a mixin in its own module (state is
     set up here, in __init__, and shared through `self`)."""
 
@@ -198,6 +199,8 @@ class Daemon(SettingsMixin, SpeechMixin, NeedsMixin, ListeningMixin, ThreadsMixi
         self._agenda_wake = threading.Event()
         self._meeting_alerted: set[str] = set()  # the meetings already announced (title|start)
         self._meeting_snooze: dict[str, float] = {}  # snoozed: announced again at that time
+        self._lift_next = False  # Talk now while the mic is off: open it for that reply
+        self._micmute = None  # mic off (every microphone muted at the system level): made on first use
         if start_threads:
             threading.Thread(target=self._job_loop, name="jobs", daemon=True).start()
             threading.Thread(target=self._listen_monitor, name="listen", daemon=True).start()
@@ -213,6 +216,7 @@ class Daemon(SettingsMixin, SpeechMixin, NeedsMixin, ListeningMixin, ThreadsMixi
             threading.Thread(target=self._companion_loop, name="companion", daemon=True).start()
             threading.Thread(target=self._media_loop, name="media", daemon=True).start()
             threading.Thread(target=self._agenda_loop, name="agenda", daemon=True).start()
+            threading.Thread(target=self._mic_watch, name="mic-off", daemon=True).start()
 
     def _job_loop(self) -> None:
         while True:
@@ -286,6 +290,7 @@ class Daemon(SettingsMixin, SpeechMixin, NeedsMixin, ListeningMixin, ThreadsMixi
             "desktop_apps": self.desktop_apps,
             "approvals": self.approvals,
             "muted": self.muted,
+            "mic_off": self.mic_off,
             "hands_free": self.hands_free,
             "chime": self.chime,
             "summary": self.summary,

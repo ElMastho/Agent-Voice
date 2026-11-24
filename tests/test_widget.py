@@ -1017,3 +1017,21 @@ def test_scheduled_prompt_edited_from_the_agenda(app, monkeypatch):
     QTest.mouseClick(side, Qt.LeftButton, Qt.NoModifier, side.hits["psend:7"].center().toPoint())
     assert posted[-1] == ("/schedule_now", {"id": 7})
     w.hide()
+
+
+def test_mic_button_on_the_notch_turns_every_mic_off(app, monkeypatch):
+    posted = []
+    monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
+    w = _widget({"phase": "idle", "threads": [], "mic_off": False})
+    rects = w._rects()
+    assert "micbtn" in rects and rects["micbtn"].right() < rects["tuck"].left()
+    assert rects["settings"].right() < rects["micbtn"].left()  # nothing on top of each other
+    assert w._notch_chips()[1] <= rects["settings"].left()
+    w._activate("micbtn")
+    assert posted == [("/mic", {"mode": "on"})] and w.st["mic_off"]
+    assert "back on" in w._tooltip_text("micbtn")
+    w.expanded = False
+    w.tuck()
+    assert w._peek_color() == QColor(widget.MIC_OFF) and w._peek_still() and not w._glow_moving()
+    w._activate("micbtn")
+    assert posted[-1] == ("/mic", {"mode": "off"})

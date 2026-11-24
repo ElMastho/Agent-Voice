@@ -1019,19 +1019,43 @@ def test_scheduled_prompt_edited_from_the_agenda(app, monkeypatch):
     w.hide()
 
 
-def test_mic_button_on_the_notch_turns_every_mic_off(app, monkeypatch):
+def test_the_notch_mic_talks_on_a_click_and_mutes_on_a_hold(app, monkeypatch):
     posted = []
     monkeypatch.setattr(widget, "_post", lambda path, payload=None: posted.append((path, payload)))
     w = _widget({"phase": "idle", "threads": [], "mic_off": False})
+    assert w._primary()[0] == "reply" and "micbtn" not in w._rects()  # one mic in the row, not two
+    assert "Hold" in w._tooltip_text("primary")
+    w._activate("primary")
+    assert posted and posted[0][0] == "/reply"  # a click still talks
+    posted.clear()
+    # Held: every mic off, and the release doesn't talk.
+    w.pressed = "primary"
+    assert w._mic_button("primary")
+    w._press_seq += 1
+    w._mic_held(w._press_seq)
+    assert posted == [("/mic", {"mode": "on"})] and w.st["mic_off"] and w.pressed is None
+    # Off: the one mic is red, and a click turns it back on.
+    assert w._primary()[0] == "mictoggle" and "back on" in w._tooltip_text("primary") and "micbtn" not in w._rects()
+    w._activate("primary")
+    assert posted[-1] == ("/mic", {"mode": "off"}) and not w.st["mic_off"]
+    # A stale hold (an earlier press) does nothing.
+    w.pressed = "primary"
+    w._mic_held(w._press_seq - 1)
+    assert len(posted) == 2
+    # Speaking with the mic off: the main button is Skip, and the red mic stays beside it.
+    w.st["mic_off"] = True
+    w.st["phase"] = w.phase = "speaking"
     rects = w._rects()
-    assert "micbtn" in rects and rects["micbtn"].right() < rects["tuck"].left()
-    assert rects["settings"].right() < rects["micbtn"].left()  # nothing on top of each other
-    assert w._notch_chips()[1] <= rects["settings"].left()
+    assert w._primary()[0] == "reply" and "micbtn" in rects and rects["micbtn"].right() < rects["tuck"].left()
+    assert w._notch_chips()[1] <= rects["micbtn"].left()
+    assert not w._mic_button("primary")  # holding Skip doesn't mute
     w._activate("micbtn")
-    assert posted == [("/mic", {"mode": "on"})] and w.st["mic_off"]
-    assert "back on" in w._tooltip_text("micbtn")
+    assert posted[-1] == ("/mic", {"mode": "off"})
+    w.st["phase"] = w.phase = "idle"
+    w.st["mic_off"] = True
     w.expanded = False
     w.tuck()
     assert w._peek_color() == QColor(widget.MIC_OFF) and w._peek_still() and not w._glow_moving()
-    w._activate("micbtn")
-    assert posted[-1] == ("/mic", {"mode": "off"})
+    # Do not disturb with the mic on: the main button is the way back, as before.
+    w2 = _widget({"phase": "muted", "output": "silent", "threads": [], "mic_off": False})
+    assert w2._primary()[0] == "undnd"

@@ -186,6 +186,7 @@ ICONS = {
     "settings": "\ue713",
     "micoff": "\uec54",
 }
+MIC_HOLD = 600  # ms: holding the notch's mic this long turns every mic off instead of talking
 MIC_OFF = "#F87171"  # the mic off for every app: its button, and the tucked notch's line
 
 if sys.platform != "win32":
@@ -2688,6 +2689,7 @@ class VoiceWidget(QWidget):
         self.banner.on_reply = self.open_reply
         self.banner.on_close = self._banner_closed
         self._tucked: tuple | None = None  # tucked away by hand: what was showing then (news brings it back)
+        self._press_seq = 0  # each press: a hold timer only acts on the press that started it
         self._tuck_hover = False  # the mouse that clicked "tuck" is still over it: don't hold it down
         self._retuck = False  # news brought a tucked notch down: it goes back up once that news is over
         self._banner_seen: int | None = None
@@ -3181,10 +3183,48 @@ class VoiceWidget(QWidget):
             return ("stop", ICONS["stop"], tr("Cancel ({key})", key=_hotkey_label(hk.get('stop', ''))))
         if self.phase == "transcribing":
             return None
+        mic = self._mic_toggle()
+        if mic:
+            return mic  # off: the one mic in the row is red, and a click turns it back on
         if self._output() == "silent":
             back = tr("Chimes") if self.st.get("dnd_from") == "chime" else tr("Voice")
             return ("undnd", ICONS["bell"], tr("Do not disturb is on: click to go back to {mode}", mode=back))
-        return ("reply", ICONS["mic"], tr("Talk now ({key})", key=_hotkey_label(hk.get('reply', ''))))
+        talk = _hotkey_label(hk.get('reply', ''))
+        if "mic_off" in self.st:
+            return ("reply", ICONS["mic"], tr("Talk now ({key}). Hold (or right-click) to turn your microphone off "
+                                              "for every app, a call included ({mic})", key=talk,
+                                              mic=_hotkey_label(hk.get("mic_off", ""))))
+        return ("reply", ICONS["mic"], tr("Talk now ({key})", key=talk))
+
+    def _mic_toggle(self) -> tuple[str, str, str] | None:
+        """The mic off for every app: the notch's one mic turns red, and a click turns it back on. On, the same
+        button talks; holding it (or a right-click) turns the mic off (`_mic_held`)."""
+        if not self.island or not self.st.get("mic_off"):
+            return None
+        hk = _hotkey_label(self.hotkeys.get("mic_off", ""))
+        return ("mictoggle", ICONS["micoff"],
+                tr("Your microphone is off for every app: click to turn it back on ({key})", key=hk))
+
+    def _mic_button(self, key: str | None) -> bool:
+        """Is this the mic that holds (or right-clicks) to turn every mic off: the main button while it's Talk now
+        or the red mic, or the red mic beside Skip / Stop."""
+        if "mic_off" not in self.st or key not in ("primary", "micbtn"):
+            return False
+        prim = self._primary()
+        return key == "micbtn" or bool(prim and prim[0] in ("reply", "mictoggle") and self.phase in ("idle", "muted"))
+
+    def toggle_mic(self) -> None:
+        off = not self.st.get("mic_off")
+        self.st["mic_off"] = off  # at once: the next status confirms it
+        self._painted_still = False
+        self._kick()
+        _post("/mic", {"mode": "on" if off else "off"})
+
+    def _mic_held(self, seq: int) -> None:
+        """Still pressing the mic after MIC_HOLD ms: every mic off (or back on), and the release won't talk."""
+        if seq == self._press_seq and self.pressed in ("primary", "micbtn") and not self._dragged:
+            self.pressed = None
+            self.toggle_mic()
 
     def _tiles(self) -> list[tuple[str, str, str, str, bool]]:
         """(id, icon, label, hotkey, active): what isn't about one thread (each thread has its own talk, type,
@@ -3287,9 +3327,11 @@ class VoiceWidget(QWidget):
                 - (28 if self._mic_shown() else 0))
 
     def _mic_shown(self) -> bool:
-        """The mic button (every microphone off for every app, or back on) sits in the notch row while the service
-        runs: a mic without a mute button gets one always in sight."""
-        return self.island and self.phase != "offline" and "mic_off" in self.st
+        """While the voice or the mic is live the main button is Skip or Stop: a mic that's off keeps its red button
+        beside it, so it's never out of sight (at rest the main button is that mic)."""
+        prim = self._primary()
+        return (self.island and self.phase != "offline" and bool(self.st.get("mic_off"))
+                and not (prim and prim[0] == "mictoggle"))
 
     def _gear_shown(self) -> bool:
         """⚙ (the Settings sheet) sits in the notch row while the panel is open."""
@@ -3993,7 +4035,8 @@ class VoiceWidget(QWidget):
             ht = self.hover_t.get(key, 0.0)
             base = 16 if key == "primary" or key == "settings" and self.settings else 0
             p.setPen(Qt.NoPen)
-            if key == "micbtn" and self.st.get("mic_off"):  # off: a red disc, seen at a glance
+            red_mic = key == "micbtn" or key == "primary" and prim and prim[0] == "mictoggle"
+            if red_mic and self.st.get("mic_off"):  # off: a red disc, seen at a glance
                 red = QColor(MIC_OFF)
                 red.setAlpha(int(200 + 55 * ht))
                 p.setBrush(red)
@@ -4732,8 +4775,11 @@ class VoiceWidget(QWidget):
         self._win_from = self.pos()
         self._dragged = False
         self.pressed = self._hit(e.position())
+        self._press_seq += 1
         if self.pressed == "hold":
             _post("/ptt", {"action": "start"})
+        elif self._mic_button(self.pressed):
+            QTimer.singleShot(MIC_HOLD, lambda seq=self._press_seq: self._mic_held(seq))
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.RightButton:
@@ -4776,11 +4822,8 @@ class VoiceWidget(QWidget):
             self._save_position()
         elif key == "tuck":
             self.tuck()
-        elif key == "micbtn":
-            off = not self.st.get("mic_off")
-            self.st["mic_off"] = off  # at once: the next status confirms it
-            self._painted_still = False
-            _post("/mic", {"mode": "on" if off else "off"})
+        elif key in ("micbtn", "mictoggle"):
+            self.toggle_mic()
         elif key == "history":
             self.open_history()
         elif key == "newthread":
@@ -5299,6 +5342,9 @@ class VoiceWidget(QWidget):
             p.drawRoundedRect(QRectF(bar.x(), bar.y(), bar.width() * max(0.0, min(1.0, progress)), 2), 1, 1)
 
     def contextMenuEvent(self, e):
+        if self._mic_button(self._hit(QPointF(e.pos()))):  # a right-click on the mic: every mic off, or back on
+            self.toggle_mic()
+            return
         menu = QMenu(self)
         menu.setStyleSheet(_qss(MENU_STYLE))
         geo = (self.screen() or QApplication.primaryScreen()).availableGeometry()

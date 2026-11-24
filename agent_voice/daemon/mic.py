@@ -45,13 +45,12 @@ class MicMixin:
             self.cancel_listen()
             self._wake_cancel.set()
             self._barge_cancel.set()
-            count = mm.off()
+            log.info("mic off (%d mics)", mm.off())
             _beep(330)
         else:
             mm.on()
-            count = 0
             _beep(880)
-        log.info("mic off=%s (%d mics)", off, count)
+            log.info("mic on")
 
     def _mic_watch(self) -> None:
         """Keeps the mic off across restarts, and every mic off while it is (new ones too)."""

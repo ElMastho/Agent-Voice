@@ -678,4 +678,5 @@ FR = {
     "Microphone off (every app)": "Micro coupé (toutes les applis)",
     " · mic off": " · micro coupé",
     "Mic off: no app hears you": "Micro coupé : aucune appli ne vous entend",
+    "Talk now ({key}). Hold (or right-click) to turn your microphone off for every app, a call included ({mic})": "Parler maintenant ({key}). Maintenez (ou clic droit) pour couper votre micro pour toutes les applis, appel compris ({mic})",
 }
